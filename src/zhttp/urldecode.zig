@@ -20,15 +20,17 @@ fn fromHex(c: u8) ?u8 {
 
 /// Percent-decodes into the same buffer, returning the decoded slice.
 /// Does not move bytes outside `buf`; compaction happens only within the slice.
-pub fn decodeInPlace(buf: []u8, mode: DecodeMode) DecodeError![]u8 {
+pub fn decodeInPlace(buf: []u8, comptime mode: DecodeMode) DecodeError![]u8 {
     var r: usize = 0;
     var w: usize = 0;
     while (r < buf.len) : (r += 1) {
         const c = buf[r];
-        if (mode == .query_value and c == '+') {
-            buf[w] = ' ';
-            w += 1;
-            continue;
+        if (comptime mode == .query_value) {
+            if (c == '+') {
+                buf[w] = ' ';
+                w += 1;
+                continue;
+            }
         }
         if (c == '%') {
             if (r + 2 >= buf.len) return error.InvalidPercentEncoding;

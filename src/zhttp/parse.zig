@@ -1,0 +1,551 @@
+const std = @import("std");
+
+const Allocator = std.mem.Allocator;
+
+pub const CaptureError = error{
+    MissingRequired,
+    BadValue,
+};
+
+fn ParserValueType(comptime P: type) type {
+    if (!@hasDecl(P, "get")) @compileError(@typeName(P) ++ " missing `get`");
+    const fn_info = @typeInfo(@TypeOf(P.get));
+    if (fn_info != .@"fn") @compileError(@typeName(P) ++ ".get is not a function");
+    return fn_info.@"fn".return_type orelse @compileError(@typeName(P) ++ ".get must return a value");
+}
+
+fn isStructType(comptime T: type) bool {
+    return switch (@typeInfo(T)) {
+        .@"struct" => true,
+        else => false,
+    };
+}
+
+pub fn structFields(comptime T: type) []const std.builtin.Type.StructField {
+    const info = @typeInfo(T);
+    return switch (info) {
+        .@"struct" => info.@"struct".fields,
+        else => @compileError("expected struct type, got " ++ @typeName(T)),
+    };
+}
+
+pub fn emptyStruct(comptime T: type) T {
+    var out: T = undefined;
+    inline for (structFields(T)) |f| {
+        const P = f.type;
+        if (!@hasDecl(P, "empty")) @compileError(@typeName(P) ++ " missing `pub const empty`");
+        @field(out, f.name) = P.empty;
+    }
+    return out;
+}
+
+pub fn destroyStruct(value: anytype, allocator: Allocator) void {
+    const T = @TypeOf(value.*);
+    inline for (structFields(T)) |f| {
+        const P = f.type;
+        if (!@hasDecl(P, "destroy")) @compileError(@typeName(P) ++ " missing `destroy`");
+        @field(value.*, f.name).destroy(allocator);
+    }
+}
+
+pub fn doneParsingStruct(value: anytype, present: []const bool) !void {
+    const T = @TypeOf(value.*);
+    const fields = structFields(T);
+    std.debug.assert(present.len == fields.len);
+    inline for (fields, 0..) |f, i| {
+        const P = f.type;
+        if (!@hasDecl(P, "doneParsing")) @compileError(@typeName(P) ++ " missing `doneParsing`");
+        try @field(value.*, f.name).doneParsing(present[i]);
+    }
+}
+
+fn asciiLower(c: u8) u8 {
+    return if (c >= 'A' and c <= 'Z') c + 32 else c;
+}
+
+fn asciiEqIgnoreCase(a: []const u8, b: []const u8) bool {
+    if (a.len != b.len) return false;
+    for (a, b) |ac, bc| {
+        if (asciiLower(ac) != asciiLower(bc)) return false;
+    }
+    return true;
+}
+
+fn fnv1a64(bytes: []const u8) u64 {
+    var h: u64 = 0xcbf29ce484222325;
+    for (bytes) |b| {
+        h ^= b;
+        h *%= 0x100000001b3;
+    }
+    return h;
+}
+
+fn fnv1a64Lower(bytes: []const u8) u64 {
+    var h: u64 = 0xcbf29ce484222325;
+    for (bytes) |b| {
+        h ^= asciiLower(b);
+        h *%= 0x100000001b3;
+    }
+    return h;
+}
+
+fn fnv1a64HeaderKey(bytes: []const u8) u64 {
+    var h: u64 = 0xcbf29ce484222325;
+    for (bytes) |b| {
+        const c: u8 = if (b == '_') '-' else asciiLower(b);
+        h ^= c;
+        h *%= 0x100000001b3;
+    }
+    return h;
+}
+
+fn asciiEqHeaderKeyIgnoreCase(input: []const u8, field_name: []const u8) bool {
+    if (input.len != field_name.len) return false;
+    for (input, field_name) |ic, fc0| {
+        const fc: u8 = if (fc0 == '_') '-' else fc0;
+        if (asciiLower(ic) != asciiLower(fc)) return false;
+    }
+    return true;
+}
+
+fn headerFieldNamesClash(a: []const u8, b: []const u8) bool {
+    if (a.len != b.len) return false;
+    for (a, b) |ac0, bc0| {
+        const ac: u8 = if (ac0 == '_') '-' else ac0;
+        const bc: u8 = if (bc0 == '_') '-' else bc0;
+        if (asciiLower(ac) != asciiLower(bc)) return false;
+    }
+    return true;
+}
+
+fn nextPow2AtLeast(comptime n: usize, comptime min: usize) usize {
+    var x: usize = if (n < min) min else n;
+    x -= 1;
+    x |= x >> 1;
+    x |= x >> 2;
+    x |= x >> 4;
+    x |= x >> 8;
+    x |= x >> 16;
+    if (@sizeOf(usize) == 8) x |= x >> 32;
+    return x + 1;
+}
+
+pub const LookupKind = enum { header, query };
+
+pub fn Lookup(comptime T: type, comptime kind: LookupKind) type {
+    if (!isStructType(T)) @compileError("expected struct type, got " ++ @typeName(T));
+    const fields = structFields(T);
+
+    const keys = comptime blk: {
+        var out: [fields.len][]const u8 = undefined;
+        for (fields, 0..) |f, i| {
+            out[i] = f.name;
+        }
+        break :blk out;
+    };
+
+    // Detect duplicate keys at comptime (after normalization).
+    comptime {
+        for (keys, 0..) |ka, i| {
+            for (keys, 0..) |kb, j| {
+                if (i >= j) continue;
+                const clash = switch (kind) {
+                    .header => headerFieldNamesClash(ka, kb),
+                    .query => std.mem.eql(u8, ka, kb),
+                };
+                if (clash) {
+                    @compileError("duplicate capture key: " ++ ka);
+                }
+            }
+        }
+    }
+
+    const hashes = comptime blk: {
+        var out: [fields.len]u64 = undefined;
+        for (keys, 0..) |k, i| {
+            out[i] = switch (kind) {
+                .header => fnv1a64HeaderKey(k),
+                .query => fnv1a64(k),
+            };
+        }
+        break :blk out;
+    };
+
+    const table_cap: usize = nextPow2AtLeast(fields.len * 2 + 1, 8);
+
+    const table = comptime blk: {
+        var t: [table_cap]u16 = .{0} ** table_cap;
+        const mask: u64 = table_cap - 1;
+        for (hashes, 0..) |h, idx| {
+            var pos: u64 = h & mask;
+            while (true) : (pos = (pos + 1) & mask) {
+                if (t[@intCast(pos)] == 0) {
+                    t[@intCast(pos)] = @intCast(idx + 1);
+                    break;
+                }
+            }
+        }
+        break :blk t;
+    };
+
+    return struct {
+        pub const count: usize = fields.len;
+        pub const key_list: [fields.len][]const u8 = keys;
+        pub const hash_list: [fields.len]u64 = hashes;
+        pub const table_list: [table_cap]u16 = table;
+
+        pub fn find(name: []const u8) ?u16 {
+            if (count == 0) return null;
+            const h = switch (kind) {
+                .header => fnv1a64HeaderKey(name),
+                .query => fnv1a64(name),
+            };
+            const mask: u64 = table_cap - 1;
+            var pos: u64 = h & mask;
+            var probe: usize = 0;
+            while (probe < table_cap) : (probe += 1) {
+                const slot = table_list[@intCast(pos)];
+                if (slot == 0) return null;
+                const idx: u16 = slot - 1;
+                if (hash_list[idx] == h) {
+                    const k = key_list[idx];
+                    const ok = switch (kind) {
+                        .header => asciiEqHeaderKeyIgnoreCase(name, k),
+                        .query => std.mem.eql(u8, name, k),
+                    };
+                    if (ok) return idx;
+                }
+                pos = (pos + 1) & mask;
+            }
+            return null;
+        }
+    };
+}
+
+fn structFieldIndex(comptime T: type, comptime name: []const u8) usize {
+    inline for (structFields(T), 0..) |f, i| {
+        if (std.mem.eql(u8, f.name, name)) return i;
+    }
+    @compileError("no field named '" ++ name ++ "' in " ++ @typeName(T));
+}
+
+pub fn mergeStructs(comptime A: type, comptime B: type) type {
+    if (!isStructType(A) or !isStructType(B)) @compileError("mergeStructs expects struct types");
+    const fa = structFields(A);
+    const fb = structFields(B);
+
+    comptime var names_count: usize = fa.len;
+    for (fb) |f| {
+        comptime var exists = false;
+        for (fa) |g| {
+            if (std.mem.eql(u8, f.name, g.name)) {
+                exists = true;
+                if (f.type != g.type) {
+                    @compileError("conflicting capture field '" ++ f.name ++ "'");
+                }
+            }
+        }
+        if (!exists) names_count += 1;
+    }
+
+    const names = comptime blk: {
+        var n: [names_count][]const u8 = undefined;
+        var i: usize = 0;
+        for (fa) |f| {
+            n[i] = f.name;
+            i += 1;
+        }
+        for (fb) |f| {
+            var exists = false;
+            for (fa) |g| {
+                if (std.mem.eql(u8, f.name, g.name)) {
+                    exists = true;
+                    break;
+                }
+            }
+            if (!exists) {
+                n[i] = f.name;
+                i += 1;
+            }
+        }
+        break :blk n;
+    };
+
+    const types = comptime blk: {
+        var t: [names_count]type = undefined;
+        for (names, 0..) |name, i| {
+            if (@hasField(A, name)) {
+                t[i] = @FieldType(A, name);
+            } else {
+                t[i] = @FieldType(B, name);
+            }
+        }
+        break :blk t;
+    };
+
+    const attrs = comptime blk: {
+        var a: [names_count]std.builtin.Type.StructField.Attributes = undefined;
+        for (&a) |*x| x.* = .{};
+        break :blk a;
+    };
+
+    return @Struct(.auto, null, names[0..], &types, &attrs);
+}
+
+pub fn mergeStructsMany(comptime types_tuple: anytype) type {
+    const Ti = @TypeOf(types_tuple);
+    const info = @typeInfo(Ti);
+    if (info != .@"struct" or !info.@"struct".is_tuple) @compileError("mergeStructsMany expects tuple of types");
+    const fields = info.@"struct".fields;
+    if (fields.len == 0) return struct {};
+    comptime var acc: type = @field(types_tuple, fields[0].name);
+    for (fields[1..]) |f| {
+        const T = @field(types_tuple, f.name);
+        acc = mergeStructs(acc, T);
+    }
+    return acc;
+}
+
+/// Parse and store a required UTF-8-ish string (no validation).
+pub const String = struct {
+    owned: ?[]u8 = null,
+    value: []const u8 = "",
+
+    pub const empty: String = .{};
+
+    pub fn parse(self: *String, allocator: Allocator, raw: []const u8) !void {
+        self.destroy(allocator);
+        const dup = try allocator.dupe(u8, raw);
+        self.owned = dup;
+        self.value = dup;
+    }
+
+    pub fn doneParsing(self: *String, was_present: bool) !void {
+        if (!was_present) return error.MissingRequired;
+        _ = self;
+    }
+
+    pub fn get(self: *const String) []const u8 {
+        return self.value;
+    }
+
+    pub fn destroy(self: *String, allocator: Allocator) void {
+        if (self.owned) |buf| allocator.free(buf);
+        self.owned = null;
+        self.value = "";
+    }
+};
+
+pub fn Optional(comptime P: type) type {
+    return struct {
+        present: bool = false,
+        inner: P = P.empty,
+
+        pub const empty: @This() = .{};
+
+        pub fn parse(self: *@This(), allocator: Allocator, raw: []const u8) !void {
+            self.present = true;
+            try self.inner.parse(allocator, raw);
+        }
+
+        pub fn doneParsing(self: *@This(), was_present: bool) !void {
+            self.present = was_present;
+            if (was_present) {
+                try self.inner.doneParsing(true);
+            } else {
+                self.inner = P.empty;
+            }
+        }
+
+        pub fn get(self: *const @This()) ?ParserValueType(P) {
+            if (!self.present) return null;
+            return self.inner.get();
+        }
+
+        pub fn destroy(self: *@This(), allocator: Allocator) void {
+            self.inner.destroy(allocator);
+            self.present = false;
+        }
+    };
+}
+
+pub fn Int(comptime T: type) type {
+    return struct {
+        value: T = 0,
+        pub const empty: @This() = .{};
+
+        pub fn parse(self: *@This(), allocator: Allocator, raw: []const u8) !void {
+            _ = allocator;
+            self.value = std.fmt.parseInt(T, raw, 10) catch return error.BadValue;
+        }
+
+        pub fn doneParsing(self: *@This(), was_present: bool) !void {
+            if (!was_present) return error.MissingRequired;
+            _ = self;
+        }
+
+        pub fn get(self: *const @This()) T {
+            return self.value;
+        }
+
+        pub fn destroy(self: *@This(), allocator: Allocator) void {
+            _ = allocator;
+            self.* = .{};
+        }
+    };
+}
+
+pub fn Float(comptime T: type) type {
+    return struct {
+        value: T = 0,
+        pub const empty: @This() = .{};
+
+        pub fn parse(self: *@This(), allocator: Allocator, raw: []const u8) !void {
+            _ = allocator;
+            self.value = std.fmt.parseFloat(T, raw) catch return error.BadValue;
+        }
+
+        pub fn doneParsing(self: *@This(), was_present: bool) !void {
+            if (!was_present) return error.MissingRequired;
+            _ = self;
+        }
+
+        pub fn get(self: *const @This()) T {
+            return self.value;
+        }
+
+        pub fn destroy(self: *@This(), allocator: Allocator) void {
+            _ = allocator;
+            self.* = .{};
+        }
+    };
+}
+
+pub const Bool = struct {
+    value: bool = false,
+    pub const empty: Bool = .{};
+
+    pub fn parse(self: *Bool, allocator: Allocator, raw: []const u8) !void {
+        _ = allocator;
+        if (raw.len == 1) {
+            switch (raw[0]) {
+                '1' => {
+                    self.value = true;
+                    return;
+                },
+                '0' => {
+                    self.value = false;
+                    return;
+                },
+                else => {},
+            }
+        }
+        if (std.ascii.eqlIgnoreCase(raw, "true")) {
+            self.value = true;
+            return;
+        }
+        if (std.ascii.eqlIgnoreCase(raw, "false")) {
+            self.value = false;
+            return;
+        }
+        return error.BadValue;
+    }
+
+    pub fn doneParsing(self: *Bool, was_present: bool) !void {
+        if (!was_present) return error.MissingRequired;
+        _ = self;
+    }
+
+    pub fn get(self: *const Bool) bool {
+        return self.value;
+    }
+
+    pub fn destroy(self: *Bool, allocator: Allocator) void {
+        _ = allocator;
+        self.* = .{};
+    }
+};
+
+pub fn Enum(comptime E: type) type {
+    return struct {
+        value: E = @field(E, @typeInfo(E).@"enum".fields[0].name),
+        pub const empty: @This() = .{};
+
+        pub fn parse(self: *@This(), allocator: Allocator, raw: []const u8) !void {
+            _ = allocator;
+            self.value = std.meta.stringToEnum(E, raw) orelse return error.BadValue;
+        }
+
+        pub fn doneParsing(self: *@This(), was_present: bool) !void {
+            if (!was_present) return error.MissingRequired;
+            _ = self;
+        }
+
+        pub fn get(self: *const @This()) E {
+            return self.value;
+        }
+
+        pub fn destroy(self: *@This(), allocator: Allocator) void {
+            _ = allocator;
+            self.* = .{};
+        }
+    };
+}
+
+pub fn SliceOf(comptime P: type) type {
+    const Elem = ParserValueType(P);
+    const elem_info = @typeInfo(Elem);
+    const elem_is_u8_slice = elem_info == .pointer and elem_info.pointer.size == .slice and elem_info.pointer.child == u8;
+    const elem_is_opt_u8_slice = elem_info == .optional and
+        @typeInfo(elem_info.optional.child) == .pointer and
+        @typeInfo(elem_info.optional.child).pointer.size == .slice and
+        @typeInfo(elem_info.optional.child).pointer.child == u8;
+    return struct {
+        list: std.ArrayListUnmanaged(Elem) = .empty,
+        pub const empty: @This() = .{};
+
+        pub fn parse(self: *@This(), allocator: Allocator, raw: []const u8) !void {
+            comptime {
+                if ((elem_is_u8_slice or elem_is_opt_u8_slice) and P != String and P != Optional(String)) {
+                    @compileError("SliceOf(" ++ @typeName(P) ++ ") returns a slice type; this is not supported (use SliceOf(String) or a custom parser)");
+                }
+            }
+
+            if (comptime elem_is_u8_slice) {
+                const dup = try allocator.dupe(u8, raw);
+                try self.list.append(allocator, dup);
+                return;
+            }
+            if (comptime elem_is_opt_u8_slice) {
+                const dup = try allocator.dupe(u8, raw);
+                try self.list.append(allocator, @as(Elem, dup));
+                return;
+            }
+
+            var tmp: P = P.empty;
+            defer tmp.destroy(allocator);
+            try tmp.parse(allocator, raw);
+            try tmp.doneParsing(true);
+            try self.list.append(allocator, tmp.get());
+        }
+
+        pub fn doneParsing(self: *@This(), was_present: bool) !void {
+            _ = self;
+            _ = was_present;
+        }
+
+        pub fn get(self: *const @This()) []const Elem {
+            return self.list.items;
+        }
+
+        pub fn destroy(self: *@This(), allocator: Allocator) void {
+            if (comptime elem_is_u8_slice) {
+                for (self.list.items) |v| allocator.free(@constCast(v));
+            } else if (comptime elem_is_opt_u8_slice) {
+                for (self.list.items) |v| if (v) |s| allocator.free(@constCast(s));
+            }
+            self.list.deinit(allocator);
+            self.* = .{};
+        }
+    };
+}

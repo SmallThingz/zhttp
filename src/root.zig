@@ -11,7 +11,7 @@
 //! Supported route option fields (all optional):
 //! - `.headers: type`    Header capture schema (header keys match case-insensitively; `_` matches `-`)
 //! - `.query: type`      Query capture schema (keys match exactly)
-//! - `.params: type`     Path param capture schema (for `{name}` segments)
+//! - `.params: type`     Path param capture schema (for `{name}` segments; defaults to strings)
 //! - `.middlewares: tuple` Per-route middleware types
 //!
 //! ## Handler signatures
@@ -23,7 +23,6 @@
 //! - `fn(ctx: *Context, req: anytype) !zhttp.Res`
 pub const parse = @import("parse.zig");
 
-pub const Method = @import("server.zig").Method;
 pub const Res = @import("response.zig").Res;
 pub const Server = @import("server.zig").Server;
 

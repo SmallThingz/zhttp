@@ -3,8 +3,8 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 
-const Method = @import("server.zig").Method;
 const Res = @import("response.zig").Res;
+const method = @import("method.zig");
 const parse = @import("parse.zig");
 const request = @import("request.zig");
 const urldecode = @import("urldecode.zig");
@@ -53,17 +53,17 @@ fn validateRouteOptions(comptime opts: anytype) void {
 
 pub fn route(
     /// HTTP method enum literal, e.g. `.GET`.
-    comptime method: @EnumLiteral(),
+    comptime method_lit: @EnumLiteral(),
     comptime pattern: []const u8,
     /// Handler function (see supported signatures in `zhttp/root.zig` docs).
     comptime handler: anytype,
     /// Route options (see `zhttp/root.zig` docs). Use `.{}` for none.
     comptime opts: anytype,
-) @TypeOf(.{ .method = @as(Method, method), .pattern = pattern, .options = opts, .handler = handler }) {
+) @TypeOf(.{ .method_index = @as(u8, method.indexFromLiteral(method_lit)), .pattern = pattern, .options = opts, .handler = handler }) {
     validateRouteOptions(opts);
-    const m: Method = @as(Method, method);
+    const mi: u8 = comptime method.indexFromLiteral(method_lit);
     return .{
-        .method = m,
+        .method_index = mi,
         .pattern = pattern,
         .options = opts,
         .handler = handler,
@@ -278,6 +278,17 @@ fn compilePattern(comptime pattern: []const u8) Pattern {
         break :blk names;
     };
 
+    comptime {
+        // Duplicate param names would make typed `.params` ambiguous.
+        for (names_arr, 0..) |a, i| {
+            for (names_arr[0..i]) |b| {
+                if (std.mem.eql(u8, a, b)) {
+                    @compileError("duplicate route param name '" ++ a ++ "'");
+                }
+            }
+        }
+    }
+
     return .{ .segments = seg_arr[0..], .param_names = names_arr[0..], .glob = glob };
 }
 
@@ -391,21 +402,6 @@ fn ExactMap(comptime entries: anytype, comptime n: usize) type {
     };
 }
 
-fn methodIndex(m: Method) u8 {
-    return switch (m) {
-        .GET => 0,
-        .POST => 1,
-        .PUT => 2,
-        .DELETE => 3,
-        .PATCH => 4,
-        .HEAD => 5,
-        .OPTIONS => 6,
-        .TRACE => 7,
-        .CONNECT => 8,
-        .OTHER => 9,
-    };
-}
-
 pub fn Compiled(comptime Context: type, comptime routes: anytype, comptime global_middlewares: anytype) type {
     const RoutesType = @TypeOf(routes);
     const routes_info = @typeInfo(RoutesType);
@@ -419,8 +415,8 @@ pub fn Compiled(comptime Context: type, comptime routes: anytype, comptime globa
 
         for (route_fields, 0..) |f, i| {
             const rd = @field(routes, f.name);
-            if (!@hasField(@TypeOf(rd), "method") or !@hasField(@TypeOf(rd), "pattern") or !@hasField(@TypeOf(rd), "handler")) {
-                @compileError("route() value must have fields: method, pattern, handler");
+            if (!@hasField(@TypeOf(rd), "method_index") or !@hasField(@TypeOf(rd), "pattern") or !@hasField(@TypeOf(rd), "handler")) {
+                @compileError("route() value must have fields: method_index, pattern, handler");
             }
             patterns[i] = compilePattern(rd.pattern);
             if (patterns[i].param_names.len > max_params) max_params = patterns[i].param_names.len;
@@ -431,18 +427,19 @@ pub fn Compiled(comptime Context: type, comptime routes: anytype, comptime globa
 
     // Build per-method exact maps and pattern lists.
     const tables = comptime blk: {
-        var exact_storage: [10][route_count]ExactEntry = undefined;
-        var exact_counts: [10]usize = .{0} ** 10;
-        var pattern_storage: [10][route_count]u16 = undefined;
-        var pattern_counts: [10]usize = .{0} ** 10;
+        var exact_storage: [method.max_methods][route_count]ExactEntry = undefined;
+        var exact_counts: [method.max_methods]usize = .{0} ** method.max_methods;
+        var pattern_storage: [method.max_methods][route_count]u16 = undefined;
+        var pattern_counts: [method.max_methods]usize = .{0} ** method.max_methods;
 
-        for (0..10) |mi| {
+        for (0..method.max_methods) |mi_usize| {
+            const mi: u8 = @intCast(mi_usize);
             var exact_n: usize = 0;
             var pat_n: usize = 0;
 
             for (route_fields, 0..) |f, i| {
                 const rd = @field(routes, f.name);
-                if (methodIndex(rd.method) != mi) continue;
+                if (rd.method_index != mi) continue;
                 const p = compiled.patterns[i];
                 if (p.param_names.len == 0 and !p.glob and std.mem.indexOfScalar(u8, rd.pattern, '{') == null and std.mem.indexOfScalar(u8, rd.pattern, '*') == null) {
                     exact_storage[mi][exact_n] = .{ .path = rd.pattern, .hash = fnv1a64(rd.pattern), .route_index = @intCast(i) };
@@ -465,10 +462,10 @@ pub fn Compiled(comptime Context: type, comptime routes: anytype, comptime globa
         };
     };
 
-    const exact_storage: [10][route_count]ExactEntry = tables.exact_storage;
-    const exact_counts: [10]usize = tables.exact_counts;
-    const pattern_storage: [10][route_count]u16 = tables.pattern_storage;
-    const pattern_counts: [10]usize = tables.pattern_counts;
+    const exact_storage: [method.max_methods][route_count]ExactEntry = tables.exact_storage;
+    const exact_counts: [method.max_methods]usize = tables.exact_counts;
+    const pattern_storage: [method.max_methods][route_count]u16 = tables.pattern_storage;
+    const pattern_counts: [method.max_methods]usize = tables.pattern_counts;
 
     const ExactMaps = struct {
         const m0 = ExactMap(exact_storage[0], exact_counts[0]);
@@ -578,10 +575,8 @@ pub fn Compiled(comptime Context: type, comptime routes: anytype, comptime globa
         pub const RouteCount: usize = route_count;
         pub const MaxParams: usize = compiled.max_params;
 
-        pub fn match(method: Method, path: []u8, params_out: [][]u8) ?u16 {
-            const mi = methodIndex(method);
+        fn matchMethod(comptime mi: u8, path: []u8, params_out: [][]u8) ?u16 {
             if (ExactMaps.find(mi, path)) |rid| return rid;
-
             const n = pattern_counts[mi];
             var j: usize = 0;
             while (j < n) : (j += 1) {
@@ -589,17 +584,30 @@ pub fn Compiled(comptime Context: type, comptime routes: anytype, comptime globa
                 const p = compiled.patterns[rid];
                 if (matchPattern(p, path, params_out)) return rid;
             }
+            return null;
+        }
+
+        pub fn match(method_index_in: u8, path: []u8, params_out: [][]u8) ?u16 {
+            const mi: u8 = if (@as(usize, method_index_in) < method.max_methods) method_index_in else method.idx_other;
+
+            const rid = switch (mi) {
+                method.idx_get => matchMethod(method.idx_get, path, params_out),
+                method.idx_post => matchMethod(method.idx_post, path, params_out),
+                method.idx_put => matchMethod(method.idx_put, path, params_out),
+                method.idx_delete => matchMethod(method.idx_delete, path, params_out),
+                method.idx_patch => matchMethod(method.idx_patch, path, params_out),
+                method.idx_head => matchMethod(method.idx_head, path, params_out),
+                method.idx_options => matchMethod(method.idx_options, path, params_out),
+                method.idx_trace => matchMethod(method.idx_trace, path, params_out),
+                method.idx_connect => matchMethod(method.idx_connect, path, params_out),
+                method.idx_other => matchMethod(method.idx_other, path, params_out),
+                else => matchMethod(method.idx_other, path, params_out),
+            };
+            if (rid) |r| return r;
 
             // HEAD fallback to GET.
-            if (method == .HEAD) {
-                if (ExactMaps.find(0, path)) |rid| return rid;
-                const n2 = pattern_counts[0];
-                var k: usize = 0;
-                while (k < n2) : (k += 1) {
-                    const rid = pattern_storage[0][k];
-                    const p = compiled.patterns[rid];
-                    if (matchPattern(p, path, params_out)) return rid;
-                }
+            if (mi == method.idx_head) {
+                return matchMethod(method.idx_get, path, params_out);
             }
             return null;
         }
@@ -647,11 +655,12 @@ pub fn Compiled(comptime Context: type, comptime routes: anytype, comptime globa
                         }
                     }
 
-                    var reqv = ReqT.init(allocator, line, params_local[0..]);
+                    var reqv = ReqT.init(allocator, line);
                     reqv.reader = r;
                     defer reqv.deinit(allocator);
                     errdefer reqv.discardUnreadBody() catch {};
-                    try reqv.parseParams(allocator);
+                    const params_local_slice: []const []u8 = if (p.param_names.len != 0) params_local[0..] else &.{};
+                    try reqv.parseParams(allocator, params_local_slice);
                     try reqv.parseQuery(allocator);
                     try reqv.parseHeaders(allocator, r, max_header_bytes);
 
@@ -684,13 +693,13 @@ pub fn Compiled(comptime Context: type, comptime routes: anytype, comptime globa
                     try request.discardHeadersOnly(r, max_header_bytes);
 
                     const empty_line: request.RequestLine = .{
-                        .method = line.method,
+                        .method_index = line.method_index,
                         .version = line.version,
                         .path = line.path[0..0],
                         .query = line.query[0..0],
                     };
                     const ReqT = request.Request(struct {}, struct {}, &.{});
-                    var reqv = ReqT.init(allocator, empty_line, &.{});
+                    var reqv = ReqT.init(allocator, empty_line);
                     defer reqv.deinit(allocator);
                     reqv.reader = r;
 
@@ -730,13 +739,13 @@ test "router: exact + param + glob" {
     var params: [S.MaxParams][]u8 = undefined;
 
     var p0 = "/a".*;
-    try std.testing.expectEqual(@as(?u16, 0), S.match(.GET, p0[0..], params[0..S.MaxParams]));
+    try std.testing.expectEqual(@as(?u16, 0), S.match(method.indexFromLiteral(.GET), p0[0..], params[0..S.MaxParams]));
 
     var p1 = "/u/123".*;
-    try std.testing.expectEqual(@as(?u16, 1), S.match(.GET, p1[0..], params[0..S.MaxParams]));
+    try std.testing.expectEqual(@as(?u16, 1), S.match(method.indexFromLiteral(.GET), p1[0..], params[0..S.MaxParams]));
 
     var p2 = "/g/anything/here".*;
-    try std.testing.expectEqual(@as(?u16, 2), S.match(.GET, p2[0..], params[0..S.MaxParams]));
+    try std.testing.expectEqual(@as(?u16, 2), S.match(method.indexFromLiteral(.GET), p2[0..], params[0..S.MaxParams]));
 }
 
 test "router: trailing slash does not match exact literal" {
@@ -750,7 +759,7 @@ test "router: trailing slash does not match exact literal" {
 
     var params: [S.MaxParams][]u8 = undefined;
     var p1 = "/a/".*;
-    try std.testing.expectEqual(@as(?u16, null), S.match(.GET, p1[0..], params[0..S.MaxParams]));
+    try std.testing.expectEqual(@as(?u16, null), S.match(method.indexFromLiteral(.GET), p1[0..], params[0..S.MaxParams]));
 }
 
 test "router: HEAD falls back to GET handler" {
@@ -764,7 +773,7 @@ test "router: HEAD falls back to GET handler" {
 
     var params: [S.MaxParams][]u8 = undefined;
     var p = "/x".*;
-    try std.testing.expectEqual(@as(?u16, 0), S.match(.HEAD, p[0..], params[0..S.MaxParams]));
+    try std.testing.expectEqual(@as(?u16, 0), S.match(method.indexFromLiteral(.HEAD), p[0..], params[0..S.MaxParams]));
 }
 
 test "middleware Needs: supports 'headers: type = ...' form" {
@@ -819,14 +828,14 @@ test "dispatch: pipelined request discards unread content-length body" {
     );
 
     const line1 = try request.parseRequestLineBorrowed(&r, 8 * 1024);
-    const rid1 = S.match(line1.method, line1.path, params[0..S.MaxParams]).?;
+    const rid1 = S.match(line1.method_index, line1.path, params[0..S.MaxParams]).?;
     const dr1 = try S.dispatch({}, a, &r, line1, rid1, params[0..S.MaxParams], 8 * 1024);
     try std.testing.expectEqual(@as(u16, 200), dr1.res.status);
     try std.testing.expectEqualStrings("p", dr1.res.body);
     try std.testing.expect(dr1.keep_alive);
 
     const line2 = try request.parseRequestLineBorrowed(&r, 8 * 1024);
-    const rid2 = S.match(line2.method, line2.path, params[0..S.MaxParams]).?;
+    const rid2 = S.match(line2.method_index, line2.path, params[0..S.MaxParams]).?;
     const dr2 = try S.dispatch({}, a, &r, line2, rid2, params[0..S.MaxParams], 8 * 1024);
     try std.testing.expectEqual(@as(u16, 200), dr2.res.status);
     try std.testing.expectEqualStrings("g", dr2.res.body);
@@ -861,14 +870,14 @@ test "dispatch: pipelined request discards unread chunked body" {
     );
 
     const line1 = try request.parseRequestLineBorrowed(&r, 8 * 1024);
-    const rid1 = S.match(line1.method, line1.path, params[0..S.MaxParams]).?;
+    const rid1 = S.match(line1.method_index, line1.path, params[0..S.MaxParams]).?;
     const dr1 = try S.dispatch({}, a, &r, line1, rid1, params[0..S.MaxParams], 8 * 1024);
     try std.testing.expectEqual(@as(u16, 200), dr1.res.status);
     try std.testing.expectEqualStrings("p", dr1.res.body);
     try std.testing.expect(dr1.keep_alive);
 
     const line2 = try request.parseRequestLineBorrowed(&r, 8 * 1024);
-    const rid2 = S.match(line2.method, line2.path, params[0..S.MaxParams]).?;
+    const rid2 = S.match(line2.method_index, line2.path, params[0..S.MaxParams]).?;
     const dr2 = try S.dispatch({}, a, &r, line2, rid2, params[0..S.MaxParams], 8 * 1024);
     try std.testing.expectEqual(@as(u16, 200), dr2.res.status);
     try std.testing.expectEqualStrings("g", dr2.res.body);
@@ -878,7 +887,7 @@ test "dispatch: path param percent-decodes and dispatchFast falls back" {
     const S = Compiled(void, .{
         get("/u/{id}", struct {
             fn h(_: void, req: anytype) !Res {
-                return Res.text(200, req.param(.id));
+                return Res.text(200, req.paramValue(.id));
             }
         }.h, .{}),
     }, .{});
@@ -894,7 +903,7 @@ test "dispatch: path param percent-decodes and dispatchFast falls back" {
     );
 
     const line = try request.parseRequestLineBorrowed(&r, 8 * 1024);
-    const rid = S.match(line.method, line.path, params[0..S.MaxParams]).?;
+    const rid = S.match(line.method_index, line.path, params[0..S.MaxParams]).?;
     const dr = try S.dispatch({}, a, &r, line, rid, params[0..S.MaxParams], 8 * 1024);
     try std.testing.expectEqualStrings("a/b", dr.res.body);
 
@@ -903,7 +912,7 @@ test "dispatch: path param percent-decodes and dispatchFast falls back" {
             "\r\n",
     );
     const line2 = try request.parseRequestLineBorrowed(&r2, 8 * 1024);
-    const rid2 = S.match(line2.method, line2.path, params[0..S.MaxParams]).?;
+    const rid2 = S.match(line2.method_index, line2.path, params[0..S.MaxParams]).?;
     const dr2 = try S.dispatchFast({}, a, &r2, line2, rid2, params[0..S.MaxParams], 8 * 1024);
     try std.testing.expectEqualStrings("a/b", dr2.res.body);
 }
@@ -932,7 +941,7 @@ test "dispatchFast: routes with header needs fall back to full dispatch" {
     );
 
     const line = try request.parseRequestLineBorrowed(&r, 8 * 1024);
-    const rid = S.match(line.method, line.path, params[0..S.MaxParams]).?;
+    const rid = S.match(line.method_index, line.path, params[0..S.MaxParams]).?;
     const dr = try S.dispatchFast({}, a, &r, line, rid, params[0..S.MaxParams], 8 * 1024);
     try std.testing.expectEqualStrings("ok", dr.res.body);
 }
@@ -958,7 +967,7 @@ test "dispatch: typed path params via opts.params" {
     var params: [S.MaxParams][]u8 = undefined;
     var r = Io.Reader.fixed("GET /u/42 HTTP/1.1\r\n\r\n");
     const line = try request.parseRequestLineBorrowed(&r, 8 * 1024);
-    const rid = S.match(line.method, line.path, params[0..S.MaxParams]).?;
+    const rid = S.match(line.method_index, line.path, params[0..S.MaxParams]).?;
     const dr = try S.dispatch({}, a, &r, line, rid, params[0..S.MaxParams], 8 * 1024);
     try std.testing.expectEqualStrings("42", dr.res.body);
 }
@@ -983,7 +992,7 @@ test "dispatch: typed path params bad value errors" {
     var params: [S.MaxParams][]u8 = undefined;
     var r = Io.Reader.fixed("GET /u/nope HTTP/1.1\r\n\r\n");
     const line = try request.parseRequestLineBorrowed(&r, 8 * 1024);
-    const rid = S.match(line.method, line.path, params[0..S.MaxParams]).?;
+    const rid = S.match(line.method_index, line.path, params[0..S.MaxParams]).?;
     try std.testing.expectError(error.BadValue, S.dispatch({}, a, &r, line, rid, params[0..S.MaxParams], 8 * 1024));
 }
 
@@ -1053,7 +1062,7 @@ test "dispatch: path params allocate once" {
     var params: [S.MaxParams][]u8 = undefined;
     var r = Io.Reader.fixed("GET /u/1/2/3/4 HTTP/1.1\r\n\r\n");
     const line = try request.parseRequestLineBorrowed(&r, 8 * 1024);
-    const rid = S.match(line.method, line.path, params[0..S.MaxParams]).?;
+    const rid = S.match(line.method_index, line.path, params[0..S.MaxParams]).?;
 
     var backing: [1024]u8 = undefined;
     var fba = std.heap.FixedBufferAllocator.init(&backing);
@@ -1095,7 +1104,7 @@ test "dispatch: middleware Needs.params works" {
     var params: [S.MaxParams][]u8 = undefined;
     var r = Io.Reader.fixed("GET /u/7 HTTP/1.1\r\n\r\n");
     const line = try request.parseRequestLineBorrowed(&r, 8 * 1024);
-    const rid = S.match(line.method, line.path, params[0..S.MaxParams]).?;
+    const rid = S.match(line.method_index, line.path, params[0..S.MaxParams]).?;
     const dr = try S.dispatch({}, a, &r, line, rid, params[0..S.MaxParams], 8 * 1024);
     try std.testing.expectEqualStrings("7", dr.res.body);
 }
@@ -1116,7 +1125,7 @@ test "handler: zero-arg handler supported" {
     var params: [S.MaxParams][]u8 = undefined;
     var r = Io.Reader.fixed("GET /a HTTP/1.1\r\n\r\n");
     const line = try request.parseRequestLineBorrowed(&r, 8 * 1024);
-    const rid = S.match(line.method, line.path, params[0..S.MaxParams]).?;
+    const rid = S.match(line.method_index, line.path, params[0..S.MaxParams]).?;
     const dr = try S.dispatch({}, a, &r, line, rid, params[0..S.MaxParams], 8 * 1024);
     try std.testing.expectEqualStrings("x", dr.res.body);
 }
@@ -1139,7 +1148,7 @@ test "handler: ctx-only handler supported" {
     var params: [S.MaxParams][]u8 = undefined;
     var r = Io.Reader.fixed("GET /a HTTP/1.1\r\n\r\n");
     const line = try request.parseRequestLineBorrowed(&r, 8 * 1024);
-    const rid = S.match(line.method, line.path, params[0..S.MaxParams]).?;
+    const rid = S.match(line.method_index, line.path, params[0..S.MaxParams]).?;
     const dr = try S.dispatch(&ctx, a, &r, line, rid, params[0..S.MaxParams], 8 * 1024);
     try std.testing.expectEqualStrings("ok", dr.res.body);
 }
@@ -1160,6 +1169,6 @@ test "dispatch: invalid path percent-encoding rejected" {
     var params: [S.MaxParams][]u8 = undefined;
     var r = Io.Reader.fixed("GET /u/%ZZ HTTP/1.1\r\n\r\n");
     const line = try request.parseRequestLineBorrowed(&r, 8 * 1024);
-    const rid = S.match(line.method, line.path, params[0..S.MaxParams]).?;
+    const rid = S.match(line.method_index, line.path, params[0..S.MaxParams]).?;
     try std.testing.expectError(error.InvalidPercentEncoding, S.dispatch({}, a, &r, line, rid, params[0..S.MaxParams], 8 * 1024));
 }

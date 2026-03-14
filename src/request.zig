@@ -3,7 +3,7 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 
-const Method = @import("server.zig").Method;
+const method = @import("method.zig");
 const parse = @import("parse.zig");
 const urldecode = @import("urldecode.zig");
 
@@ -64,29 +64,6 @@ fn trimSpaces(s: []u8) []u8 {
     return s[a..b];
 }
 
-fn parseMethod(m: []const u8) Method {
-    return if (std.mem.eql(u8, m, "GET"))
-        .GET
-    else if (std.mem.eql(u8, m, "POST"))
-        .POST
-    else if (std.mem.eql(u8, m, "PUT"))
-        .PUT
-    else if (std.mem.eql(u8, m, "DELETE"))
-        .DELETE
-    else if (std.mem.eql(u8, m, "PATCH"))
-        .PATCH
-    else if (std.mem.eql(u8, m, "HEAD"))
-        .HEAD
-    else if (std.mem.eql(u8, m, "OPTIONS"))
-        .OPTIONS
-    else if (std.mem.eql(u8, m, "TRACE"))
-        .TRACE
-    else if (std.mem.eql(u8, m, "CONNECT"))
-        .CONNECT
-    else
-        .OTHER;
-}
-
 fn parseVersion(v: []const u8) ?Version {
     if (std.mem.eql(u8, v, "HTTP/1.1")) return .http11;
     if (std.mem.eql(u8, v, "HTTP/1.0")) return .http10;
@@ -94,7 +71,7 @@ fn parseVersion(v: []const u8) ?Version {
 }
 
 pub const RequestLine = struct {
-    method: Method,
+    method_index: u8,
     version: Version,
     path: []u8,
     query: []u8,
@@ -117,7 +94,7 @@ pub fn parseRequestLineBorrowed(r: *Io.Reader, max_line_len: usize) ParseLineErr
     const target = line[sp1 + 1 .. sp2];
     const version_str = line[sp2 + 1 ..];
 
-    const method = parseMethod(method_str);
+    const method_index = method.indexFromToken(method_str);
     const version = parseVersion(version_str) orelse return error.BadRequest;
 
     if (target.len == 0 or target[0] != '/') return error.BadRequest;
@@ -127,7 +104,7 @@ pub fn parseRequestLineBorrowed(r: *Io.Reader, max_line_len: usize) ParseLineErr
     const query_raw: []u8 = if (qpos) |p| target[p + 1 ..] else target[0..0];
 
     return .{
-        .method = method,
+        .method_index = method_index,
         .version = version,
         .path = path_raw,
         .query = query_raw,
@@ -140,7 +117,7 @@ pub fn parseRequestLine(r: *Io.Reader, allocator: Allocator, max_line_len: usize
     const query = try allocator.dupe(u8, borrowed.query);
 
     return .{
-        .method = borrowed.method,
+        .method_index = borrowed.method_index,
         .version = borrowed.version,
         .path = path,
         .query = query,
@@ -168,21 +145,36 @@ fn containsTokenIgnoreCase(value: []const u8, comptime token: []const u8) bool {
 pub fn RequestP(comptime Headers: type, comptime Query: type, comptime Params: type, comptime param_names: []const []const u8) type {
     const HeaderLookup = parse.Lookup(Headers, .header);
     const QueryLookup = parse.Lookup(Query, .query);
-    const ParamFields = comptime parse.structFields(Params);
 
-    const ParamIndices = comptime blk: {
-        var out: [ParamFields.len]u8 = undefined;
-        for (ParamFields, 0..) |f, fi| {
-            var found: ?u8 = null;
-            for (param_names, 0..) |pn, pi| {
-                if (std.mem.eql(u8, pn, f.name)) found = @intCast(pi);
+    const ParamsEffective = comptime blk: {
+        const Provided = Params;
+        const ProvidedFields = parse.structFields(Provided);
+
+        // Disallow declaring params not present in the route pattern.
+        for (ProvidedFields) |f| {
+            var found = false;
+            for (param_names) |pn| {
+                if (std.mem.eql(u8, pn, f.name)) {
+                    found = true;
+                    break;
+                }
             }
-            if (found == null) {
+            if (!found) {
                 @compileError("params field '" ++ f.name ++ "' is not present in the route pattern");
             }
-            out[fi] = found.?;
         }
-        break :blk out;
+
+        // Default any undeclared route params to strings.
+        if (param_names.len == 0) break :blk Provided;
+        var names: [param_names.len][]const u8 = undefined;
+        var types: [param_names.len]type = undefined;
+        var attrs: [param_names.len]std.builtin.Type.StructField.Attributes = undefined;
+        for (&attrs) |*a| a.* = .{};
+        for (param_names, 0..) |pn, i| {
+            names[i] = pn;
+            types[i] = if (@hasField(Provided, pn)) @FieldType(Provided, pn) else parse.PathString;
+        }
+        break :blk @Struct(.auto, null, names[0..], &types, &attrs);
     };
 
     return struct {
@@ -192,26 +184,20 @@ pub fn RequestP(comptime Headers: type, comptime Query: type, comptime Params: t
         reader: ?*Io.Reader = null,
         headers: Headers = parse.emptyStruct(Headers),
         query: Query = parse.emptyStruct(Query),
-        params_parsed: Params = parse.emptyStruct(Params),
-        params_raw: [param_names.len][]u8 = undefined,
+        params_parsed: ParamsEffective = parse.emptyStruct(ParamsEffective),
 
         const Self = @This();
 
         pub const ParamNames: []const []const u8 = param_names;
 
-        pub fn init(arena: Allocator, line: RequestLine, params_in: []const []u8) Self {
-            std.debug.assert(params_in.len == param_names.len);
-            var self: Self = .{
+        pub fn init(arena: Allocator, line: RequestLine) Self {
+            return .{
                 .arena = arena,
                 .base = .{
                     .version = line.version,
                 },
                 .query_raw = line.query,
             };
-            inline for (param_names, 0..) |_, i| {
-                self.params_raw[i] = params_in[i];
-            }
-            return self;
         }
 
         pub fn allocator(self: *const Self) Allocator {
@@ -234,22 +220,9 @@ pub fn RequestP(comptime Headers: type, comptime Query: type, comptime Params: t
             return @field(self.query, @tagName(field)).get();
         }
 
-        /// Get a raw path param slice by name, e.g. `req.param(.id)`.
-        /// This is always a string slice (percent-decoded).
-        pub fn param(self: *const Self, comptime name: @EnumLiteral()) []const u8 {
-            const idx = comptime blk: {
-                const wanted = @tagName(name);
-                var idx: ?usize = null;
-                for (param_names, 0..) |pn, i| {
-                    if (std.mem.eql(u8, pn, wanted)) idx = i;
-                }
-                if (idx == null) @compileError("no param '" ++ wanted ++ "' for this route");
-                break :blk idx;
-            };
-            return self.params_raw[idx.?];
-        }
-
-        /// Get a typed path param value from `.params` captures (or middleware `Needs.params`),
+        /// Get a typed path param value (declared in route `opts.params` or middleware `Needs.params`).
+        /// If a route param is not declared, it defaults to a string.
+        ///
         /// e.g. `req.paramValue(.id)`.
         pub fn paramValue(self: *const Self, comptime field: @EnumLiteral()) @TypeOf(@field(self.params_parsed, @tagName(field)).get()) {
             return @field(self.params_parsed, @tagName(field)).get();
@@ -259,15 +232,15 @@ pub fn RequestP(comptime Headers: type, comptime Query: type, comptime Params: t
             return self.base.version == .http11 and !self.base.connection_close;
         }
 
-        pub fn parseParams(self: *Self, a: Allocator) !void {
-            if (ParamFields.len == 0) return;
+        pub fn parseParams(self: *Self, a: Allocator, params_in: []const []u8) !void {
+            if (param_names.len == 0) return;
+            std.debug.assert(params_in.len == param_names.len);
             // reset captures each request
-            self.params_parsed = parse.emptyStruct(Params);
-            inline for (ParamFields, 0..) |f, fi| {
-                const raw = self.params_raw[ParamIndices[fi]];
-                try @field(self.params_parsed, f.name).parse(a, raw);
+            self.params_parsed = parse.emptyStruct(ParamsEffective);
+            inline for (param_names, 0..) |pn, i| {
+                try @field(self.params_parsed, pn).parse(a, params_in[i]);
             }
-            try parse.doneParsingStruct(&self.params_parsed, &([_]bool{true} ** ParamFields.len));
+            try parse.doneParsingStruct(&self.params_parsed, &([_]bool{true} ** param_names.len));
         }
 
         pub fn parseQuery(self: *Self, a: Allocator) !void {
@@ -511,8 +484,8 @@ test "query capture + decode" {
     const query = try gpa.dupe(u8, "name=alice%20bob&page=10");
     defer gpa.free(query);
 
-    const line: RequestLine = .{ .method = .GET, .version = .http11, .path = path, .query = query };
-    var reqv = ReqT.init(gpa, line, &.{});
+    const line: RequestLine = .{ .method_index = method.idx_get, .version = .http11, .path = path, .query = query };
+    var reqv = ReqT.init(gpa, line);
     defer reqv.deinit(gpa);
 
     try reqv.parseQuery(gpa);
@@ -537,11 +510,11 @@ test "header capture required vs optional" {
     defer gpa.free(path);
     const query = try gpa.dupe(u8, "");
     defer gpa.free(query);
-    const line: RequestLine = .{ .method = .GET, .version = .http11, .path = path, .query = query };
+    const line: RequestLine = .{ .method_index = method.idx_get, .version = .http11, .path = path, .query = query };
 
     {
         var r = Io.Reader.fixed("User-Agent: x\r\n\r\n");
-        var reqv = ReqOpt.init(gpa, line, &.{});
+        var reqv = ReqOpt.init(gpa, line);
         defer reqv.deinit(gpa);
         try reqv.parseHeaders(gpa, &r, 1024);
         try std.testing.expect(reqv.header(.host) == null);
@@ -549,7 +522,7 @@ test "header capture required vs optional" {
 
     {
         var r = Io.Reader.fixed("User-Agent: x\r\n\r\n");
-        var reqv = ReqReq.init(gpa, line, &.{});
+        var reqv = ReqReq.init(gpa, line);
         defer reqv.deinit(gpa);
         try std.testing.expectError(error.MissingRequired, reqv.parseHeaders(gpa, &r, 1024));
     }
@@ -562,10 +535,10 @@ test "chunked bodyAll" {
     defer gpa.free(path);
     const query = try gpa.dupe(u8, "");
     defer gpa.free(query);
-    const line: RequestLine = .{ .method = .POST, .version = .http11, .path = path, .query = query };
+    const line: RequestLine = .{ .method_index = method.idx_post, .version = .http11, .path = path, .query = query };
 
     var r = Io.Reader.fixed("Transfer-Encoding: chunked\r\n\r\n4\r\nWiki\r\n0\r\n\r\n");
-    var reqv = ReqT.init(gpa, line, &.{});
+    var reqv = ReqT.init(gpa, line);
     defer reqv.deinit(gpa);
     try reqv.parseHeaders(gpa, &r, 1024);
     const body = try reqv.bodyAll(32);
@@ -576,7 +549,7 @@ test "chunked bodyAll" {
 test "request line: borrowed parses path/query" {
     var r = Io.Reader.fixed("GET /a/b?x=1 HTTP/1.1\r\n");
     const line = try parseRequestLineBorrowed(&r, 8 * 1024);
-    try std.testing.expectEqual(Method.GET, line.method);
+    try std.testing.expectEqual(method.idx_get, line.method_index);
     try std.testing.expectEqual(Version.http11, line.version);
     try std.testing.expectEqualStrings("/a/b", line.path);
     try std.testing.expectEqualStrings("x=1", line.query);
@@ -606,7 +579,7 @@ test "discardHeadersOnly: consumes until blank line" {
     var r = Io.Reader.fixed("A: 1\r\nB: 2\r\n\r\nGET / HTTP/1.1\r\n");
     try discardHeadersOnly(&r, 8 * 1024);
     const line = try parseRequestLineBorrowed(&r, 8 * 1024);
-    try std.testing.expectEqual(Method.GET, line.method);
+    try std.testing.expectEqual(method.idx_get, line.method_index);
     try std.testing.expectEqualStrings("/", line.path);
 }
 
@@ -629,8 +602,8 @@ test "headers: underscore field matches dash header" {
     defer gpa.free(path);
     const query = try gpa.dupe(u8, "");
     defer gpa.free(query);
-    const line: RequestLine = .{ .method = .GET, .version = .http11, .path = path, .query = query };
-    var reqv = ReqT.init(gpa, line, &.{});
+    const line: RequestLine = .{ .method_index = method.idx_get, .version = .http11, .path = path, .query = query };
+    var reqv = ReqT.init(gpa, line);
     defer reqv.deinit(gpa);
 
     var r = Io.Reader.fixed("Content-Type: text/plain\r\n\r\n");
@@ -646,9 +619,9 @@ test "headers: too large rejected" {
     defer gpa.free(path);
     const query = try gpa.dupe(u8, "");
     defer gpa.free(query);
-    const line: RequestLine = .{ .method = .GET, .version = .http11, .path = path, .query = query };
+    const line: RequestLine = .{ .method_index = method.idx_get, .version = .http11, .path = path, .query = query };
 
-    var reqv = ReqT.init(gpa, line, &.{});
+    var reqv = ReqT.init(gpa, line);
     defer reqv.deinit(gpa);
 
     var r = Io.Reader.fixed("X: 1234567890\r\n\r\n");
@@ -663,9 +636,9 @@ test "headers: duplicate Content-Length mismatch rejected" {
     defer gpa.free(path);
     const query = try gpa.dupe(u8, "");
     defer gpa.free(query);
-    const line: RequestLine = .{ .method = .POST, .version = .http11, .path = path, .query = query };
+    const line: RequestLine = .{ .method_index = method.idx_post, .version = .http11, .path = path, .query = query };
 
-    var reqv = ReqT.init(gpa, line, &.{});
+    var reqv = ReqT.init(gpa, line);
     defer reqv.deinit(gpa);
 
     var r = Io.Reader.fixed("Content-Length: 1\r\nContent-Length: 2\r\n\r\n");
@@ -680,9 +653,9 @@ test "headers: chunked + Content-Length rejected" {
     defer gpa.free(path);
     const query = try gpa.dupe(u8, "");
     defer gpa.free(query);
-    const line: RequestLine = .{ .method = .POST, .version = .http11, .path = path, .query = query };
+    const line: RequestLine = .{ .method_index = method.idx_post, .version = .http11, .path = path, .query = query };
 
-    var reqv = ReqT.init(gpa, line, &.{});
+    var reqv = ReqT.init(gpa, line);
     defer reqv.deinit(gpa);
 
     var r = Io.Reader.fixed("Transfer-Encoding: chunked\r\nContent-Length: 0\r\n\r\n");
@@ -697,9 +670,9 @@ test "headers: Connection close disables keep-alive" {
     defer gpa.free(path);
     const query = try gpa.dupe(u8, "");
     defer gpa.free(query);
-    const line: RequestLine = .{ .method = .GET, .version = .http11, .path = path, .query = query };
+    const line: RequestLine = .{ .method_index = method.idx_get, .version = .http11, .path = path, .query = query };
 
-    var reqv = ReqT.init(gpa, line, &.{});
+    var reqv = ReqT.init(gpa, line);
     defer reqv.deinit(gpa);
 
     var r = Io.Reader.fixed("Connection: keep-alive, Close\r\n\r\n");
@@ -718,9 +691,9 @@ test "headers: trim value + case-insensitive match" {
     defer gpa.free(path);
     const query = try gpa.dupe(u8, "");
     defer gpa.free(query);
-    const line: RequestLine = .{ .method = .GET, .version = .http11, .path = path, .query = query };
+    const line: RequestLine = .{ .method_index = method.idx_get, .version = .http11, .path = path, .query = query };
 
-    var reqv = ReqT.init(gpa, line, &.{});
+    var reqv = ReqT.init(gpa, line);
     defer reqv.deinit(gpa);
 
     var r = Io.Reader.fixed("hOsT:\t  example.com \t\r\n\r\n");
@@ -735,9 +708,9 @@ test "headers: transfer-encoding list sets chunked" {
     defer gpa.free(path);
     const query = try gpa.dupe(u8, "");
     defer gpa.free(query);
-    const line: RequestLine = .{ .method = .POST, .version = .http11, .path = path, .query = query };
+    const line: RequestLine = .{ .method_index = method.idx_post, .version = .http11, .path = path, .query = query };
 
-    var reqv = ReqT.init(gpa, line, &.{});
+    var reqv = ReqT.init(gpa, line);
     defer reqv.deinit(gpa);
     var r = Io.Reader.fixed("Transfer-Encoding: gzip, chunked\r\n\r\n");
     try reqv.parseHeaders(gpa, &r, 8 * 1024);
@@ -751,9 +724,9 @@ test "chunked: invalid chunk CRLF rejected" {
     defer gpa.free(path);
     const query = try gpa.dupe(u8, "");
     defer gpa.free(query);
-    const line: RequestLine = .{ .method = .POST, .version = .http11, .path = path, .query = query };
+    const line: RequestLine = .{ .method_index = method.idx_post, .version = .http11, .path = path, .query = query };
 
-    var reqv = ReqT.init(gpa, line, &.{});
+    var reqv = ReqT.init(gpa, line);
     defer reqv.deinit(gpa);
     var r = Io.Reader.fixed("Transfer-Encoding: chunked\r\n\r\n1\r\naXY0\r\n\r\n");
     try reqv.parseHeaders(gpa, &r, 8 * 1024);
@@ -767,9 +740,9 @@ test "chunked: truncated body yields EndOfStream" {
     defer gpa.free(path);
     const query = try gpa.dupe(u8, "");
     defer gpa.free(query);
-    const line: RequestLine = .{ .method = .POST, .version = .http11, .path = path, .query = query };
+    const line: RequestLine = .{ .method_index = method.idx_post, .version = .http11, .path = path, .query = query };
 
-    var reqv = ReqT.init(gpa, line, &.{});
+    var reqv = ReqT.init(gpa, line);
     defer reqv.deinit(gpa);
     var r = Io.Reader.fixed("Transfer-Encoding: chunked\r\n\r\n1\r\na");
     try reqv.parseHeaders(gpa, &r, 8 * 1024);
@@ -784,8 +757,8 @@ test "bodyAll: content-length" {
     defer gpa.free(path);
     const query = try gpa.dupe(u8, "");
     defer gpa.free(query);
-    const line: RequestLine = .{ .method = .POST, .version = .http11, .path = path, .query = query };
-    var reqv = ReqT.init(gpa, line, &.{});
+    const line: RequestLine = .{ .method_index = method.idx_post, .version = .http11, .path = path, .query = query };
+    var reqv = ReqT.init(gpa, line);
     defer reqv.deinit(gpa);
 
     var r = Io.Reader.fixed("Content-Length: 5\r\n\r\nhello");
@@ -802,9 +775,9 @@ test "bodyAll: max_bytes enforced" {
     defer gpa.free(path);
     const query = try gpa.dupe(u8, "");
     defer gpa.free(query);
-    const line: RequestLine = .{ .method = .POST, .version = .http11, .path = path, .query = query };
+    const line: RequestLine = .{ .method_index = method.idx_post, .version = .http11, .path = path, .query = query };
 
-    var reqv = ReqT.init(gpa, line, &.{});
+    var reqv = ReqT.init(gpa, line);
     defer reqv.deinit(gpa);
     var r = Io.Reader.fixed("Content-Length: 5\r\n\r\nhello");
     try reqv.parseHeaders(gpa, &r, 8 * 1024);
@@ -825,8 +798,8 @@ test "query: required missing rejected" {
     defer gpa.free(path);
     const query = try gpa.dupe(u8, "");
     defer gpa.free(query);
-    const line: RequestLine = .{ .method = .GET, .version = .http11, .path = path, .query = query };
-    var reqv = ReqT.init(gpa, line, &.{});
+    const line: RequestLine = .{ .method_index = method.idx_get, .version = .http11, .path = path, .query = query };
+    var reqv = ReqT.init(gpa, line);
     defer reqv.deinit(gpa);
 
     try std.testing.expectError(error.MissingRequired, reqv.parseQuery(gpa));
@@ -846,8 +819,8 @@ test "query: invalid percent-encoding rejected" {
     defer gpa.free(path);
     const query = try gpa.dupe(u8, "name=%ZZ");
     defer gpa.free(query);
-    const line: RequestLine = .{ .method = .GET, .version = .http11, .path = path, .query = query };
-    var reqv = ReqT.init(gpa, line, &.{});
+    const line: RequestLine = .{ .method_index = method.idx_get, .version = .http11, .path = path, .query = query };
+    var reqv = ReqT.init(gpa, line);
     defer reqv.deinit(gpa);
 
     try std.testing.expectError(error.InvalidPercentEncoding, reqv.parseQuery(gpa));
@@ -872,8 +845,8 @@ test "query: repeated keys last-wins, SliceOf collects" {
     {
         const query = try gpa.dupe(u8, "k=one&k=two");
         defer gpa.free(query);
-        const line: RequestLine = .{ .method = .GET, .version = .http11, .path = path, .query = query };
-        var reqv = ReqLast.init(gpa, line, &.{});
+        const line: RequestLine = .{ .method_index = method.idx_get, .version = .http11, .path = path, .query = query };
+        var reqv = ReqLast.init(gpa, line);
         defer reqv.deinit(gpa);
         try reqv.parseQuery(gpa);
         try std.testing.expectEqualStrings("two", reqv.queryParam(.k).?);
@@ -882,8 +855,8 @@ test "query: repeated keys last-wins, SliceOf collects" {
     {
         const query = try gpa.dupe(u8, "k=one&k=two");
         defer gpa.free(query);
-        const line: RequestLine = .{ .method = .GET, .version = .http11, .path = path, .query = query };
-        var reqv = ReqList.init(gpa, line, &.{});
+        const line: RequestLine = .{ .method_index = method.idx_get, .version = .http11, .path = path, .query = query };
+        var reqv = ReqList.init(gpa, line);
         defer reqv.deinit(gpa);
         try reqv.parseQuery(gpa);
         const items = reqv.queryParam(.k);
@@ -900,9 +873,9 @@ test "parseHeaders: rejects header line without colon" {
     defer gpa.free(path);
     const query = try gpa.dupe(u8, "");
     defer gpa.free(query);
-    const line: RequestLine = .{ .method = .GET, .version = .http11, .path = path, .query = query };
+    const line: RequestLine = .{ .method_index = method.idx_get, .version = .http11, .path = path, .query = query };
 
-    var reqv = ReqT.init(gpa, line, &.{});
+    var reqv = ReqT.init(gpa, line);
     defer reqv.deinit(gpa);
     var r = Io.Reader.fixed("NoColon\r\n\r\n");
     try std.testing.expectError(error.BadRequest, reqv.parseHeaders(gpa, &r, 8 * 1024));
@@ -915,9 +888,9 @@ test "parseHeaders: repeated Content-Length same value accepted" {
     defer gpa.free(path);
     const query = try gpa.dupe(u8, "");
     defer gpa.free(query);
-    const line: RequestLine = .{ .method = .POST, .version = .http11, .path = path, .query = query };
+    const line: RequestLine = .{ .method_index = method.idx_post, .version = .http11, .path = path, .query = query };
 
-    var reqv = ReqT.init(gpa, line, &.{});
+    var reqv = ReqT.init(gpa, line);
     defer reqv.deinit(gpa);
     var r = Io.Reader.fixed("Content-Length: 2\r\nContent-Length: 2\r\n\r\nok");
     try reqv.parseHeaders(gpa, &r, 8 * 1024);
@@ -933,9 +906,9 @@ test "parseHeaders: invalid Content-Length rejected" {
     defer gpa.free(path);
     const query = try gpa.dupe(u8, "");
     defer gpa.free(query);
-    const line: RequestLine = .{ .method = .POST, .version = .http11, .path = path, .query = query };
+    const line: RequestLine = .{ .method_index = method.idx_post, .version = .http11, .path = path, .query = query };
 
-    var reqv = ReqT.init(gpa, line, &.{});
+    var reqv = ReqT.init(gpa, line);
     defer reqv.deinit(gpa);
     var r = Io.Reader.fixed("Content-Length: nope\r\n\r\n");
     try std.testing.expectError(error.BadRequest, reqv.parseHeaders(gpa, &r, 8 * 1024));
@@ -948,10 +921,10 @@ test "chunked bodyAll: chunk extensions supported" {
     defer gpa.free(path);
     const query = try gpa.dupe(u8, "");
     defer gpa.free(query);
-    const line: RequestLine = .{ .method = .POST, .version = .http11, .path = path, .query = query };
+    const line: RequestLine = .{ .method_index = method.idx_post, .version = .http11, .path = path, .query = query };
 
     var r = Io.Reader.fixed("Transfer-Encoding: chunked\r\n\r\n4;ext=1\r\nWiki\r\n0\r\n\r\n");
-    var reqv = ReqT.init(gpa, line, &.{});
+    var reqv = ReqT.init(gpa, line);
     defer reqv.deinit(gpa);
     try reqv.parseHeaders(gpa, &r, 1024);
     const body = try reqv.bodyAll(32);
@@ -966,9 +939,9 @@ test "bodyAll/discardUnreadBody: require parseHeaders first" {
     defer gpa.free(path);
     const query = try gpa.dupe(u8, "");
     defer gpa.free(query);
-    const line: RequestLine = .{ .method = .POST, .version = .http11, .path = path, .query = query };
+    const line: RequestLine = .{ .method_index = method.idx_post, .version = .http11, .path = path, .query = query };
 
-    var reqv = ReqT.init(gpa, line, &.{});
+    var reqv = ReqT.init(gpa, line);
     defer reqv.deinit(gpa);
     try std.testing.expectError(error.BadRequest, reqv.bodyAll(1));
     try std.testing.expectError(error.BadRequest, reqv.discardUnreadBody());
@@ -985,9 +958,9 @@ test "parseQuery: key without '=' treated as empty value" {
     defer gpa.free(path);
     const query = try gpa.dupe(u8, "k");
     defer gpa.free(query);
-    const line: RequestLine = .{ .method = .GET, .version = .http11, .path = path, .query = query };
+    const line: RequestLine = .{ .method_index = method.idx_get, .version = .http11, .path = path, .query = query };
 
-    var reqv = ReqT.init(gpa, line, &.{});
+    var reqv = ReqT.init(gpa, line);
     defer reqv.deinit(gpa);
     try reqv.parseQuery(gpa);
     try std.testing.expectEqualStrings("", reqv.queryParam(.k).?);

@@ -36,6 +36,7 @@ Routes are registered at comptime via helpers like:
   - `_` in field names matches `-` in incoming header names
 - `.query: type` query string captures (keys match exactly)
 - `.params: type` path param captures (for `{name}` segments)
+  - if omitted, path params default to strings
 - `.middlewares: tuple` per-route middleware types
 
 Each capture schema is a `struct` where field values are parsers from `zhttp.parse`:
@@ -63,8 +64,7 @@ Capture accessors take enum literals (`@EnumLiteral()`), e.g. `.host`, `.page`, 
 
 - `req.header(.host)` -> typed header capture value
 - `req.queryParam(.page)` -> typed query capture value
-- `req.param(.id)` -> raw (percent-decoded) param slice
-- `req.paramValue(.id)` -> typed param capture value (requires `.params` capture or middleware `Needs.params`)
+- `req.paramValue(.id)` -> typed path param capture value (defaults to string if not declared)
 
 ## Middleware API
 

@@ -306,6 +306,32 @@ pub fn mergeStructsMany(comptime types_tuple: anytype) type {
     return acc;
 }
 
+/// Parse and store a required path-param string without allocating.
+///
+/// This is safe for path params because zhttp copies all path params into stable
+/// request-owned storage before parsing captures.
+pub const PathString = struct {
+    value: []const u8 = "",
+
+    pub const empty: PathString = .{};
+
+    pub fn parse(self: *PathString, _: Allocator, raw: []const u8) !void {
+        self.value = raw;
+    }
+
+    pub fn get(self: *const PathString) []const u8 {
+        return self.value;
+    }
+
+    pub fn destroy(self: *PathString, _: Allocator) void {
+        self.* = .{};
+    }
+
+    pub fn doneParsing(_: *PathString, present: bool) !void {
+        if (!present) return error.MissingRequired;
+    }
+};
+
 /// Parse and store a required UTF-8-ish string (no validation).
 pub const String = struct {
     owned: ?[]u8 = null,

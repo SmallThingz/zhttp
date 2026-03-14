@@ -7,19 +7,7 @@ const response = @import("response.zig");
 const request = @import("request.zig");
 const router = @import("router.zig");
 const parse = @import("parse.zig");
-
-pub const Method = enum(u8) {
-    GET,
-    POST,
-    PUT,
-    DELETE,
-    PATCH,
-    HEAD,
-    OPTIONS,
-    TRACE,
-    CONNECT,
-    OTHER,
-};
+const method = @import("method.zig");
 
 pub const Config = struct {
     /// Per-connection read buffer size.
@@ -41,22 +29,6 @@ pub const Config = struct {
 fn configField(comptime cfg: anytype, comptime name: []const u8, default: anytype) @TypeOf(default) {
     if (@hasField(@TypeOf(cfg), name)) return @field(cfg, name);
     return default;
-}
-
-fn methodToken(comptime m: Method) []const u8 {
-    const tokens = comptime [_][]const u8{
-        "GET",
-        "POST",
-        "PUT",
-        "DELETE",
-        "PATCH",
-        "HEAD",
-        "OPTIONS",
-        "TRACE",
-        "CONNECT",
-        "OTHER",
-    };
-    return tokens[@intFromEnum(m)];
 }
 
 fn tupleLen(comptime t: anytype) usize {
@@ -209,7 +181,7 @@ pub fn Server(comptime def: anytype) type {
                 };
 
                 // Route on method + path first (no header parsing yet).
-                const rid = Compiled.match(line.method, line.path, params_buf[0..Compiled.MaxParams]);
+                const rid = Compiled.match(line.method_index, line.path, params_buf[0..Compiled.MaxParams]);
 
                 var res: response.Res = undefined;
                 var keep_alive: bool = false;
@@ -243,7 +215,7 @@ pub fn Server(comptime def: anytype) type {
                     res = dr.res;
                     keep_alive = dr.keep_alive;
                 } else {
-                    var reqv = EmptyReq.init(a, line, &.{});
+                    var reqv = EmptyReq.init(a, line);
                     defer reqv.deinit(a);
                     reqv.parseHeaders(a, &sr.interface, Conf.max_header_bytes) catch |err| {
                         if (err == error.EndOfStream or err == error.ReadFailed) return;
@@ -261,7 +233,7 @@ pub fn Server(comptime def: anytype) type {
                     res = response.Res.text(404, "not found");
                 }
 
-                const send_body = line.method != .HEAD;
+                const send_body = !method.isHead(line.method_index);
                 response.write(&sw.interface, res, keep_alive, send_body) catch {
                     return;
                 };
@@ -278,8 +250,8 @@ pub fn Server(comptime def: anytype) type {
 
             comptime std.debug.assert(route_fields.len == 1);
             const rd0 = @field(Routes, route_fields[0].name);
-            const method = rd0.method;
-            const method_str = comptime methodToken(method);
+            const method_index = rd0.method_index;
+            const method_str = comptime method.tokenFromIndex(method_index);
             const pattern = rd0.pattern;
             const expected_line = comptime method_str ++ " " ++ pattern ++ " HTTP/1.1\r\n";
             const path_start: usize = comptime method_str.len + 1;
@@ -359,12 +331,12 @@ pub fn Server(comptime def: anytype) type {
                     unreachable;
                 } else blk: {
                     const line: request.RequestLine = .{
-                        .method = method,
+                        .method_index = method_index,
                         .version = .http11,
                         .path = linebuf[path_start..path_end],
                         .query = linebuf[0..0],
                     };
-                    var reqv = EmptyReq.init(self.gpa, line, &.{});
+                    var reqv = EmptyReq.init(self.gpa, line);
                     defer reqv.deinit(self.gpa);
                     reqv.reader = &sr.interface;
 
@@ -373,7 +345,7 @@ pub fn Server(comptime def: anytype) type {
                     @compileError("handler must be fn(), fn(req), fn(ctx), or fn(ctx, req)");
                 };
 
-                const send_body = method != .HEAD;
+                const send_body = !method.isHead(method_index);
                 response.write(&sw.interface, res, true, send_body) catch return;
                 sw.interface.flush() catch return;
             }

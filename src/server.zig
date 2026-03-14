@@ -7,7 +7,6 @@ const response = @import("response.zig");
 const request = @import("request.zig");
 const router = @import("router.zig");
 const parse = @import("parse.zig");
-const method = @import("method.zig");
 
 pub const Config = struct {
     /// Per-connection read buffer size.
@@ -57,6 +56,10 @@ fn optsHasNeeds(comptime opts: anytype) bool {
         if (tupleLen(@field(opts, "middlewares")) != 0) return true;
     }
     return false;
+}
+
+fn isHeadMethodToken(m: []const u8) bool {
+    return m.len == 4 and m[0] == 'H' and m[1] == 'E' and m[2] == 'A' and m[3] == 'D';
 }
 
 /// Server definition options (`def`) are provided at comptime.
@@ -181,7 +184,8 @@ pub fn Server(comptime def: anytype) type {
                 };
 
                 // Route on method + path first (no header parsing yet).
-                const rid = Compiled.match(line.method_index, line.path, params_buf[0..Compiled.MaxParams]);
+                const send_body = !isHeadMethodToken(line.method);
+                const rid = Compiled.match(line.method, line.path, params_buf[0..Compiled.MaxParams]);
 
                 var res: response.Res = undefined;
                 var keep_alive: bool = false;
@@ -233,7 +237,6 @@ pub fn Server(comptime def: anytype) type {
                     res = response.Res.text(404, "not found");
                 }
 
-                const send_body = !method.isHead(line.method_index);
                 response.write(&sw.interface, res, keep_alive, send_body) catch {
                     return;
                 };
@@ -250,8 +253,7 @@ pub fn Server(comptime def: anytype) type {
 
             comptime std.debug.assert(route_fields.len == 1);
             const rd0 = @field(Routes, route_fields[0].name);
-            const method_index = rd0.method_index;
-            const method_str = comptime method.tokenFromIndex(method_index);
+            const method_str = rd0.method;
             const pattern = rd0.pattern;
             const expected_line = comptime method_str ++ " " ++ pattern ++ " HTTP/1.1\r\n";
             const path_start: usize = comptime method_str.len + 1;
@@ -268,6 +270,7 @@ pub fn Server(comptime def: anytype) type {
                 break :blk false;
             };
             const handler_needs_req = comptime handler_params.len == 2 or (handler_params.len == 1 and !handler_ctx_only);
+            const send_body = comptime !std.mem.eql(u8, method_str, "HEAD");
 
             var read_buf: [Conf.read_buffer]u8 = undefined;
             var write_buf: [Conf.write_buffer]u8 = undefined;
@@ -331,7 +334,7 @@ pub fn Server(comptime def: anytype) type {
                     unreachable;
                 } else blk: {
                     const line: request.RequestLine = .{
-                        .method_index = method_index,
+                        .method = method_str,
                         .version = .http11,
                         .path = linebuf[path_start..path_end],
                         .query = linebuf[0..0],
@@ -345,7 +348,6 @@ pub fn Server(comptime def: anytype) type {
                     @compileError("handler must be fn(), fn(req), fn(ctx), or fn(ctx, req)");
                 };
 
-                const send_body = !method.isHead(method_index);
                 response.write(&sw.interface, res, true, send_body) catch return;
                 sw.interface.flush() catch return;
             }

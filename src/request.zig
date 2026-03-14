@@ -3,7 +3,6 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 
-const method = @import("method.zig");
 const parse = @import("parse.zig");
 const urldecode = @import("urldecode.zig");
 
@@ -71,7 +70,7 @@ fn parseVersion(v: []const u8) ?Version {
 }
 
 pub const RequestLine = struct {
-    method_index: u8,
+    method: []const u8,
     version: Version,
     path: []u8,
     query: []u8,
@@ -94,7 +93,6 @@ pub fn parseRequestLineBorrowed(r: *Io.Reader, max_line_len: usize) ParseLineErr
     const target = line[sp1 + 1 .. sp2];
     const version_str = line[sp2 + 1 ..];
 
-    const method_index = method.indexFromToken(method_str);
     const version = parseVersion(version_str) orelse return error.BadRequest;
 
     if (target.len == 0 or target[0] != '/') return error.BadRequest;
@@ -104,7 +102,7 @@ pub fn parseRequestLineBorrowed(r: *Io.Reader, max_line_len: usize) ParseLineErr
     const query_raw: []u8 = if (qpos) |p| target[p + 1 ..] else target[0..0];
 
     return .{
-        .method_index = method_index,
+        .method = method_str,
         .version = version,
         .path = path_raw,
         .query = query_raw,
@@ -113,11 +111,12 @@ pub fn parseRequestLineBorrowed(r: *Io.Reader, max_line_len: usize) ParseLineErr
 
 pub fn parseRequestLine(r: *Io.Reader, allocator: Allocator, max_line_len: usize) ParseLineError!RequestLine {
     const borrowed = try parseRequestLineBorrowed(r, max_line_len);
+    const method_copy = try allocator.dupe(u8, borrowed.method);
     const path = try allocator.dupe(u8, borrowed.path);
     const query = try allocator.dupe(u8, borrowed.query);
 
     return .{
-        .method_index = borrowed.method_index,
+        .method = method_copy,
         .version = borrowed.version,
         .path = path,
         .query = query,
@@ -484,7 +483,7 @@ test "query capture + decode" {
     const query = try gpa.dupe(u8, "name=alice%20bob&page=10");
     defer gpa.free(query);
 
-    const line: RequestLine = .{ .method_index = method.idx_get, .version = .http11, .path = path, .query = query };
+    const line: RequestLine = .{ .method = "GET", .version = .http11, .path = path, .query = query };
     var reqv = ReqT.init(gpa, line);
     defer reqv.deinit(gpa);
 
@@ -510,7 +509,7 @@ test "header capture required vs optional" {
     defer gpa.free(path);
     const query = try gpa.dupe(u8, "");
     defer gpa.free(query);
-    const line: RequestLine = .{ .method_index = method.idx_get, .version = .http11, .path = path, .query = query };
+    const line: RequestLine = .{ .method = "GET", .version = .http11, .path = path, .query = query };
 
     {
         var r = Io.Reader.fixed("User-Agent: x\r\n\r\n");
@@ -535,7 +534,7 @@ test "chunked bodyAll" {
     defer gpa.free(path);
     const query = try gpa.dupe(u8, "");
     defer gpa.free(query);
-    const line: RequestLine = .{ .method_index = method.idx_post, .version = .http11, .path = path, .query = query };
+    const line: RequestLine = .{ .method = "POST", .version = .http11, .path = path, .query = query };
 
     var r = Io.Reader.fixed("Transfer-Encoding: chunked\r\n\r\n4\r\nWiki\r\n0\r\n\r\n");
     var reqv = ReqT.init(gpa, line);
@@ -549,7 +548,7 @@ test "chunked bodyAll" {
 test "request line: borrowed parses path/query" {
     var r = Io.Reader.fixed("GET /a/b?x=1 HTTP/1.1\r\n");
     const line = try parseRequestLineBorrowed(&r, 8 * 1024);
-    try std.testing.expectEqual(method.idx_get, line.method_index);
+    try std.testing.expectEqualStrings("GET", line.method);
     try std.testing.expectEqual(Version.http11, line.version);
     try std.testing.expectEqualStrings("/a/b", line.path);
     try std.testing.expectEqualStrings("x=1", line.query);
@@ -579,7 +578,7 @@ test "discardHeadersOnly: consumes until blank line" {
     var r = Io.Reader.fixed("A: 1\r\nB: 2\r\n\r\nGET / HTTP/1.1\r\n");
     try discardHeadersOnly(&r, 8 * 1024);
     const line = try parseRequestLineBorrowed(&r, 8 * 1024);
-    try std.testing.expectEqual(method.idx_get, line.method_index);
+    try std.testing.expectEqualStrings("GET", line.method);
     try std.testing.expectEqualStrings("/", line.path);
 }
 
@@ -602,7 +601,7 @@ test "headers: underscore field matches dash header" {
     defer gpa.free(path);
     const query = try gpa.dupe(u8, "");
     defer gpa.free(query);
-    const line: RequestLine = .{ .method_index = method.idx_get, .version = .http11, .path = path, .query = query };
+    const line: RequestLine = .{ .method = "GET", .version = .http11, .path = path, .query = query };
     var reqv = ReqT.init(gpa, line);
     defer reqv.deinit(gpa);
 
@@ -619,7 +618,7 @@ test "headers: too large rejected" {
     defer gpa.free(path);
     const query = try gpa.dupe(u8, "");
     defer gpa.free(query);
-    const line: RequestLine = .{ .method_index = method.idx_get, .version = .http11, .path = path, .query = query };
+    const line: RequestLine = .{ .method = "GET", .version = .http11, .path = path, .query = query };
 
     var reqv = ReqT.init(gpa, line);
     defer reqv.deinit(gpa);
@@ -636,7 +635,7 @@ test "headers: duplicate Content-Length mismatch rejected" {
     defer gpa.free(path);
     const query = try gpa.dupe(u8, "");
     defer gpa.free(query);
-    const line: RequestLine = .{ .method_index = method.idx_post, .version = .http11, .path = path, .query = query };
+    const line: RequestLine = .{ .method = "POST", .version = .http11, .path = path, .query = query };
 
     var reqv = ReqT.init(gpa, line);
     defer reqv.deinit(gpa);
@@ -653,7 +652,7 @@ test "headers: chunked + Content-Length rejected" {
     defer gpa.free(path);
     const query = try gpa.dupe(u8, "");
     defer gpa.free(query);
-    const line: RequestLine = .{ .method_index = method.idx_post, .version = .http11, .path = path, .query = query };
+    const line: RequestLine = .{ .method = "POST", .version = .http11, .path = path, .query = query };
 
     var reqv = ReqT.init(gpa, line);
     defer reqv.deinit(gpa);
@@ -670,7 +669,7 @@ test "headers: Connection close disables keep-alive" {
     defer gpa.free(path);
     const query = try gpa.dupe(u8, "");
     defer gpa.free(query);
-    const line: RequestLine = .{ .method_index = method.idx_get, .version = .http11, .path = path, .query = query };
+    const line: RequestLine = .{ .method = "GET", .version = .http11, .path = path, .query = query };
 
     var reqv = ReqT.init(gpa, line);
     defer reqv.deinit(gpa);
@@ -691,7 +690,7 @@ test "headers: trim value + case-insensitive match" {
     defer gpa.free(path);
     const query = try gpa.dupe(u8, "");
     defer gpa.free(query);
-    const line: RequestLine = .{ .method_index = method.idx_get, .version = .http11, .path = path, .query = query };
+    const line: RequestLine = .{ .method = "GET", .version = .http11, .path = path, .query = query };
 
     var reqv = ReqT.init(gpa, line);
     defer reqv.deinit(gpa);
@@ -708,7 +707,7 @@ test "headers: transfer-encoding list sets chunked" {
     defer gpa.free(path);
     const query = try gpa.dupe(u8, "");
     defer gpa.free(query);
-    const line: RequestLine = .{ .method_index = method.idx_post, .version = .http11, .path = path, .query = query };
+    const line: RequestLine = .{ .method = "POST", .version = .http11, .path = path, .query = query };
 
     var reqv = ReqT.init(gpa, line);
     defer reqv.deinit(gpa);
@@ -724,7 +723,7 @@ test "chunked: invalid chunk CRLF rejected" {
     defer gpa.free(path);
     const query = try gpa.dupe(u8, "");
     defer gpa.free(query);
-    const line: RequestLine = .{ .method_index = method.idx_post, .version = .http11, .path = path, .query = query };
+    const line: RequestLine = .{ .method = "POST", .version = .http11, .path = path, .query = query };
 
     var reqv = ReqT.init(gpa, line);
     defer reqv.deinit(gpa);
@@ -740,7 +739,7 @@ test "chunked: truncated body yields EndOfStream" {
     defer gpa.free(path);
     const query = try gpa.dupe(u8, "");
     defer gpa.free(query);
-    const line: RequestLine = .{ .method_index = method.idx_post, .version = .http11, .path = path, .query = query };
+    const line: RequestLine = .{ .method = "POST", .version = .http11, .path = path, .query = query };
 
     var reqv = ReqT.init(gpa, line);
     defer reqv.deinit(gpa);
@@ -757,7 +756,7 @@ test "bodyAll: content-length" {
     defer gpa.free(path);
     const query = try gpa.dupe(u8, "");
     defer gpa.free(query);
-    const line: RequestLine = .{ .method_index = method.idx_post, .version = .http11, .path = path, .query = query };
+    const line: RequestLine = .{ .method = "POST", .version = .http11, .path = path, .query = query };
     var reqv = ReqT.init(gpa, line);
     defer reqv.deinit(gpa);
 
@@ -775,7 +774,7 @@ test "bodyAll: max_bytes enforced" {
     defer gpa.free(path);
     const query = try gpa.dupe(u8, "");
     defer gpa.free(query);
-    const line: RequestLine = .{ .method_index = method.idx_post, .version = .http11, .path = path, .query = query };
+    const line: RequestLine = .{ .method = "POST", .version = .http11, .path = path, .query = query };
 
     var reqv = ReqT.init(gpa, line);
     defer reqv.deinit(gpa);
@@ -798,7 +797,7 @@ test "query: required missing rejected" {
     defer gpa.free(path);
     const query = try gpa.dupe(u8, "");
     defer gpa.free(query);
-    const line: RequestLine = .{ .method_index = method.idx_get, .version = .http11, .path = path, .query = query };
+    const line: RequestLine = .{ .method = "GET", .version = .http11, .path = path, .query = query };
     var reqv = ReqT.init(gpa, line);
     defer reqv.deinit(gpa);
 
@@ -819,7 +818,7 @@ test "query: invalid percent-encoding rejected" {
     defer gpa.free(path);
     const query = try gpa.dupe(u8, "name=%ZZ");
     defer gpa.free(query);
-    const line: RequestLine = .{ .method_index = method.idx_get, .version = .http11, .path = path, .query = query };
+    const line: RequestLine = .{ .method = "GET", .version = .http11, .path = path, .query = query };
     var reqv = ReqT.init(gpa, line);
     defer reqv.deinit(gpa);
 
@@ -845,7 +844,7 @@ test "query: repeated keys last-wins, SliceOf collects" {
     {
         const query = try gpa.dupe(u8, "k=one&k=two");
         defer gpa.free(query);
-        const line: RequestLine = .{ .method_index = method.idx_get, .version = .http11, .path = path, .query = query };
+        const line: RequestLine = .{ .method = "GET", .version = .http11, .path = path, .query = query };
         var reqv = ReqLast.init(gpa, line);
         defer reqv.deinit(gpa);
         try reqv.parseQuery(gpa);
@@ -855,7 +854,7 @@ test "query: repeated keys last-wins, SliceOf collects" {
     {
         const query = try gpa.dupe(u8, "k=one&k=two");
         defer gpa.free(query);
-        const line: RequestLine = .{ .method_index = method.idx_get, .version = .http11, .path = path, .query = query };
+        const line: RequestLine = .{ .method = "GET", .version = .http11, .path = path, .query = query };
         var reqv = ReqList.init(gpa, line);
         defer reqv.deinit(gpa);
         try reqv.parseQuery(gpa);
@@ -873,7 +872,7 @@ test "parseHeaders: rejects header line without colon" {
     defer gpa.free(path);
     const query = try gpa.dupe(u8, "");
     defer gpa.free(query);
-    const line: RequestLine = .{ .method_index = method.idx_get, .version = .http11, .path = path, .query = query };
+    const line: RequestLine = .{ .method = "GET", .version = .http11, .path = path, .query = query };
 
     var reqv = ReqT.init(gpa, line);
     defer reqv.deinit(gpa);
@@ -888,7 +887,7 @@ test "parseHeaders: repeated Content-Length same value accepted" {
     defer gpa.free(path);
     const query = try gpa.dupe(u8, "");
     defer gpa.free(query);
-    const line: RequestLine = .{ .method_index = method.idx_post, .version = .http11, .path = path, .query = query };
+    const line: RequestLine = .{ .method = "POST", .version = .http11, .path = path, .query = query };
 
     var reqv = ReqT.init(gpa, line);
     defer reqv.deinit(gpa);
@@ -906,7 +905,7 @@ test "parseHeaders: invalid Content-Length rejected" {
     defer gpa.free(path);
     const query = try gpa.dupe(u8, "");
     defer gpa.free(query);
-    const line: RequestLine = .{ .method_index = method.idx_post, .version = .http11, .path = path, .query = query };
+    const line: RequestLine = .{ .method = "POST", .version = .http11, .path = path, .query = query };
 
     var reqv = ReqT.init(gpa, line);
     defer reqv.deinit(gpa);
@@ -921,7 +920,7 @@ test "chunked bodyAll: chunk extensions supported" {
     defer gpa.free(path);
     const query = try gpa.dupe(u8, "");
     defer gpa.free(query);
-    const line: RequestLine = .{ .method_index = method.idx_post, .version = .http11, .path = path, .query = query };
+    const line: RequestLine = .{ .method = "POST", .version = .http11, .path = path, .query = query };
 
     var r = Io.Reader.fixed("Transfer-Encoding: chunked\r\n\r\n4;ext=1\r\nWiki\r\n0\r\n\r\n");
     var reqv = ReqT.init(gpa, line);
@@ -939,7 +938,7 @@ test "bodyAll/discardUnreadBody: require parseHeaders first" {
     defer gpa.free(path);
     const query = try gpa.dupe(u8, "");
     defer gpa.free(query);
-    const line: RequestLine = .{ .method_index = method.idx_post, .version = .http11, .path = path, .query = query };
+    const line: RequestLine = .{ .method = "POST", .version = .http11, .path = path, .query = query };
 
     var reqv = ReqT.init(gpa, line);
     defer reqv.deinit(gpa);
@@ -958,7 +957,7 @@ test "parseQuery: key without '=' treated as empty value" {
     defer gpa.free(path);
     const query = try gpa.dupe(u8, "k");
     defer gpa.free(query);
-    const line: RequestLine = .{ .method_index = method.idx_get, .version = .http11, .path = path, .query = query };
+    const line: RequestLine = .{ .method = "GET", .version = .http11, .path = path, .query = query };
 
     var reqv = ReqT.init(gpa, line);
     defer reqv.deinit(gpa);

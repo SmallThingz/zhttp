@@ -406,8 +406,9 @@ pub fn RequestPWithPattern(
                 return;
             }
 
-            var line_buf: std.ArrayList(u8) = .empty;
-            defer line_buf.deinit(a);
+            var line_buf: std.ArrayList(u8) = undefined;
+            var line_buf_inited: bool = false;
+            defer if (line_buf_inited) line_buf.deinit(a);
             var in_accum: bool = false;
             var done: bool = false;
 
@@ -493,7 +494,12 @@ pub fn RequestPWithPattern(
                     total += rest.len;
                     if (total > max_header_bytes) return error.HeadersTooLarge;
                     if (!in_accum) {
-                        line_buf.clearRetainingCapacity();
+                        if (!line_buf_inited) {
+                            line_buf = .empty;
+                            line_buf_inited = true;
+                        } else {
+                            line_buf.clearRetainingCapacity();
+                        }
                         in_accum = true;
                     }
                     try line_buf.appendSlice(a, rest);

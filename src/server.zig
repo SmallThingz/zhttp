@@ -24,7 +24,7 @@ pub const Config = struct {
     /// Per-connection read buffer size.
     read_buffer: usize = 8 * 1024,
     /// Per-connection write buffer size. Zero disables buffering.
-    write_buffer: usize = 0,
+    write_buffer: usize = 4 * 1024,
     /// Enable TCP_NODELAY (disables Nagle). Off by default.
     tcp_nodelay: bool = false,
     /// Maximum request line length (bytes, including `\r\n`).

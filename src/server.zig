@@ -23,8 +23,8 @@ fn setTcpNoDelay(stream: *const std.Io.net.Stream) void {
 pub const Config = struct {
     /// Per-connection read buffer size.
     read_buffer: usize = 32 * 1024,
-    /// Per-connection write buffer size.
-    write_buffer: usize = 16 * 1024,
+    /// Per-connection write buffer size. Zero disables buffering.
+    write_buffer: usize = 0,
     /// Enable TCP_NODELAY (disables Nagle). Off by default.
     tcp_nodelay: bool = false,
     /// Maximum request line length (bytes, including `\r\n`).

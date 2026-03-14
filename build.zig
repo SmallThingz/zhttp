@@ -27,6 +27,7 @@ pub fn build(b: *std.Build) void {
             },
         }),
     });
+    b.installArtifact(bench_exe);
 
     const bench_server_exe = b.addExecutable(.{
         .name = "zhttp-bench-server",
@@ -47,6 +48,12 @@ pub fn build(b: *std.Build) void {
     if (b.args) |args| {
         bench_cmd.addArgs(args);
     }
+    const bench_faf_cmd = b.addSystemCommand(&.{
+        "zig",
+        "run",
+        b.pathFromRoot("benchmark/run_faf.zig"),
+    });
+    bench_step.dependOn(&bench_faf_cmd.step);
 
     const examples_step = b.step("examples", "Build all examples");
     const examples_check_step = b.step("examples-check", "Run all examples with --smoke");

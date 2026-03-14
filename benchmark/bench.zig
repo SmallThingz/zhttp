@@ -266,14 +266,20 @@ fn runBenchmark(init: std.process.Init, address: std.Io.net.IpAddress, request_b
     const rps: f64 = if (secs == 0) 0 else @as(f64, @floatFromInt(total_ok)) / secs;
     const ns_per_req: f64 = if (total_ok == 0) 0 else @as(f64, @floatFromInt(elapsed_ns)) / @as(f64, @floatFromInt(total_ok));
     const mib_per_s: f64 = if (secs == 0) 0 else (@as(f64, @floatFromInt(total_ok)) * @as(f64, @floatFromInt(fixed_bytes))) / (1024.0 * 1024.0) / secs;
+    const prefix: []const u8 = if (init.environ_map.get("BENCH_LABEL")) |lbl|
+        lbl
+    else if (cfg.mode == .zhttp)
+        "zhttp "
+    else
+        "";
 
     if (!cfg.quiet) {
-        std.debug.print("conns={d} iters={d} warmup={d} fixed_bytes={d}\n", .{ cfg.conns, cfg.iters, cfg.warmup, fixed_bytes });
-        std.debug.print("ok={d} elapsed_ns={d}\n", .{ total_ok, elapsed_ns });
-        std.debug.print("req/s={d:.2} ns/req={d:.1} MiB/s={d:.2}\n", .{ rps, ns_per_req, mib_per_s });
+        std.debug.print("{s}conns={d} iters={d} warmup={d} fixed_bytes={d}\n", .{ prefix, cfg.conns, cfg.iters, cfg.warmup, fixed_bytes });
+        std.debug.print("{s}ok={d} elapsed_ns={d}\n", .{ prefix, total_ok, elapsed_ns });
+        std.debug.print("{s}req/s={d:.2} ns/req={d:.1} MiB/s={d:.2}\n", .{ prefix, rps, ns_per_req, mib_per_s });
         if (first_err) |e| std.debug.print("first_error={s}\n", .{@errorName(e)});
     } else {
-        std.debug.print("ok={d} elapsed_ns={d} fixed_bytes={d} req/s={d:.2} ns/req={d:.1} MiB/s={d:.2}\n", .{ total_ok, elapsed_ns, fixed_bytes, rps, ns_per_req, mib_per_s });
+        std.debug.print("{s}ok={d} elapsed_ns={d} fixed_bytes={d} req/s={d:.2} ns/req={d:.1} MiB/s={d:.2}\n", .{ prefix, total_ok, elapsed_ns, fixed_bytes, rps, ns_per_req, mib_per_s });
         if (first_err) |e| std.debug.print("first_error={s}\n", .{@errorName(e)});
     }
 }
@@ -394,6 +400,13 @@ pub fn main(init: std.process.Init) !void {
     if (cfg.conns == 0) return error.BadConns;
     if (cfg.iters == 0) return error.BadIters;
     if (cfg.mode == .external and cfg.port == 0) return error.BadPort;
+
+    if (!cfg.quiet and cfg.mode == .zhttp) {
+        var buffer: [128]u8 = undefined;
+        const stdout_file = std.Io.File.stdout();
+        var stdout = stdout_file.writer(init.io, &buffer);
+        try stdout.interface.writeAll("== zhttp ==\n");
+    }
 
     switch (cfg.mode) {
         .zhttp => try runZhttp(init, cfg),

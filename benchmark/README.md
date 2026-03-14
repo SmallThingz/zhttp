@@ -17,17 +17,18 @@ zig build bench -Doptimize=ReleaseFast -- --mode=zhttp --conns=1 --iters=200000 
 Runs `zhttp-bench-server` and benchmarks it via the same client in `--mode=external`:
 
 ```sh
-./benchmark/run_zhttp_external.sh
+zig run benchmark/run_zhttp_external.zig
 ```
 
 ## FaF (external)
 
 FaF is benchmarked against the `faf-example` app (`/plaintext` on port `8080`).
-`./benchmark/run_faf.sh` clones both `faf-example` and `faf` into `/tmp/`, pins FaF to the revision in
-`Cargo.lock`, and applies a tiny compatibility patch (for newer Rust nightly intrinsics) before building.
+`zig run benchmark/run_faf.zig` clones both `faf-example` and `faf` into `/tmp/faf-example` and
+`/tmp/faf`, pins FaF to the revision in `Cargo.lock`, and applies a tiny compatibility patch
+(for newer Rust nightly intrinsics) before building.
 
 ```sh
-./benchmark/run_faf.sh
+zig run benchmark/run_faf.zig
 ```
 
 ## Compare (external)
@@ -35,7 +36,7 @@ FaF is benchmarked against the `faf-example` app (`/plaintext` on port `8080`).
 Runs both servers with the same benchmark client settings (defaults: `FULL_REQUEST=1`, `CONNS=16`):
 
 ```sh
-./benchmark/run_compare.sh
+zig run benchmark/run_compare.zig
 ```
 
 To point at an already running server:
@@ -49,5 +50,5 @@ Notes:
 - If `--fixed-bytes` is not provided, the benchmark auto-discovers `Content-Length` once (outside the hot loop).
 - Use `--full-request` to send `Host:` and `Connection:` headers (default is the minimal `GET ...\r\n\r\n` request).
 - For the helper scripts, set `FULL_REQUEST=1` to pass `--full-request`:
-  - `FULL_REQUEST=1 ./benchmark/run_zhttp_external.sh`
-  - `FULL_REQUEST=1 ./benchmark/run_faf.sh`
+  - `FULL_REQUEST=1 zig run benchmark/run_zhttp_external.zig`
+  - `FULL_REQUEST=1 zig run benchmark/run_faf.zig`

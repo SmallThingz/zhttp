@@ -384,48 +384,97 @@ pub fn RequestPWithPattern(
                 return;
             }
 
-            while (true) {
-                const line0_incl = r.takeDelimiterInclusive('\n') catch |err| switch (err) {
-                    error.StreamTooLong => return error.HeadersTooLarge,
+            var line_buf: std.ArrayList(u8) = .empty;
+            defer line_buf.deinit(a);
+            var in_accum: bool = false;
+            var done: bool = false;
+
+            while (!done) {
+                const available = r.peekGreedy(1) catch |err| switch (err) {
                     error.EndOfStream => return error.EndOfStream,
                     error.ReadFailed => return error.ReadFailed,
                 };
-                const line0 = line0_incl[0 .. line0_incl.len - 1];
-                var line = trimCR(line0);
-                total += line0_incl.len;
-                if (total > max_header_bytes) return error.HeadersTooLarge;
+                if (available.len == 0) return error.EndOfStream;
 
-                if (line.len == 0) break;
-                const colon = std.mem.indexOfScalar(u8, line, ':') orelse return error.BadRequest;
-                const name = line[0..colon];
-                var value = line[colon + 1 ..];
-                value = trimSpaces(value);
+                var line_start: usize = 0;
+                var i: usize = 0;
+                while (i < available.len) : (i += 1) {
+                    const b = available[i];
+                    total += 1;
+                    if (total > max_header_bytes) return error.HeadersTooLarge;
 
-                if (headerIs(name, "connection")) {
-                    if (containsTokenIgnoreCase(value, "close")) self.base.connection_close = true;
-                } else if (headerIs(name, "content-length")) {
-                    const parsed = std.fmt.parseInt(usize, value, 10) catch return error.BadRequest;
-                    if (content_length) |prev| {
-                        if (prev != parsed) return error.BadRequest;
-                    } else {
-                        content_length = parsed;
+                    if (b != '\n') continue;
+
+                    const seg = available[line_start..i];
+                    if (!in_accum) line_buf.clearRetainingCapacity();
+                    try line_buf.appendSlice(a, seg);
+                    if (line_buf.items.len != 0 and line_buf.items[line_buf.items.len - 1] == '\r') {
+                        line_buf.items.len -= 1;
                     }
-                } else if (headerIs(name, "transfer-encoding")) {
-                    if (containsTokenIgnoreCase(value, "chunked")) has_chunked = true;
-                }
 
-                if (HeaderLookup.count != 0) {
-                    if (HeaderLookup.find(name)) |idx| {
-                        present[idx] = true;
-                        const h_fields = comptime parse.structFields(Headers);
-                        inline for (h_fields, 0..) |f, fi| {
-                            if (idx == @as(u16, @intCast(fi))) {
-                                try @field(self.headers, f.name).parse(a, value);
-                                break;
+                    const line = line_buf.items;
+                    if (line.len == 0) {
+                        r.toss(i + 1);
+                        done = true;
+                        break;
+                    }
+
+                    var colon: ?usize = null;
+                    for (line, 0..) |c, ci| {
+                        if (c == ':') {
+                            colon = ci;
+                            break;
+                        }
+                    }
+                    const col = colon orelse return error.BadRequest;
+                    const name = line[0..col];
+                    var value = line[col + 1 ..];
+                    value = trimSpaces(@constCast(value));
+
+                    if (headerIs(name, "connection")) {
+                        if (containsTokenIgnoreCase(value, "close")) self.base.connection_close = true;
+                    } else if (headerIs(name, "content-length")) {
+                        const parsed = std.fmt.parseInt(usize, value, 10) catch return error.BadRequest;
+                        if (content_length) |prev| {
+                            if (prev != parsed) return error.BadRequest;
+                        } else {
+                            content_length = parsed;
+                        }
+                    } else if (headerIs(name, "transfer-encoding")) {
+                        if (containsTokenIgnoreCase(value, "chunked")) has_chunked = true;
+                    }
+
+                    if (HeaderLookup.count != 0) {
+                        if (HeaderLookup.find(name)) |idx| {
+                            present[idx] = true;
+                            const h_fields = comptime parse.structFields(Headers);
+                            inline for (h_fields, 0..) |f, fi| {
+                                if (idx == @as(u16, @intCast(fi))) {
+                                    try @field(self.headers, f.name).parse(a, value);
+                                    break;
+                                }
                             }
                         }
                     }
+
+                    line_buf.clearRetainingCapacity();
+                    in_accum = false;
+                    line_start = i + 1;
                 }
+
+                if (done) {
+                    break;
+                }
+
+                if (line_start < available.len) {
+                    const rest = available[line_start..available.len];
+                    if (!in_accum) {
+                        line_buf.clearRetainingCapacity();
+                        in_accum = true;
+                    }
+                    try line_buf.appendSlice(a, rest);
+                }
+                r.toss(available.len);
             }
 
             if (has_chunked and content_length != null) return error.BadRequest;

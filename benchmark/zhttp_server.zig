@@ -10,7 +10,7 @@ fn plaintext() !zhttp.Res {
     // Match FaF: date bytes do not include trailing CRLF; that comes from CRLFCRLF.
     const date = "Date: Wed, 24 Feb 2021 12:00:00 GMT";
     const body = "Hello, World!";
-    return zhttp.Res.rawPartsCopy(&.{ base, date, "\r\n\r\n", body });
+    return zhttp.Res.rawParts(&.{ base, date, "\r\n\r\n", body });
 }
 
 fn usage() void {
@@ -57,11 +57,7 @@ pub fn main(init: std.process.Init) !void {
         .routes = .{
             zhttp.get("/plaintext", plaintext, .{}),
         },
-        .config = .{
-            .read_buffer = 64 * 1024,
-            .write_buffer = 16 * 1024,
-            .fast_benchmark = true,
-        },
+        .config = .{},
     });
 
     const addr: std.Io.net.IpAddress = .{ .ip4 = std.Io.net.Ip4Address.loopback(port) };

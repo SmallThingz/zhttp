@@ -1120,7 +1120,15 @@ pub fn Compiled(
                     const params_local_slice: []const []u8 = if (p.param_names.len != 0) params_local[0..] else &.{};
                     try reqv.parseParams(allocator, params_local_slice);
                     try reqv.parseQuery(allocator);
-                    try reqv.parseHeaders(allocator, r, max_header_bytes);
+                    const needs_headers = comptime parse.structFields(H).len != 0;
+                    const method_is_get = line.method.len == 3 and line.method[0] == 'G' and line.method[1] == 'E' and line.method[2] == 'T';
+                    if (!needs_headers and method_is_get) {
+                        try request.discardHeadersOnly(r, max_header_bytes);
+                        reqv.base.body_kind = .none;
+                        reqv.base.body_remaining = 0;
+                    } else {
+                        try reqv.parseHeaders(allocator, r, max_header_bytes);
+                    }
 
                     const CtxPtr = if (Context == void) void else *Context;
                     const ChainT = Dispatch.Chain(MwTuple, rd.handler, CtxPtr, ReqT, MwCtx);

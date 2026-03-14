@@ -132,11 +132,28 @@ pub fn parseRequestLineBorrowed(r: *Io.Reader, max_line_len: usize) ParseLineErr
     if (end != 0 and line0_incl[end - 1] == '\r') end -= 1;
     const line = line0_incl[0..end];
 
-    var sp1: usize = 0;
-    while (sp1 < line.len and line[sp1] != ' ') : (sp1 += 1) {}
+    var sp1_opt: ?usize = null;
+    var sp2_opt: ?usize = null;
+    var qpos_opt: ?usize = null;
+    var i: usize = 0;
+    while (i < line.len) : (i += 1) {
+        const c = line[i];
+        if (c == ' ') {
+            if (sp1_opt == null) {
+                sp1_opt = i;
+            } else {
+                sp2_opt = i;
+                break;
+            }
+            continue;
+        }
+        if (sp1_opt != null and sp2_opt == null and c == '?') {
+            qpos_opt = i;
+        }
+    }
+    const sp1 = sp1_opt orelse return error.BadRequest;
     if (sp1 == 0 or sp1 >= line.len) return error.BadRequest;
-    var sp2: usize = sp1 + 1;
-    while (sp2 < line.len and line[sp2] != ' ') : (sp2 += 1) {}
+    const sp2 = sp2_opt orelse return error.BadRequest;
     if (sp2 == sp1 + 1 or sp2 >= line.len) return error.BadRequest;
 
     const method_str = line[0..sp1];
@@ -153,13 +170,7 @@ pub fn parseRequestLineBorrowed(r: *Io.Reader, max_line_len: usize) ParseLineErr
 
     if (target.len == 0 or target[0] != '/') return error.BadRequest;
 
-    var qpos: ?usize = null;
-    for (target, 0..) |c, i| {
-        if (c == '?') {
-            qpos = i;
-            break;
-        }
-    }
+    const qpos = if (qpos_opt) |p| p - (sp1 + 1) else null;
     const path_raw = if (qpos) |p| target[0..p] else target;
     const query_raw: []u8 = if (qpos) |p| target[p + 1 ..] else target[0..0];
 
@@ -397,15 +408,13 @@ pub fn RequestPWithPattern(
                 if (available.len == 0) return error.EndOfStream;
 
                 var line_start: usize = 0;
-                var i: usize = 0;
-                while (i < available.len) : (i += 1) {
-                    const b = available[i];
-                    total += 1;
+                var search_pos: usize = 0;
+                while (true) {
+                    const nl = std.mem.indexOfScalarPos(u8, available, search_pos, '\n') orelse break;
+                    total += (nl - line_start + 1);
                     if (total > max_header_bytes) return error.HeadersTooLarge;
 
-                    if (b != '\n') continue;
-
-                    const seg = available[line_start..i];
+                    const seg = available[line_start..nl];
                     var line: []const u8 = undefined;
                     if (in_accum) {
                         try line_buf.appendSlice(a, seg);
@@ -420,19 +429,12 @@ pub fn RequestPWithPattern(
                         }
                     }
                     if (line.len == 0) {
-                        r.toss(i + 1);
+                        r.toss(nl + 1);
                         done = true;
                         break;
                     }
 
-                    var colon: ?usize = null;
-                    for (line, 0..) |c, ci| {
-                        if (c == ':') {
-                            colon = ci;
-                            break;
-                        }
-                    }
-                    const col = colon orelse return error.BadRequest;
+                    const col = std.mem.indexOfScalar(u8, line, ':') orelse return error.BadRequest;
                     const name = line[0..col];
                     var value = line[col + 1 ..];
                     value = trimSpaces(value);
@@ -467,7 +469,8 @@ pub fn RequestPWithPattern(
                         line_buf.clearRetainingCapacity();
                         in_accum = false;
                     }
-                    line_start = i + 1;
+                    line_start = nl + 1;
+                    search_pos = line_start;
                 }
 
                 if (done) {
@@ -476,6 +479,8 @@ pub fn RequestPWithPattern(
 
                 if (line_start < available.len) {
                     const rest = available[line_start..available.len];
+                    total += rest.len;
+                    if (total > max_header_bytes) return error.HeadersTooLarge;
                     if (!in_accum) {
                         line_buf.clearRetainingCapacity();
                         in_accum = true;

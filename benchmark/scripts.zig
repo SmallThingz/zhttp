@@ -3,10 +3,14 @@ const builtin = @import("builtin");
 
 pub const BenchConfig = struct {
     port: u16,
+    host: []const u8 = "127.0.0.1",
+    path: []const u8 = "/plaintext",
     conns: usize,
     iters: usize,
     warmup: usize,
     full_request: bool,
+    fixed_bytes: ?usize = null,
+    quiet: bool = false,
 };
 
 fn printLabel(io: std.Io, label: []const u8) void {
@@ -30,6 +34,12 @@ pub fn envBool(env: *const std.process.Environ.Map, name: []const u8, default: b
 
 pub fn envString(env: *const std.process.Environ.Map, name: []const u8, default: []const u8) []const u8 {
     return env.get(name) orelse default;
+}
+
+pub fn parseKeyVal(arg: []const u8) ?struct { key: []const u8, val: []const u8 } {
+    if (!std.mem.startsWith(u8, arg, "--")) return null;
+    const eq = std.mem.indexOfScalar(u8, arg, '=') orelse return null;
+    return .{ .key = arg[2..eq], .val = arg[eq + 1 ..] };
 }
 
 pub fn runChecked(io: std.Io, argv: []const []const u8, cwd: ?[]const u8, inherit: bool) !void {
@@ -153,6 +163,10 @@ pub fn runZhttpExternal(io: std.Io, allocator: std.mem.Allocator, cfg: BenchConf
     const iters_arg = try std.fmt.bufPrint(&iters_buf, "--iters={d}", .{cfg.iters});
     const warmup_arg = try std.fmt.bufPrint(&warmup_buf, "--warmup={d}", .{cfg.warmup});
     const port_num_arg = try std.fmt.bufPrint(&port_num_buf, "--port={d}", .{cfg.port});
+    var host_buf: [64]u8 = undefined;
+    const host_arg = try std.fmt.bufPrint(&host_buf, "--host={s}", .{cfg.host});
+    var path_buf: [256]u8 = undefined;
+    const path_arg = try std.fmt.bufPrint(&path_buf, "--path={s}", .{cfg.path});
 
     var bench_args: std.ArrayList([]const u8) = .empty;
     defer bench_args.deinit(allocator);
@@ -160,14 +174,20 @@ pub fn runZhttpExternal(io: std.Io, allocator: std.mem.Allocator, cfg: BenchConf
     try bench_args.appendSlice(allocator, &.{
         "./zig-out/bin/zhttp-bench",
         "--mode=external",
-        "--host=127.0.0.1",
+        host_arg,
         port_num_arg,
-        "--path=/plaintext",
+        path_arg,
         conns_arg,
         iters_arg,
         warmup_arg,
     });
     if (cfg.full_request) try bench_args.append(allocator, "--full-request");
+    if (cfg.quiet) try bench_args.append(allocator, "--quiet");
+    if (cfg.fixed_bytes) |v| {
+        var fixed_buf: [32]u8 = undefined;
+        const fixed_arg = try std.fmt.bufPrint(&fixed_buf, "--fixed-bytes={d}", .{v});
+        try bench_args.append(allocator, fixed_arg);
+    }
     try runChecked(io, bench_args.items, root, true);
 }
 
@@ -746,9 +766,15 @@ pub fn runFaf(
     var conns_buf: [32]u8 = undefined;
     var iters_buf: [32]u8 = undefined;
     var warmup_buf: [32]u8 = undefined;
+    var host_buf: [64]u8 = undefined;
+    var port_buf: [32]u8 = undefined;
+    var path_buf: [256]u8 = undefined;
     const conns_arg = try std.fmt.bufPrint(&conns_buf, "--conns={d}", .{cfg.conns});
     const iters_arg = try std.fmt.bufPrint(&iters_buf, "--iters={d}", .{cfg.iters});
     const warmup_arg = try std.fmt.bufPrint(&warmup_buf, "--warmup={d}", .{cfg.warmup});
+    const host_arg = try std.fmt.bufPrint(&host_buf, "--host={s}", .{cfg.host});
+    const port_arg = try std.fmt.bufPrint(&port_buf, "--port={d}", .{cfg.port});
+    const path_arg = try std.fmt.bufPrint(&path_buf, "--path={s}", .{cfg.path});
 
     var bench_path: []const u8 = undefined;
     if (bench_bin_opt) |p| {
@@ -769,14 +795,20 @@ pub fn runFaf(
     try bench_args.appendSlice(allocator, &.{
         bench_path,
         "--mode=external",
-        "--host=127.0.0.1",
-        "--port=8080",
-        "--path=/plaintext",
+        host_arg,
+        port_arg,
+        path_arg,
         conns_arg,
         iters_arg,
         warmup_arg,
     });
     if (cfg.full_request) try bench_args.append(allocator, "--full-request");
+    if (cfg.quiet) try bench_args.append(allocator, "--quiet");
+    if (cfg.fixed_bytes) |v| {
+        var fixed_buf: [32]u8 = undefined;
+        const fixed_arg = try std.fmt.bufPrint(&fixed_buf, "--fixed-bytes={d}", .{v});
+        try bench_args.append(allocator, fixed_arg);
+    }
     try env.put("BENCH_LABEL", "faf ");
     try runCheckedEnv(io, bench_args.items, root, true, &env);
 }

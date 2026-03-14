@@ -58,6 +58,9 @@ pub fn build(b: *std.Build) void {
     });
     const bench_faf_run = b.addRunArtifact(bench_faf_exe);
     bench_faf_run.addPrefixedArtifactArg("--bench-bin=", bench_exe);
+    if (b.args) |args| {
+        bench_faf_run.addArgs(args);
+    }
     bench_faf_run.step.dependOn(&bench_cmd.step);
     bench_step.dependOn(&bench_faf_run.step);
 

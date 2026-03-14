@@ -121,11 +121,22 @@ pub const RequestLine = struct {
 };
 
 pub fn parseRequestLineBorrowed(r: *Io.Reader, max_line_len: usize) ParseLineError!RequestLine {
-    const line0_incl = r.takeDelimiterInclusive('\n') catch |err| switch (err) {
+    var line0_incl: []u8 = undefined;
+    const available = r.peekGreedy(1) catch |err| switch (err) {
         error.EndOfStream => return error.EndOfStream,
-        error.StreamTooLong => return error.UriTooLong,
         error.ReadFailed => return error.ReadFailed,
     };
+    if (available.len == 0) return error.EndOfStream;
+    if (std.mem.indexOfScalar(u8, available, '\n')) |nl| {
+        line0_incl = available[0 .. nl + 1];
+        r.toss(nl + 1);
+    } else {
+        line0_incl = r.takeDelimiterInclusive('\n') catch |err| switch (err) {
+            error.EndOfStream => return error.EndOfStream,
+            error.StreamTooLong => return error.UriTooLong,
+            error.ReadFailed => return error.ReadFailed,
+        };
+    }
     if (line0_incl.len == 0) return error.BadRequest;
     var end: usize = line0_incl.len - 1; // strip '\n'
     if (end > max_line_len) return error.UriTooLong;

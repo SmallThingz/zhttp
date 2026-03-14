@@ -17,6 +17,8 @@ This is a library. For a minimal runnable server example, see `benchmark/zhttp_s
 - `.middlewares: tuple` (optional) global middleware types. Defaults to `.{}`.
 - `.routes: struct` (required) route registrations, e.g. `.{ zhttp.get(...), ... }`.
 - `.config: struct` (optional) config overrides (fields match `zhttp.server.Config`).
+- `.error_handler: fn(...) !Res` (optional) global error handler. Defaults to server 500s on handler/middleware errors.
+  - Supported signatures: `fn(err)`, `fn(req, err)`, `fn(ctx, err)`, `fn(ctx, req, err)`
 
 ## Route registration
 
@@ -65,6 +67,7 @@ Capture accessors take enum literals (`@EnumLiteral()`), e.g. `.host`, `.page`, 
 - `req.header(.host)` -> typed header capture value
 - `req.queryParam(.page)` -> typed query capture value
 - `req.paramValue(.id)` -> typed path param capture value (defaults to string if not declared)
+- `req.middlewareData(.auth)` -> pointer to middleware data by name
 
 ## Middleware API
 
@@ -72,5 +75,10 @@ Middlewares are types with:
 
 - `pub fn call(comptime Next: type, next: Next, ctx: *Context, req: anytype) !zhttp.Res`
 - optional `pub const Needs = struct { headers: type = ..., query: type = ..., params: type = ... }`
+- optional stored data:
+  - `pub const Data = struct { ... }`
+  - `pub const name = .your_middleware` (required if `Data` is non-empty)
+  - `pub fn initData() Data` (optional; defaults to zero init)
+  - with data: `pub fn call(comptime Next: type, next: Next, ctx: *Context, req: anytype, data: *Data) !zhttp.Res`
 
 `Needs.*` captures are merged into the route’s capture schema at comptime.

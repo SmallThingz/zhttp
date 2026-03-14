@@ -179,6 +179,143 @@ fn middlewareNeedsParams(comptime mws: anytype) type {
     return acc;
 }
 
+const EmptyMiddlewareData = struct {};
+
+fn middlewareDataType(comptime Mw: type) type {
+    if (@hasDecl(Mw, "Data")) return Mw.Data;
+    return EmptyMiddlewareData;
+}
+
+fn middlewareLookupName(comptime name: anytype) []const u8 {
+    return switch (@typeInfo(@TypeOf(name))) {
+        .enum_literal => @tagName(name),
+        .pointer => |pointer| if (pointer.child == u8) name else @compileError("middleware name must be an enum literal or string"),
+        .array => |array| if (array.child == u8) name[0..] else @compileError("middleware name must be an enum literal or string"),
+        else => @compileError("middleware name must be an enum literal or string"),
+    };
+}
+
+fn middlewareName(comptime Mw: type) ?[]const u8 {
+    if (!@hasDecl(Mw, "Data")) return null;
+    const Data = Mw.Data;
+    if (@sizeOf(Data) == 0) return null;
+    if (!@hasDecl(Mw, "name")) {
+        @compileError("middleware " ++ @typeName(Mw) ++ " must declare pub const name when it exposes non-empty Data");
+    }
+    return middlewareLookupName(Mw.name);
+}
+
+fn middlewareHasStoredData(comptime Mw: type) bool {
+    return middlewareName(Mw) != null;
+}
+
+fn initMiddlewareData(comptime Mw: type) middlewareDataType(Mw) {
+    const Data = middlewareDataType(Mw);
+    if (Data == EmptyMiddlewareData) return .{};
+    if (@hasDecl(Mw, "initData")) {
+        return @call(.always_inline, Mw.initData, .{});
+    }
+    return std.mem.zeroes(Data);
+}
+
+fn middlewareContextType(comptime MwTuple: anytype) type {
+    const fields = @typeInfo(@TypeOf(MwTuple)).@"struct".fields;
+    comptime var field_count: usize = 0;
+    inline for (fields) |f| {
+        const Mw = @field(MwTuple, f.name);
+        const maybe_name = comptime middlewareName(Mw);
+        if (maybe_name == null) continue;
+        const name = comptime maybe_name.?;
+        const Data = middlewareDataType(Mw);
+
+        comptime var seen = false;
+        inline for (fields) |pf| {
+            if (std.mem.eql(u8, pf.name, f.name)) break;
+            const Prev = @field(MwTuple, pf.name);
+            const maybe_prev = comptime middlewareName(Prev);
+            if (maybe_prev == null) continue;
+            const prev_name = comptime maybe_prev.?;
+            if (comptime std.mem.eql(u8, prev_name, name)) {
+                const PrevData = middlewareDataType(Prev);
+                if (PrevData != Data) {
+                    @compileError("middleware data field '" ++ name ++ "' has conflicting Data types");
+                }
+                seen = true;
+                break;
+            }
+        }
+        if (!seen) field_count += 1;
+    }
+
+    if (field_count == 0) return struct {};
+
+    comptime var out_names: [field_count][]const u8 = undefined;
+    comptime var out_types: [field_count]type = undefined;
+    comptime var out_attrs: [field_count]std.builtin.Type.StructField.Attributes = undefined;
+    comptime var out_index: usize = 0;
+
+    inline for (fields) |f| {
+        const Mw = @field(MwTuple, f.name);
+        const maybe_name = comptime middlewareName(Mw);
+        if (maybe_name == null) continue;
+        const name = comptime maybe_name.?;
+        const Data = middlewareDataType(Mw);
+
+        comptime var seen = false;
+        inline for (fields) |pf| {
+            if (std.mem.eql(u8, pf.name, f.name)) break;
+            const Prev = @field(MwTuple, pf.name);
+            const maybe_prev = comptime middlewareName(Prev);
+            if (maybe_prev == null) continue;
+            const prev_name = comptime maybe_prev.?;
+            if (comptime std.mem.eql(u8, prev_name, name)) {
+                seen = true;
+                break;
+            }
+        }
+        if (seen) continue;
+
+        out_names[out_index] = name;
+        out_types[out_index] = Data;
+        out_attrs[out_index] = .{
+            .@"comptime" = false,
+            .@"align" = @alignOf(Data),
+            .default_value_ptr = null,
+        };
+        out_index += 1;
+    }
+
+    return @Struct(.auto, null, out_names[0..], &out_types, &out_attrs);
+}
+
+fn initMiddlewareContext(comptime MwTuple: anytype, comptime Ctx: type) Ctx {
+    var ctx: Ctx = undefined;
+    const fields = @typeInfo(@TypeOf(MwTuple)).@"struct".fields;
+    inline for (fields) |f| {
+        const Mw = @field(MwTuple, f.name);
+        const maybe_name = comptime middlewareName(Mw);
+        if (maybe_name == null) continue;
+        const name = comptime maybe_name.?;
+
+        comptime var seen = false;
+        inline for (fields) |pf| {
+            if (std.mem.eql(u8, pf.name, f.name)) break;
+            const Prev = @field(MwTuple, pf.name);
+            const maybe_prev = comptime middlewareName(Prev);
+            if (maybe_prev == null) continue;
+            const prev_name = comptime maybe_prev.?;
+            if (comptime std.mem.eql(u8, prev_name, name)) {
+                seen = true;
+                break;
+            }
+        }
+        if (!seen) {
+            @field(ctx, name) = initMiddlewareData(Mw);
+        }
+    }
+    return ctx;
+}
+
 const SegmentKind = enum { lit, param, glob };
 const Segment = struct {
     kind: SegmentKind,
@@ -400,7 +537,12 @@ fn ExactMap(comptime entries: anytype, comptime n: usize) type {
     };
 }
 
-pub fn Compiled(comptime Context: type, comptime routes: anytype, comptime global_middlewares: anytype) type {
+pub fn Compiled(
+    comptime Context: type,
+    comptime routes: anytype,
+    comptime global_middlewares: anytype,
+    comptime error_handler: anytype,
+) type {
     const RoutesType = @TypeOf(routes);
     const routes_info = @typeInfo(RoutesType);
     if (routes_info != .@"struct" or !routes_info.@"struct".is_tuple) @compileError("routes must be a tuple");
@@ -553,10 +695,62 @@ pub fn Compiled(comptime Context: type, comptime routes: anytype, comptime globa
             @compileError("handler must be fn(), fn(req), fn(ctx), or fn(ctx, req)");
         }
 
-        fn Chain(comptime MwTuple: anytype, comptime handler: anytype, comptime CtxPtr: type, comptime ReqT: type) type {
+        fn middlewareCallUsesData(comptime Mw: type) bool {
+            if (!@hasDecl(Mw, "call")) return false;
+            const info = @typeInfo(@TypeOf(Mw.call));
+            if (info != .@"fn") @compileError(@typeName(Mw) ++ ".call must be a function");
+            const params = info.@"fn".params;
+            if (params.len == 5) {
+                if (!@hasDecl(Mw, "Data")) {
+                    @compileError(@typeName(Mw) ++ ".call takes a data param but middleware has no `pub const Data`");
+                }
+                const Data = Mw.Data;
+                if (params[4].type) |pt| {
+                    if (pt == *Data or pt == *const Data) return true;
+                    @compileError(@typeName(Mw) ++ ".call data param must be *Data or *const Data");
+                }
+                @compileError(@typeName(Mw) ++ ".call data param must be *Data or *const Data");
+            }
+            if (params.len == 4) return false;
+            @compileError(@typeName(Mw) ++ ".call must take (Next, next, ctx, req) or (Next, next, ctx, req, data)");
+        }
+
+        fn middlewareDataPtr(comptime Mw: type, mw_ctx: anytype) ?*middlewareDataType(Mw) {
+            if (!middlewareHasStoredData(Mw)) return null;
+        const name = comptime middlewareName(Mw).?;
+        return &@field(mw_ctx.*, name);
+        }
+
+        fn errorHandlerCall(comptime handler: anytype, ctx: anytype, reqp: anytype, err: anyerror) !Res {
+            const Ht = @TypeOf(handler);
+            const info = @typeInfo(Ht);
+            if (info != .@"fn") @compileError("error_handler must be a function");
+            const params = info.@"fn".params;
+            if (params.len == 1) return @call(.auto, handler, .{err});
+            if (params.len == 2) {
+                if (@TypeOf(ctx) != void) {
+                    if (params[0].type) |pt| {
+                        if (pt == @TypeOf(ctx)) return @call(.auto, handler, .{ ctx, err });
+                    }
+                }
+                return @call(.auto, handler, .{ reqp, err });
+            }
+            if (params.len == 3) {
+                if (@TypeOf(ctx) == void) @compileError("error_handler with 3 params requires Context");
+                if (params[0].type) |pt| {
+                    if (pt != @TypeOf(ctx)) @compileError("error_handler first param must be *Context");
+                }
+                return @call(.auto, handler, .{ ctx, reqp, err });
+            }
+            @compileError("error_handler must be fn(err), fn(req, err), fn(ctx, err), or fn(ctx, req, err)");
+        }
+
+        fn Chain(comptime MwTuple: anytype, comptime handler: anytype, comptime CtxPtr: type, comptime ReqT: type, comptime MwCtx: type) type {
             const fields = @typeInfo(@TypeOf(MwTuple)).@"struct".fields;
             if (fields.len == 0) {
                 return struct {
+                    mw_ctx: *MwCtx,
+
                     pub fn call(_: @This(), ctx: CtxPtr, reqp: *ReqT) !Res {
                         return handlerCall(handler, ctx, reqp);
                     }
@@ -572,18 +766,28 @@ pub fn Compiled(comptime Context: type, comptime routes: anytype, comptime globa
                 }
                 break :blk rest;
             };
-            const NextT = Chain(RestTypes, handler, CtxPtr, ReqT);
+            const NextT = Chain(RestTypes, handler, CtxPtr, ReqT, MwCtx);
 
             return struct {
-                pub fn call(_: @This(), ctx: CtxPtr, reqp: *ReqT) !Res {
+                mw_ctx: *MwCtx,
+
+                pub fn call(self: @This(), ctx: CtxPtr, reqp: *ReqT) !Res {
                     if (!@hasDecl(First, "call")) @compileError(@typeName(First) ++ " missing `pub fn call(Next, next, ctx, req)`");
-                    return First.call(NextT, NextT{}, ctx, reqp);
+                    if (comptime middlewareCallUsesData(First)) {
+                        if (middlewareDataPtr(First, self.mw_ctx)) |stored| {
+                            return First.call(NextT, NextT{ .mw_ctx = self.mw_ctx }, ctx, reqp, stored);
+                        }
+                        var empty = initMiddlewareData(First);
+                        return First.call(NextT, NextT{ .mw_ctx = self.mw_ctx }, ctx, reqp, &empty);
+                    }
+                    return First.call(NextT, NextT{ .mw_ctx = self.mw_ctx }, ctx, reqp);
                 }
             };
         }
     };
 
     const DispatchResult = struct { res: Res, keep_alive: bool };
+    const has_error_handler: bool = @TypeOf(error_handler) != @TypeOf(null);
 
     const fast_allowed = comptime blk: {
         var out: [route_count]bool = .{false} ** route_count;
@@ -710,7 +914,7 @@ pub fn Compiled(comptime Context: type, comptime routes: anytype, comptime globa
             const keys = comptime uniqueKeys(ids, offset);
             inline for (keys.keys[0..keys.len]) |kcase| {
                 if (key == kcase) {
-                    const sub = filterIds(ids, offset, kcase);
+                    const sub = comptime filterIds(ids, offset, kcase);
                     return dispatchByMethod(sub.ids[0..sub.len], offset + 4, method_token, path, params_out);
                 }
             }
@@ -752,7 +956,9 @@ pub fn Compiled(comptime Context: type, comptime routes: anytype, comptime globa
                     const H = parse.mergeStructs(NeedH, optionsField(rd.options, "headers", struct {}));
                     const Q = parse.mergeStructs(NeedQ, optionsField(rd.options, "query", struct {}));
                     const P = parse.mergeStructs(NeedP, optionsField(rd.options, "params", struct {}));
-                    const ReqT = request.RequestP(H, Q, P, p.param_names);
+                    const MwCtx = middlewareContextType(MwTuple);
+                    var mw_ctx = initMiddlewareContext(MwTuple, MwCtx);
+                    const ReqT = request.RequestP(H, Q, P, p.param_names, MwCtx);
 
                     // Copy all path params into a single arena allocation, then percent-decode in place.
                     // We must not keep slices into the Reader's internal buffer, since subsequent reads
@@ -775,7 +981,7 @@ pub fn Compiled(comptime Context: type, comptime routes: anytype, comptime globa
                         }
                     }
 
-                    var reqv = ReqT.init(allocator, line);
+                    var reqv = ReqT.init(allocator, line, &mw_ctx);
                     reqv.reader = r;
                     defer reqv.deinit(allocator);
                     errdefer reqv.discardUnreadBody() catch {};
@@ -785,9 +991,23 @@ pub fn Compiled(comptime Context: type, comptime routes: anytype, comptime globa
                     try reqv.parseHeaders(allocator, r, max_header_bytes);
 
                     const CtxPtr = if (Context == void) void else *Context;
-                    const ChainT = Dispatch.Chain(MwTuple, rd.handler, CtxPtr, ReqT);
-                    const chain = ChainT{};
-                    const res = if (Context == void) try chain.call({}, &reqv) else try chain.call(ctx, &reqv);
+                    const ChainT = Dispatch.Chain(MwTuple, rd.handler, CtxPtr, ReqT, MwCtx);
+                    const chain = ChainT{ .mw_ctx = &mw_ctx };
+                    const res = (if (Context == void)
+                        chain.call({}, &reqv)
+                    else
+                        chain.call(ctx, &reqv)) catch |err| {
+                        if (has_error_handler) {
+                            const eh = error_handler;
+                            const handled = if (Context == void)
+                                try Dispatch.errorHandlerCall(eh, {}, &reqv, err)
+                            else
+                                try Dispatch.errorHandlerCall(eh, ctx, &reqv, err);
+                            try reqv.discardUnreadBody();
+                            return .{ .res = handled, .keep_alive = reqv.keepAlive() };
+                        }
+                        return err;
+                    };
 
                     // Ensure unread body is discarded before next request.
                     try reqv.discardUnreadBody();
@@ -818,13 +1038,25 @@ pub fn Compiled(comptime Context: type, comptime routes: anytype, comptime globa
                         .path = line.path[0..0],
                         .query = line.query[0..0],
                     };
-                    const ReqT = request.Request(struct {}, struct {}, &.{});
-                    var reqv = ReqT.init(allocator, empty_line);
+                    const MwCtx = struct {};
+                    var mw_ctx: MwCtx = .{};
+                    const ReqT = request.Request(struct {}, struct {}, &.{}, MwCtx);
+                    var reqv = ReqT.init(allocator, empty_line, &mw_ctx);
                     defer reqv.deinit(allocator);
                     reqv.reader = r;
 
-                    const res = Dispatch.handlerCall(rd.handler, ctx, &reqv);
-                    return .{ .res = try res, .keep_alive = line.version == .http11 };
+                    const res = Dispatch.handlerCall(rd.handler, ctx, &reqv) catch |err| {
+                        if (has_error_handler) {
+                            const eh = error_handler;
+                            const handled = if (Context == void)
+                                try Dispatch.errorHandlerCall(eh, {}, &reqv, err)
+                            else
+                                try Dispatch.errorHandlerCall(eh, ctx, &reqv, err);
+                            return .{ .res = handled, .keep_alive = line.version == .http11 };
+                        }
+                        return err;
+                    };
+                    return .{ .res = res, .keep_alive = line.version == .http11 };
                 }
             }
             return dispatch(ctx, allocator, r, line, route_index, params_buf, max_header_bytes);
@@ -854,7 +1086,7 @@ test "router: exact + param + glob" {
                 return Res.text(200, "g");
             }
         }.h, .{}),
-    }, .{});
+    }, .{}, null);
 
     var params: [S.MaxParams][]u8 = undefined;
 
@@ -875,7 +1107,7 @@ test "router: trailing slash does not match exact literal" {
                 return Res.text(200, "a");
             }
         }.h, .{}),
-    }, .{});
+    }, .{}, null);
 
     var params: [S.MaxParams][]u8 = undefined;
     var p1 = "/a/".*;
@@ -889,7 +1121,7 @@ test "router: HEAD falls back to GET handler" {
                 return Res.text(200, "ok");
             }
         }.h, .{}),
-    }, .{});
+    }, .{}, null);
 
     var params: [S.MaxParams][]u8 = undefined;
     var p = "/x".*;
@@ -905,8 +1137,8 @@ test "middleware Needs: supports 'headers: type = ...' form" {
             query: type = struct {},
         };
 
-        pub fn call(comptime Next: type, next: Next, _: void, _: anytype) !Res {
-            return next.call({}, undefined);
+        pub fn call(comptime Next: type, next: Next, _: void, req: anytype) !Res {
+            return next.call({}, req);
         }
     };
 
@@ -916,7 +1148,7 @@ test "middleware Needs: supports 'headers: type = ...' form" {
                 return Res.text(200, "x");
             }
         }.h, .{}),
-    }, .{Mw});
+    }, .{Mw}, null);
 }
 
 test "dispatch: pipelined request discards unread content-length body" {
@@ -931,7 +1163,7 @@ test "dispatch: pipelined request discards unread content-length body" {
                 return Res.text(200, "g");
             }
         }.h, .{}),
-    }, .{});
+    }, .{}, null);
 
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
@@ -973,7 +1205,7 @@ test "dispatch: pipelined request discards unread chunked body" {
                 return Res.text(200, "g");
             }
         }.h, .{}),
-    }, .{});
+    }, .{}, null);
 
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
@@ -1010,7 +1242,7 @@ test "dispatch: path param percent-decodes and dispatchFast falls back" {
                 return Res.text(200, req.paramValue(.id));
             }
         }.h, .{}),
-    }, .{});
+    }, .{}, null);
 
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
@@ -1047,7 +1279,7 @@ test "dispatchFast: routes with header needs fall back to full dispatch" {
                 return Res.text(200, "ok");
             }
         }.h, .{ .headers = H }),
-    }, .{});
+    }, .{}, null);
 
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
@@ -1078,7 +1310,7 @@ test "dispatch: typed path params via opts.params" {
                 id: parse.Int(u32),
             },
         }),
-    }, .{});
+    }, .{}, null);
 
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
@@ -1103,7 +1335,7 @@ test "dispatch: typed path params bad value errors" {
                 id: parse.Int(u32),
             },
         }),
-    }, .{});
+    }, .{}, null);
 
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
@@ -1177,7 +1409,7 @@ test "dispatch: path params allocate once" {
                 d: parse.Int(u32),
             },
         }),
-    }, .{});
+    }, .{}, null);
 
     var params: [S.MaxParams][]u8 = undefined;
     var r = Io.Reader.fixed("GET /u/1/2/3/4 HTTP/1.1\r\n\r\n");
@@ -1215,7 +1447,7 @@ test "dispatch: middleware Needs.params works" {
                 return Res.text(200, body);
             }
         }.h, .{}),
-    }, .{RequireId});
+    }, .{RequireId}, null);
 
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
@@ -1229,6 +1461,75 @@ test "dispatch: middleware Needs.params works" {
     try std.testing.expectEqualStrings("7", dr.res.body);
 }
 
+test "middleware data: set in middleware and handler access" {
+    const Auth = struct {
+        pub const Data = struct { user_id: u32 = 0 };
+        pub const name = .auth;
+
+        pub fn call(comptime Next: type, next: Next, _: void, req: anytype, data: *Data) !Res {
+            data.user_id = 7;
+            return next.call({}, req);
+        }
+    };
+
+    const S = Compiled(void, .{
+        get("/x", struct {
+            fn h(_: void, req: anytype) !Res {
+                const data = req.middlewareData(.auth);
+                data.user_id += 1;
+                return Res.text(200, if (data.user_id == 8) "ok" else "bad");
+            }
+        }.h, .{}),
+    }, .{Auth}, null);
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    var params: [S.MaxParams][]u8 = undefined;
+    var r = Io.Reader.fixed("GET /x HTTP/1.1\r\n\r\n");
+    const line = try request.parseRequestLineBorrowed(&r, 8 * 1024);
+    const rid = S.match(line.method, line.path, params[0..S.MaxParams]).?;
+    const dr = try S.dispatch({}, a, &r, line, rid, params[0..S.MaxParams], 8 * 1024);
+    try std.testing.expectEqualStrings("ok", dr.res.body);
+}
+
+test "error handler: handler error returns response (dispatch/dispatchFast)" {
+    const ErrHandler = struct {
+        fn h(err: anyerror) !Res {
+            _ = @errorName(err);
+            return Res.text(555, "handled");
+        }
+    };
+
+    const S = Compiled(void, .{
+        get("/x", struct {
+            fn h(_: void, _: anytype) !Res {
+                return error.Boom;
+            }
+        }.h, .{}),
+    }, .{}, ErrHandler.h);
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    var params: [S.MaxParams][]u8 = undefined;
+    var r = Io.Reader.fixed("GET /x HTTP/1.1\r\n\r\n");
+    const line = try request.parseRequestLineBorrowed(&r, 8 * 1024);
+    const rid = S.match(line.method, line.path, params[0..S.MaxParams]).?;
+    const dr = try S.dispatch({}, a, &r, line, rid, params[0..S.MaxParams], 8 * 1024);
+    try std.testing.expectEqual(@as(u16, 555), dr.res.status);
+    try std.testing.expectEqualStrings("handled", dr.res.body);
+
+    var r2 = Io.Reader.fixed("GET /x HTTP/1.1\r\n\r\n");
+    const line2 = try request.parseRequestLineBorrowed(&r2, 8 * 1024);
+    const rid2 = S.match(line2.method, line2.path, params[0..S.MaxParams]).?;
+    const dr2 = try S.dispatchFast({}, a, &r2, line2, rid2, params[0..S.MaxParams], 8 * 1024);
+    try std.testing.expectEqual(@as(u16, 555), dr2.res.status);
+    try std.testing.expectEqualStrings("handled", dr2.res.body);
+}
+
 test "handler: zero-arg handler supported" {
     const S = Compiled(void, .{
         get("/a", struct {
@@ -1236,7 +1537,7 @@ test "handler: zero-arg handler supported" {
                 return Res.text(200, "x");
             }
         }.h, .{}),
-    }, .{});
+    }, .{}, null);
 
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
@@ -1258,7 +1559,7 @@ test "handler: ctx-only handler supported" {
                 return Res.text(200, if (ctx.v == 1) "ok" else "bad");
             }
         }.h, .{}),
-    }, .{});
+    }, .{}, null);
 
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
@@ -1280,7 +1581,7 @@ test "dispatch: invalid path percent-encoding rejected" {
                 return Res.text(200, "x");
             }
         }.h, .{}),
-    }, .{});
+    }, .{}, null);
 
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();

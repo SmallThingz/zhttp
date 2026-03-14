@@ -14,6 +14,13 @@
 //! - `.params: type`     Path param capture schema (for `{name}` segments; defaults to strings)
 //! - `.middlewares: tuple` Per-route middleware types
 //!
+//! Server definition fields (for `Server(.{ ... })`):
+//! - `.Context: type` (optional) user context passed to handlers/middlewares
+//! - `.middlewares: tuple` (optional) global middleware types
+//! - `.routes: struct` (required) route registrations
+//! - `.config: struct` (optional) server config overrides
+//! - `.error_handler: fn(...) !Res` (optional) global error handler for handler/middleware errors
+//!
 //! ## Handler signatures
 //!
 //! Handlers can be any of:
@@ -34,3 +41,12 @@ pub const delete = @import("router.zig").delete;
 pub const patch = @import("router.zig").patch;
 pub const head = @import("router.zig").head;
 pub const options = @import("router.zig").options;
+
+test {
+    _ = @import("parse.zig");
+    _ = @import("request.zig");
+    _ = @import("response.zig");
+    _ = @import("router.zig");
+    _ = @import("server.zig");
+    _ = @import("urldecode.zig");
+}

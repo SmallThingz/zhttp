@@ -86,8 +86,10 @@ pub fn Server(comptime def: anytype) type {
         .fast_benchmark_empty_headers = configField(cfg, "fast_benchmark_empty_headers", defaults.fast_benchmark_empty_headers),
     };
 
-    const Compiled = router.Compiled(Context, Routes, Middlewares);
-    const EmptyReq = request.Request(struct {}, struct {}, &.{});
+    const ErrorHandler = if (@hasField(@TypeOf(def), "error_handler")) def.error_handler else null;
+    const Compiled = router.Compiled(Context, Routes, Middlewares, ErrorHandler);
+    const EmptyMwCtx = struct {};
+    const EmptyReq = request.Request(struct {}, struct {}, &.{}, EmptyMwCtx);
 
     const routes_info = @typeInfo(@TypeOf(Routes));
     const route_fields = routes_info.@"struct".fields;
@@ -219,7 +221,8 @@ pub fn Server(comptime def: anytype) type {
                     res = dr.res;
                     keep_alive = dr.keep_alive;
                 } else {
-                    var reqv = EmptyReq.init(a, line);
+                    var mw_ctx: EmptyMwCtx = .{};
+                    var reqv = EmptyReq.init(a, line, &mw_ctx);
                     defer reqv.deinit(a);
                     reqv.parseHeaders(a, &sr.interface, Conf.max_header_bytes) catch |err| {
                         if (err == error.EndOfStream or err == error.ReadFailed) return;
@@ -339,7 +342,8 @@ pub fn Server(comptime def: anytype) type {
                         .path = linebuf[path_start..path_end],
                         .query = linebuf[0..0],
                     };
-                    var reqv = EmptyReq.init(self.gpa, line);
+                    var mw_ctx: EmptyMwCtx = .{};
+                    var reqv = EmptyReq.init(self.gpa, line, &mw_ctx);
                     defer reqv.deinit(self.gpa);
                     reqv.reader = &sr.interface;
 

@@ -63,6 +63,30 @@ fn trimSpaces(s: []u8) []u8 {
     return s[a..b];
 }
 
+fn middlewareLookupName(comptime name: anytype) []const u8 {
+    return switch (@typeInfo(@TypeOf(name))) {
+        .enum_literal => @tagName(name),
+        .pointer => |pointer| if (pointer.child == u8) name else @compileError("middleware name must be an enum literal or string"),
+        .array => |array| if (array.child == u8) name[0..] else @compileError("middleware name must be an enum literal or string"),
+        else => @compileError("middleware name must be an enum literal or string"),
+    };
+}
+
+fn middlewareContextFieldName(comptime Ctx: type, comptime name: anytype) []const u8 {
+    const wanted = comptime middlewareLookupName(name);
+    inline for (@typeInfo(Ctx).@"struct".fields) |field| {
+        if (comptime std.mem.eql(u8, field.name, wanted)) {
+            return field.name;
+        }
+    }
+    @compileError("unknown middleware name '" ++ wanted ++ "'");
+}
+
+fn middlewareContextFieldType(comptime Ctx: type, comptime name: anytype) type {
+    const field_name = middlewareContextFieldName(Ctx, name);
+    return @FieldType(Ctx, field_name);
+}
+
 fn parseVersion(v: []const u8) ?Version {
     if (std.mem.eql(u8, v, "HTTP/1.1")) return .http11;
     if (std.mem.eql(u8, v, "HTTP/1.0")) return .http10;
@@ -141,7 +165,13 @@ fn containsTokenIgnoreCase(value: []const u8, comptime token: []const u8) bool {
     return false;
 }
 
-pub fn RequestP(comptime Headers: type, comptime Query: type, comptime Params: type, comptime param_names: []const []const u8) type {
+pub fn RequestP(
+    comptime Headers: type,
+    comptime Query: type,
+    comptime Params: type,
+    comptime param_names: []const []const u8,
+    comptime MwCtx: type,
+) type {
     const HeaderLookup = parse.Lookup(Headers, .header);
     const QueryLookup = parse.Lookup(Query, .query);
 
@@ -181,6 +211,7 @@ pub fn RequestP(comptime Headers: type, comptime Query: type, comptime Params: t
         base: Base,
         query_raw: []u8,
         reader: ?*Io.Reader = null,
+        mw_ctx: *MwCtx,
         headers: Headers = parse.emptyStruct(Headers),
         query: Query = parse.emptyStruct(Query),
         params_parsed: ParamsEffective = parse.emptyStruct(ParamsEffective),
@@ -189,13 +220,14 @@ pub fn RequestP(comptime Headers: type, comptime Query: type, comptime Params: t
 
         pub const ParamNames: []const []const u8 = param_names;
 
-        pub fn init(arena: Allocator, line: RequestLine) Self {
+        pub fn init(arena: Allocator, line: RequestLine, mw_ctx: *MwCtx) Self {
             return .{
                 .arena = arena,
                 .base = .{
                     .version = line.version,
                 },
                 .query_raw = line.query,
+                .mw_ctx = mw_ctx,
             };
         }
 
@@ -225,6 +257,16 @@ pub fn RequestP(comptime Headers: type, comptime Query: type, comptime Params: t
         /// e.g. `req.paramValue(.id)`.
         pub fn paramValue(self: *const Self, comptime field: @EnumLiteral()) @TypeOf(@field(self.params_parsed, @tagName(field)).get()) {
             return @field(self.params_parsed, @tagName(field)).get();
+        }
+
+        /// Get a pointer to middleware data by name, e.g. `req.middlewareData(.auth)`.
+        pub fn middlewareData(self: *Self, comptime name: @EnumLiteral()) *middlewareContextFieldType(MwCtx, name) {
+            return &@field(self.mw_ctx.*, middlewareContextFieldName(MwCtx, name));
+        }
+
+        /// Get a const pointer to middleware data by name, e.g. `req.middlewareDataConst(.auth)`.
+        pub fn middlewareDataConst(self: *const Self, comptime name: @EnumLiteral()) *const middlewareContextFieldType(MwCtx, name) {
+            return &@field(self.mw_ctx.*, middlewareContextFieldName(MwCtx, name));
         }
 
         pub fn keepAlive(self: *const Self) bool {
@@ -463,9 +505,11 @@ pub fn RequestP(comptime Headers: type, comptime Query: type, comptime Params: t
     };
 }
 
-pub fn Request(comptime Headers: type, comptime Query: type, comptime param_names: []const []const u8) type {
-    return RequestP(Headers, Query, struct {}, param_names);
+pub fn Request(comptime Headers: type, comptime Query: type, comptime param_names: []const []const u8, comptime MwCtx: type) type {
+    return RequestP(Headers, Query, struct {}, param_names, MwCtx);
 }
+
+const TestMwCtx = struct {};
 
 test "query capture + decode" {
     const ReqT = Request(
@@ -475,6 +519,7 @@ test "query capture + decode" {
             page: parse.Optional(parse.Int(u32)),
         },
         &.{},
+        TestMwCtx,
     );
 
     const gpa = std.testing.allocator;
@@ -484,7 +529,8 @@ test "query capture + decode" {
     defer gpa.free(query);
 
     const line: RequestLine = .{ .method = "GET", .version = .http11, .path = path, .query = query };
-    var reqv = ReqT.init(gpa, line);
+    var mw_ctx: TestMwCtx = .{};
+    var reqv = ReqT.init(gpa, line, &mw_ctx);
     defer reqv.deinit(gpa);
 
     try reqv.parseQuery(gpa);
@@ -497,11 +543,13 @@ test "header capture required vs optional" {
         struct { host: parse.Optional(parse.String) },
         struct {},
         &.{},
+        TestMwCtx,
     );
     const ReqReq = Request(
         struct { host: parse.String },
         struct {},
         &.{},
+        TestMwCtx,
     );
 
     const gpa = std.testing.allocator;
@@ -513,7 +561,8 @@ test "header capture required vs optional" {
 
     {
         var r = Io.Reader.fixed("User-Agent: x\r\n\r\n");
-        var reqv = ReqOpt.init(gpa, line);
+        var mw_ctx: TestMwCtx = .{};
+        var reqv = ReqOpt.init(gpa, line, &mw_ctx);
         defer reqv.deinit(gpa);
         try reqv.parseHeaders(gpa, &r, 1024);
         try std.testing.expect(reqv.header(.host) == null);
@@ -521,14 +570,15 @@ test "header capture required vs optional" {
 
     {
         var r = Io.Reader.fixed("User-Agent: x\r\n\r\n");
-        var reqv = ReqReq.init(gpa, line);
+        var mw_ctx: TestMwCtx = .{};
+        var reqv = ReqReq.init(gpa, line, &mw_ctx);
         defer reqv.deinit(gpa);
         try std.testing.expectError(error.MissingRequired, reqv.parseHeaders(gpa, &r, 1024));
     }
 }
 
 test "chunked bodyAll" {
-    const ReqT = Request(struct {}, struct {}, &.{});
+    const ReqT = Request(struct {}, struct {}, &.{}, TestMwCtx);
     const gpa = std.testing.allocator;
     const path = try gpa.dupe(u8, "/");
     defer gpa.free(path);
@@ -537,7 +587,8 @@ test "chunked bodyAll" {
     const line: RequestLine = .{ .method = "POST", .version = .http11, .path = path, .query = query };
 
     var r = Io.Reader.fixed("Transfer-Encoding: chunked\r\n\r\n4\r\nWiki\r\n0\r\n\r\n");
-    var reqv = ReqT.init(gpa, line);
+    var mw_ctx: TestMwCtx = .{};
+    var reqv = ReqT.init(gpa, line, &mw_ctx);
     defer reqv.deinit(gpa);
     try reqv.parseHeaders(gpa, &r, 1024);
     const body = try reqv.bodyAll(32);
@@ -558,6 +609,7 @@ test "request line: owned duplicates path/query" {
     var r = Io.Reader.fixed("GET /hello HTTP/1.1\r\n");
     const gpa = std.testing.allocator;
     const line = try parseRequestLine(&r, gpa, 8 * 1024);
+    defer gpa.free(line.method);
     defer gpa.free(line.path);
     defer gpa.free(line.query);
     try std.testing.expectEqualStrings("/hello", line.path);
@@ -594,6 +646,7 @@ test "headers: underscore field matches dash header" {
         },
         struct {},
         &.{},
+        TestMwCtx,
     );
 
     const gpa = std.testing.allocator;
@@ -602,7 +655,8 @@ test "headers: underscore field matches dash header" {
     const query = try gpa.dupe(u8, "");
     defer gpa.free(query);
     const line: RequestLine = .{ .method = "GET", .version = .http11, .path = path, .query = query };
-    var reqv = ReqT.init(gpa, line);
+    var mw_ctx: TestMwCtx = .{};
+    var reqv = ReqT.init(gpa, line, &mw_ctx);
     defer reqv.deinit(gpa);
 
     var r = Io.Reader.fixed("Content-Type: text/plain\r\n\r\n");
@@ -611,7 +665,7 @@ test "headers: underscore field matches dash header" {
 }
 
 test "headers: too large rejected" {
-    const ReqT = Request(struct {}, struct {}, &.{});
+    const ReqT = Request(struct {}, struct {}, &.{}, TestMwCtx);
     const gpa = std.testing.allocator;
 
     const path = try gpa.dupe(u8, "/");
@@ -620,7 +674,8 @@ test "headers: too large rejected" {
     defer gpa.free(query);
     const line: RequestLine = .{ .method = "GET", .version = .http11, .path = path, .query = query };
 
-    var reqv = ReqT.init(gpa, line);
+    var mw_ctx: TestMwCtx = .{};
+    var reqv = ReqT.init(gpa, line, &mw_ctx);
     defer reqv.deinit(gpa);
 
     var r = Io.Reader.fixed("X: 1234567890\r\n\r\n");
@@ -628,7 +683,7 @@ test "headers: too large rejected" {
 }
 
 test "headers: duplicate Content-Length mismatch rejected" {
-    const ReqT = Request(struct {}, struct {}, &.{});
+    const ReqT = Request(struct {}, struct {}, &.{}, TestMwCtx);
     const gpa = std.testing.allocator;
 
     const path = try gpa.dupe(u8, "/");
@@ -637,7 +692,8 @@ test "headers: duplicate Content-Length mismatch rejected" {
     defer gpa.free(query);
     const line: RequestLine = .{ .method = "POST", .version = .http11, .path = path, .query = query };
 
-    var reqv = ReqT.init(gpa, line);
+    var mw_ctx: TestMwCtx = .{};
+    var reqv = ReqT.init(gpa, line, &mw_ctx);
     defer reqv.deinit(gpa);
 
     var r = Io.Reader.fixed("Content-Length: 1\r\nContent-Length: 2\r\n\r\n");
@@ -645,7 +701,7 @@ test "headers: duplicate Content-Length mismatch rejected" {
 }
 
 test "headers: chunked + Content-Length rejected" {
-    const ReqT = Request(struct {}, struct {}, &.{});
+    const ReqT = Request(struct {}, struct {}, &.{}, TestMwCtx);
     const gpa = std.testing.allocator;
 
     const path = try gpa.dupe(u8, "/");
@@ -654,7 +710,8 @@ test "headers: chunked + Content-Length rejected" {
     defer gpa.free(query);
     const line: RequestLine = .{ .method = "POST", .version = .http11, .path = path, .query = query };
 
-    var reqv = ReqT.init(gpa, line);
+    var mw_ctx: TestMwCtx = .{};
+    var reqv = ReqT.init(gpa, line, &mw_ctx);
     defer reqv.deinit(gpa);
 
     var r = Io.Reader.fixed("Transfer-Encoding: chunked\r\nContent-Length: 0\r\n\r\n");
@@ -662,7 +719,7 @@ test "headers: chunked + Content-Length rejected" {
 }
 
 test "headers: Connection close disables keep-alive" {
-    const ReqT = Request(struct {}, struct {}, &.{});
+    const ReqT = Request(struct {}, struct {}, &.{}, TestMwCtx);
     const gpa = std.testing.allocator;
 
     const path = try gpa.dupe(u8, "/");
@@ -671,7 +728,8 @@ test "headers: Connection close disables keep-alive" {
     defer gpa.free(query);
     const line: RequestLine = .{ .method = "GET", .version = .http11, .path = path, .query = query };
 
-    var reqv = ReqT.init(gpa, line);
+    var mw_ctx: TestMwCtx = .{};
+    var reqv = ReqT.init(gpa, line, &mw_ctx);
     defer reqv.deinit(gpa);
 
     var r = Io.Reader.fixed("Connection: keep-alive, Close\r\n\r\n");
@@ -684,6 +742,7 @@ test "headers: trim value + case-insensitive match" {
         struct { host: parse.Optional(parse.String) },
         struct {},
         &.{},
+        TestMwCtx,
     );
     const gpa = std.testing.allocator;
     const path = try gpa.dupe(u8, "/");
@@ -692,7 +751,8 @@ test "headers: trim value + case-insensitive match" {
     defer gpa.free(query);
     const line: RequestLine = .{ .method = "GET", .version = .http11, .path = path, .query = query };
 
-    var reqv = ReqT.init(gpa, line);
+    var mw_ctx: TestMwCtx = .{};
+    var reqv = ReqT.init(gpa, line, &mw_ctx);
     defer reqv.deinit(gpa);
 
     var r = Io.Reader.fixed("hOsT:\t  example.com \t\r\n\r\n");
@@ -701,7 +761,7 @@ test "headers: trim value + case-insensitive match" {
 }
 
 test "headers: transfer-encoding list sets chunked" {
-    const ReqT = Request(struct {}, struct {}, &.{});
+    const ReqT = Request(struct {}, struct {}, &.{}, TestMwCtx);
     const gpa = std.testing.allocator;
     const path = try gpa.dupe(u8, "/");
     defer gpa.free(path);
@@ -709,7 +769,8 @@ test "headers: transfer-encoding list sets chunked" {
     defer gpa.free(query);
     const line: RequestLine = .{ .method = "POST", .version = .http11, .path = path, .query = query };
 
-    var reqv = ReqT.init(gpa, line);
+    var mw_ctx: TestMwCtx = .{};
+    var reqv = ReqT.init(gpa, line, &mw_ctx);
     defer reqv.deinit(gpa);
     var r = Io.Reader.fixed("Transfer-Encoding: gzip, chunked\r\n\r\n");
     try reqv.parseHeaders(gpa, &r, 8 * 1024);
@@ -717,7 +778,7 @@ test "headers: transfer-encoding list sets chunked" {
 }
 
 test "chunked: invalid chunk CRLF rejected" {
-    const ReqT = Request(struct {}, struct {}, &.{});
+    const ReqT = Request(struct {}, struct {}, &.{}, TestMwCtx);
     const gpa = std.testing.allocator;
     const path = try gpa.dupe(u8, "/");
     defer gpa.free(path);
@@ -725,7 +786,8 @@ test "chunked: invalid chunk CRLF rejected" {
     defer gpa.free(query);
     const line: RequestLine = .{ .method = "POST", .version = .http11, .path = path, .query = query };
 
-    var reqv = ReqT.init(gpa, line);
+    var mw_ctx: TestMwCtx = .{};
+    var reqv = ReqT.init(gpa, line, &mw_ctx);
     defer reqv.deinit(gpa);
     var r = Io.Reader.fixed("Transfer-Encoding: chunked\r\n\r\n1\r\naXY0\r\n\r\n");
     try reqv.parseHeaders(gpa, &r, 8 * 1024);
@@ -733,7 +795,7 @@ test "chunked: invalid chunk CRLF rejected" {
 }
 
 test "chunked: truncated body yields EndOfStream" {
-    const ReqT = Request(struct {}, struct {}, &.{});
+    const ReqT = Request(struct {}, struct {}, &.{}, TestMwCtx);
     const gpa = std.testing.allocator;
     const path = try gpa.dupe(u8, "/");
     defer gpa.free(path);
@@ -741,7 +803,8 @@ test "chunked: truncated body yields EndOfStream" {
     defer gpa.free(query);
     const line: RequestLine = .{ .method = "POST", .version = .http11, .path = path, .query = query };
 
-    var reqv = ReqT.init(gpa, line);
+    var mw_ctx: TestMwCtx = .{};
+    var reqv = ReqT.init(gpa, line, &mw_ctx);
     defer reqv.deinit(gpa);
     var r = Io.Reader.fixed("Transfer-Encoding: chunked\r\n\r\n1\r\na");
     try reqv.parseHeaders(gpa, &r, 8 * 1024);
@@ -749,7 +812,7 @@ test "chunked: truncated body yields EndOfStream" {
 }
 
 test "bodyAll: content-length" {
-    const ReqT = Request(struct {}, struct {}, &.{});
+    const ReqT = Request(struct {}, struct {}, &.{}, TestMwCtx);
 
     const gpa = std.testing.allocator;
     const path = try gpa.dupe(u8, "/");
@@ -757,7 +820,8 @@ test "bodyAll: content-length" {
     const query = try gpa.dupe(u8, "");
     defer gpa.free(query);
     const line: RequestLine = .{ .method = "POST", .version = .http11, .path = path, .query = query };
-    var reqv = ReqT.init(gpa, line);
+    var mw_ctx: TestMwCtx = .{};
+    var reqv = ReqT.init(gpa, line, &mw_ctx);
     defer reqv.deinit(gpa);
 
     var r = Io.Reader.fixed("Content-Length: 5\r\n\r\nhello");
@@ -768,7 +832,7 @@ test "bodyAll: content-length" {
 }
 
 test "bodyAll: max_bytes enforced" {
-    const ReqT = Request(struct {}, struct {}, &.{});
+    const ReqT = Request(struct {}, struct {}, &.{}, TestMwCtx);
     const gpa = std.testing.allocator;
     const path = try gpa.dupe(u8, "/");
     defer gpa.free(path);
@@ -776,7 +840,8 @@ test "bodyAll: max_bytes enforced" {
     defer gpa.free(query);
     const line: RequestLine = .{ .method = "POST", .version = .http11, .path = path, .query = query };
 
-    var reqv = ReqT.init(gpa, line);
+    var mw_ctx: TestMwCtx = .{};
+    var reqv = ReqT.init(gpa, line, &mw_ctx);
     defer reqv.deinit(gpa);
     var r = Io.Reader.fixed("Content-Length: 5\r\n\r\nhello");
     try reqv.parseHeaders(gpa, &r, 8 * 1024);
@@ -790,6 +855,7 @@ test "query: required missing rejected" {
             q: parse.String,
         },
         &.{},
+        TestMwCtx,
     );
 
     const gpa = std.testing.allocator;
@@ -798,7 +864,8 @@ test "query: required missing rejected" {
     const query = try gpa.dupe(u8, "");
     defer gpa.free(query);
     const line: RequestLine = .{ .method = "GET", .version = .http11, .path = path, .query = query };
-    var reqv = ReqT.init(gpa, line);
+    var mw_ctx: TestMwCtx = .{};
+    var reqv = ReqT.init(gpa, line, &mw_ctx);
     defer reqv.deinit(gpa);
 
     try std.testing.expectError(error.MissingRequired, reqv.parseQuery(gpa));
@@ -811,6 +878,7 @@ test "query: invalid percent-encoding rejected" {
             name: parse.Optional(parse.String),
         },
         &.{},
+        TestMwCtx,
     );
 
     const gpa = std.testing.allocator;
@@ -819,7 +887,8 @@ test "query: invalid percent-encoding rejected" {
     const query = try gpa.dupe(u8, "name=%ZZ");
     defer gpa.free(query);
     const line: RequestLine = .{ .method = "GET", .version = .http11, .path = path, .query = query };
-    var reqv = ReqT.init(gpa, line);
+    var mw_ctx: TestMwCtx = .{};
+    var reqv = ReqT.init(gpa, line, &mw_ctx);
     defer reqv.deinit(gpa);
 
     try std.testing.expectError(error.InvalidPercentEncoding, reqv.parseQuery(gpa));
@@ -830,11 +899,13 @@ test "query: repeated keys last-wins, SliceOf collects" {
         struct {},
         struct { k: parse.Optional(parse.String) },
         &.{},
+        TestMwCtx,
     );
     const ReqList = Request(
         struct {},
         struct { k: parse.SliceOf(parse.String) },
         &.{},
+        TestMwCtx,
     );
 
     const gpa = std.testing.allocator;
@@ -845,7 +916,8 @@ test "query: repeated keys last-wins, SliceOf collects" {
         const query = try gpa.dupe(u8, "k=one&k=two");
         defer gpa.free(query);
         const line: RequestLine = .{ .method = "GET", .version = .http11, .path = path, .query = query };
-        var reqv = ReqLast.init(gpa, line);
+        var mw_ctx: TestMwCtx = .{};
+        var reqv = ReqLast.init(gpa, line, &mw_ctx);
         defer reqv.deinit(gpa);
         try reqv.parseQuery(gpa);
         try std.testing.expectEqualStrings("two", reqv.queryParam(.k).?);
@@ -855,7 +927,8 @@ test "query: repeated keys last-wins, SliceOf collects" {
         const query = try gpa.dupe(u8, "k=one&k=two");
         defer gpa.free(query);
         const line: RequestLine = .{ .method = "GET", .version = .http11, .path = path, .query = query };
-        var reqv = ReqList.init(gpa, line);
+        var mw_ctx: TestMwCtx = .{};
+        var reqv = ReqList.init(gpa, line, &mw_ctx);
         defer reqv.deinit(gpa);
         try reqv.parseQuery(gpa);
         const items = reqv.queryParam(.k);
@@ -866,7 +939,7 @@ test "query: repeated keys last-wins, SliceOf collects" {
 }
 
 test "parseHeaders: rejects header line without colon" {
-    const ReqT = Request(struct {}, struct {}, &.{});
+    const ReqT = Request(struct {}, struct {}, &.{}, TestMwCtx);
     const gpa = std.testing.allocator;
     const path = try gpa.dupe(u8, "/");
     defer gpa.free(path);
@@ -874,14 +947,15 @@ test "parseHeaders: rejects header line without colon" {
     defer gpa.free(query);
     const line: RequestLine = .{ .method = "GET", .version = .http11, .path = path, .query = query };
 
-    var reqv = ReqT.init(gpa, line);
+    var mw_ctx: TestMwCtx = .{};
+    var reqv = ReqT.init(gpa, line, &mw_ctx);
     defer reqv.deinit(gpa);
     var r = Io.Reader.fixed("NoColon\r\n\r\n");
     try std.testing.expectError(error.BadRequest, reqv.parseHeaders(gpa, &r, 8 * 1024));
 }
 
 test "parseHeaders: repeated Content-Length same value accepted" {
-    const ReqT = Request(struct {}, struct {}, &.{});
+    const ReqT = Request(struct {}, struct {}, &.{}, TestMwCtx);
     const gpa = std.testing.allocator;
     const path = try gpa.dupe(u8, "/");
     defer gpa.free(path);
@@ -889,7 +963,8 @@ test "parseHeaders: repeated Content-Length same value accepted" {
     defer gpa.free(query);
     const line: RequestLine = .{ .method = "POST", .version = .http11, .path = path, .query = query };
 
-    var reqv = ReqT.init(gpa, line);
+    var mw_ctx: TestMwCtx = .{};
+    var reqv = ReqT.init(gpa, line, &mw_ctx);
     defer reqv.deinit(gpa);
     var r = Io.Reader.fixed("Content-Length: 2\r\nContent-Length: 2\r\n\r\nok");
     try reqv.parseHeaders(gpa, &r, 8 * 1024);
@@ -899,7 +974,7 @@ test "parseHeaders: repeated Content-Length same value accepted" {
 }
 
 test "parseHeaders: invalid Content-Length rejected" {
-    const ReqT = Request(struct {}, struct {}, &.{});
+    const ReqT = Request(struct {}, struct {}, &.{}, TestMwCtx);
     const gpa = std.testing.allocator;
     const path = try gpa.dupe(u8, "/");
     defer gpa.free(path);
@@ -907,14 +982,15 @@ test "parseHeaders: invalid Content-Length rejected" {
     defer gpa.free(query);
     const line: RequestLine = .{ .method = "POST", .version = .http11, .path = path, .query = query };
 
-    var reqv = ReqT.init(gpa, line);
+    var mw_ctx: TestMwCtx = .{};
+    var reqv = ReqT.init(gpa, line, &mw_ctx);
     defer reqv.deinit(gpa);
     var r = Io.Reader.fixed("Content-Length: nope\r\n\r\n");
     try std.testing.expectError(error.BadRequest, reqv.parseHeaders(gpa, &r, 8 * 1024));
 }
 
 test "chunked bodyAll: chunk extensions supported" {
-    const ReqT = Request(struct {}, struct {}, &.{});
+    const ReqT = Request(struct {}, struct {}, &.{}, TestMwCtx);
     const gpa = std.testing.allocator;
     const path = try gpa.dupe(u8, "/");
     defer gpa.free(path);
@@ -923,7 +999,8 @@ test "chunked bodyAll: chunk extensions supported" {
     const line: RequestLine = .{ .method = "POST", .version = .http11, .path = path, .query = query };
 
     var r = Io.Reader.fixed("Transfer-Encoding: chunked\r\n\r\n4;ext=1\r\nWiki\r\n0\r\n\r\n");
-    var reqv = ReqT.init(gpa, line);
+    var mw_ctx: TestMwCtx = .{};
+    var reqv = ReqT.init(gpa, line, &mw_ctx);
     defer reqv.deinit(gpa);
     try reqv.parseHeaders(gpa, &r, 1024);
     const body = try reqv.bodyAll(32);
@@ -932,7 +1009,7 @@ test "chunked bodyAll: chunk extensions supported" {
 }
 
 test "bodyAll/discardUnreadBody: require parseHeaders first" {
-    const ReqT = Request(struct {}, struct {}, &.{});
+    const ReqT = Request(struct {}, struct {}, &.{}, TestMwCtx);
     const gpa = std.testing.allocator;
     const path = try gpa.dupe(u8, "/");
     defer gpa.free(path);
@@ -940,7 +1017,8 @@ test "bodyAll/discardUnreadBody: require parseHeaders first" {
     defer gpa.free(query);
     const line: RequestLine = .{ .method = "POST", .version = .http11, .path = path, .query = query };
 
-    var reqv = ReqT.init(gpa, line);
+    var mw_ctx: TestMwCtx = .{};
+    var reqv = ReqT.init(gpa, line, &mw_ctx);
     defer reqv.deinit(gpa);
     try std.testing.expectError(error.BadRequest, reqv.bodyAll(1));
     try std.testing.expectError(error.BadRequest, reqv.discardUnreadBody());
@@ -951,6 +1029,7 @@ test "parseQuery: key without '=' treated as empty value" {
         struct {},
         struct { k: parse.Optional(parse.String) },
         &.{},
+        TestMwCtx,
     );
     const gpa = std.testing.allocator;
     const path = try gpa.dupe(u8, "/");
@@ -959,7 +1038,8 @@ test "parseQuery: key without '=' treated as empty value" {
     defer gpa.free(query);
     const line: RequestLine = .{ .method = "GET", .version = .http11, .path = path, .query = query };
 
-    var reqv = ReqT.init(gpa, line);
+    var mw_ctx: TestMwCtx = .{};
+    var reqv = ReqT.init(gpa, line, &mw_ctx);
     defer reqv.deinit(gpa);
     try reqv.parseQuery(gpa);
     try std.testing.expectEqualStrings("", reqv.queryParam(.k).?);

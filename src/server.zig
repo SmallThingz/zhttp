@@ -222,15 +222,15 @@ pub fn Server(comptime def: anytype) type {
 test "Connection: close header closes socket" {
     const Bench = struct {
         fn plaintext(_: void, _: anytype) !response.Res {
-            const resp =
-                "HTTP/1.1 200 OK\r\n" ++
-                "Server: F\r\n" ++
-                "Content-Type: text/plain\r\n" ++
-                "Content-Length: 13\r\n" ++
-                "Date: Wed, 24 Feb 2021 12:00:00 GMT\r\n" ++
-                "\r\n" ++
-                "Hello, World!";
-            return response.Res.rawResponse(resp);
+            return .{
+                .status = 200,
+                .headers = &.{
+                    .{ .name = "Server", .value = "F" },
+                    .{ .name = "Content-Type", .value = "text/plain" },
+                    .{ .name = "Date", .value = "Wed, 24 Feb 2021 12:00:00 GMT" },
+                },
+                .body = "Hello, World!",
+            };
         }
     };
 

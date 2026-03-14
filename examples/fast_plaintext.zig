@@ -27,14 +27,14 @@ fn parseKeyVal(arg: []const u8) ?struct { key: []const u8, val: []const u8 } {
 }
 
 fn plaintext() !zhttp.Res {
-    const resp =
-        "HTTP/1.1 200 OK\r\n" ++
-        "Server: zhttp\r\n" ++
-        "Content-Type: text/plain\r\n" ++
-        "Content-Length: 13\r\n" ++
-        "\r\n" ++
-        "Hello, World!";
-    return zhttp.Res.rawResponse(resp);
+    return .{
+        .status = 200,
+        .headers = &.{
+            .{ .name = "Server", .value = "zhttp" },
+            .{ .name = "Content-Type", .value = "text/plain" },
+        },
+        .body = "Hello, World!",
+    };
 }
 
 pub fn main(init: std.process.Init) !void {
@@ -105,9 +105,10 @@ pub fn main(init: std.process.Init) !void {
 
         const resp =
             "HTTP/1.1 200 OK\r\n" ++
+            "connection: keep-alive\r\n" ++
             "Server: zhttp\r\n" ++
             "Content-Type: text/plain\r\n" ++
-            "Content-Length: 13\r\n" ++
+            "content-length: 13\r\n" ++
             "\r\n" ++
             "Hello, World!";
 

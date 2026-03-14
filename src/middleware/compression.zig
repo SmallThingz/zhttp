@@ -50,8 +50,6 @@ pub fn Compression(comptime opts: anytype) type {
 
         pub fn call(comptime Next: type, next: Next, ctx: anytype, req: anytype) !Res {
             var res = try next.call(ctx, req);
-
-            if (res.raw != null or res.raw_parts != null) return res;
             if (res.body.len < min_size) return res;
             if (util.hasHeader(res.headers, "content-encoding")) return res;
 

@@ -310,112 +310,76 @@ pub fn mergeStructsMany(comptime types_tuple: anytype) type {
 ///
 /// This is safe for path params because zhttp copies all path params into stable
 /// request-owned storage before parsing captures.
-pub const PathString = struct {
-    value: []const u8 = "",
-
-    pub const empty: PathString = .{};
-
-    pub fn parse(self: *PathString, _: Allocator, raw: []const u8) !void {
-        self.value = raw;
-    }
-
-    pub fn get(self: *const PathString) []const u8 {
-        return self.value;
-    }
-
-    pub fn destroy(self: *PathString, _: Allocator) void {
-        self.* = .{};
-    }
-
-    pub fn doneParsing(_: *PathString, present: bool) !void {
-        if (!present) return error.MissingRequired;
-    }
-};
+pub const PathString = String;
 
 /// Parse and store a required UTF-8-ish string (no validation).
 pub const String = struct {
-    owned: ?[]u8 = null,
-    value: []const u8 = "",
+    value: []const u8 = undefined,
 
     pub const empty: String = .{};
 
-    pub fn parse(self: *String, allocator: Allocator, raw: []const u8) !void {
-        self.destroy(allocator);
-        const dup = try allocator.dupe(u8, raw);
-        self.owned = dup;
-        self.value = dup;
+    pub fn parse(self: *String, _: Allocator, raw: []const u8) !void {
+        self.value = raw;
     }
 
-    pub fn doneParsing(self: *String, was_present: bool) !void {
+    pub fn doneParsing(_: *String, was_present: bool) !void {
         if (!was_present) return error.MissingRequired;
-        _ = self;
     }
 
     pub fn get(self: *const String) []const u8 {
         return self.value;
     }
 
-    pub fn destroy(self: *String, allocator: Allocator) void {
-        if (self.owned) |buf| allocator.free(buf);
-        self.owned = null;
-        self.value = "";
+    pub fn destroy(self: *String, _: Allocator) void {
+        self.* = .{};
     }
 };
 
 pub fn Optional(comptime P: type) type {
     return struct {
         present: bool = false,
-        inner: P = P.empty,
+        inner: P = .empty,
 
         pub const empty: @This() = .{};
 
         pub fn parse(self: *@This(), allocator: Allocator, raw: []const u8) !void {
-            self.present = true;
             try self.inner.parse(allocator, raw);
         }
 
         pub fn doneParsing(self: *@This(), was_present: bool) !void {
             self.present = was_present;
-            if (was_present) {
-                try self.inner.doneParsing(true);
-            } else {
-                self.inner = P.empty;
-            }
+            if (was_present) try self.inner.doneParsing(true);
         }
 
         pub fn get(self: *const @This()) ?ParserValueType(P) {
-            if (!self.present) return null;
-            return self.inner.get();
+            return if (!self.present) null else self.inner.get();
         }
 
         pub fn destroy(self: *@This(), allocator: Allocator) void {
-            self.inner.destroy(allocator);
             self.present = false;
+            self.inner.destroy(allocator);
         }
     };
 }
 
 pub fn Int(comptime T: type) type {
     return struct {
-        value: T = 0,
+        value: T = undefined,
         pub const empty: @This() = .{};
 
-        pub fn parse(self: *@This(), allocator: Allocator, raw: []const u8) !void {
-            _ = allocator;
+        pub fn parse(self: *@This(), _: Allocator, raw: []const u8) !void {
             self.value = std.fmt.parseInt(T, raw, 10) catch return error.BadValue;
         }
 
-        pub fn doneParsing(self: *@This(), was_present: bool) !void {
+        pub fn doneParsing(_: *@This(), was_present: bool) !void {
             if (!was_present) return error.MissingRequired;
-            _ = self;
         }
 
         pub fn get(self: *const @This()) T {
             return self.value;
         }
 
-        pub fn destroy(self: *@This(), allocator: Allocator) void {
-            _ = allocator;
+        pub fn destroy(self: *@This(), _: Allocator) void {
             self.* = .{};
         }
     };
@@ -423,97 +387,76 @@ pub fn Int(comptime T: type) type {
 
 pub fn Float(comptime T: type) type {
     return struct {
-        value: T = 0,
+        value: T = undefined,
         pub const empty: @This() = .{};
 
-        pub fn parse(self: *@This(), allocator: Allocator, raw: []const u8) !void {
-            _ = allocator;
+        pub fn parse(self: *@This(), _: Allocator, raw: []const u8) !void {
             self.value = std.fmt.parseFloat(T, raw) catch return error.BadValue;
         }
 
-        pub fn doneParsing(self: *@This(), was_present: bool) !void {
+        pub fn doneParsing(_: *@This(), was_present: bool) !void {
             if (!was_present) return error.MissingRequired;
-            _ = self;
         }
 
         pub fn get(self: *const @This()) T {
             return self.value;
         }
 
-        pub fn destroy(self: *@This(), allocator: Allocator) void {
-            _ = allocator;
+        pub fn destroy(self: *@This(), _: Allocator) void {
             self.* = .{};
         }
     };
 }
 
 pub const Bool = struct {
-    value: bool = false,
+    value: bool = undefined,
     pub const empty: Bool = .{};
 
-    pub fn parse(self: *Bool, allocator: Allocator, raw: []const u8) !void {
-        _ = allocator;
-        if (raw.len == 1) {
-            switch (raw[0]) {
-                '1' => {
-                    self.value = true;
-                    return;
-                },
-                '0' => {
-                    self.value = false;
-                    return;
-                },
-                else => {},
-            }
-        }
-        if (std.ascii.eqlIgnoreCase(raw, "true")) {
-            self.value = true;
-            return;
-        }
-        if (std.ascii.eqlIgnoreCase(raw, "false")) {
-            self.value = false;
-            return;
-        }
-        return error.BadValue;
+    pub fn parse(self: *Bool, _: Allocator, raw: []const u8) !void {
+        self.value = try switch (raw.len) {
+            1 => switch (raw[0]) {
+                '1' => true,
+                '0' => false,
+                else => error.BadValue,
+            },
+            4 => if (std.ascii.eqlIgnoreCase(raw, "true")) true else error.BadValue,
+            5 => if (std.ascii.eqlIgnoreCase(raw, "false")) false else error.BadValue,
+            else => error.BadValue,
+        };
     }
 
-    pub fn doneParsing(self: *Bool, was_present: bool) !void {
+    pub fn doneParsing(_: *Bool, was_present: bool) !void {
         if (!was_present) return error.MissingRequired;
-        _ = self;
     }
 
     pub fn get(self: *const Bool) bool {
         return self.value;
     }
 
-    pub fn destroy(self: *Bool, allocator: Allocator) void {
-        _ = allocator;
+    pub fn destroy(self: *Bool, _: Allocator) void {
         self.* = .{};
     }
 };
 
 pub fn Enum(comptime E: type) type {
     return struct {
-        value: E = @field(E, @typeInfo(E).@"enum".fields[0].name),
+        value: E = undefined,
         pub const empty: @This() = .{};
 
-        pub fn parse(self: *@This(), allocator: Allocator, raw: []const u8) !void {
-            _ = allocator;
+        pub fn parse(self: *@This(), _: Allocator, raw: []const u8) !void {
             self.value = std.meta.stringToEnum(E, raw) orelse return error.BadValue;
         }
 
-        pub fn doneParsing(self: *@This(), was_present: bool) !void {
+        pub fn doneParsing(_: *@This(), was_present: bool) !@This() {
             if (!was_present) return error.MissingRequired;
-            _ = self;
         }
 
         pub fn get(self: *const @This()) E {
             return self.value;
         }
 
-        pub fn destroy(self: *@This(), allocator: Allocator) void {
-            _ = allocator;
-            self.* = .{};
+        pub fn destroy(self: *@This(), _: Allocator) void {
+            self.* = undefined;
         }
     };
 }

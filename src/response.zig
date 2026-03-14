@@ -10,15 +10,6 @@ pub const Res = struct {
     headers: []const Header = &.{},
     body: []const u8 = "",
     close: bool = false,
-    raw: ?[]const u8 = null,
-    raw_parts: ?RawParts = null,
-
-    pub const RawParts = struct {
-        /// Ordered pieces of the full HTTP response bytes (headers + optional body).
-        parts: []const []const u8,
-        /// If true, prefer a contiguous temp copy before writing (reserved).
-        copy: bool = false,
-    };
 
     pub fn text(status: u16, body: []const u8) Res {
         return .{
@@ -26,18 +17,6 @@ pub const Res = struct {
             .headers = &.{.{ .name = "content-type", .value = "text/plain; charset=utf-8" }},
             .body = body,
         };
-    }
-
-    pub fn rawResponse(bytes: []const u8) Res {
-        return .{ .raw = bytes };
-    }
-
-    pub fn rawParts(parts: []const []const u8) Res {
-        return .{ .raw_parts = .{ .parts = parts } };
-    }
-
-    pub fn rawPartsCopy(parts: []const []const u8) Res {
-        return .{ .raw_parts = .{ .parts = parts, .copy = true } };
     }
 };
 
@@ -70,52 +49,6 @@ pub fn write(
     keep_alive: bool,
     send_body: bool,
 ) !void {
-    if (res.raw_parts) |rp| {
-        if (send_body) {
-            if (rp.parts.len != 0) {
-                if (rp.parts.len <= 8) {
-                    try w.writeVecAll(@constCast(rp.parts));
-                } else {
-                    for (rp.parts) |p| try w.writeAll(p);
-                }
-            }
-            return;
-        }
-
-        // HEAD: stream until end of headers.
-        var window: [4]u8 = undefined;
-        var seen: usize = 0;
-        for (rp.parts) |p| {
-            for (p) |b| {
-                try w.writeByte(b);
-                if (seen < 4) {
-                    window[seen] = b;
-                    seen += 1;
-                } else {
-                    window[0] = window[1];
-                    window[1] = window[2];
-                    window[2] = window[3];
-                    window[3] = b;
-                }
-                if (seen >= 4 and std.mem.eql(u8, window[0..], "\r\n\r\n")) {
-                    return;
-                }
-            }
-        }
-        return;
-    }
-
-    if (res.raw) |raw| {
-        if (send_body) {
-            try w.writeAll(raw);
-            return;
-        }
-        const end = std.mem.indexOf(u8, raw, "\r\n\r\n") orelse raw.len;
-        const n = @min(raw.len, end + 4);
-        try w.writeAll(raw[0..n]);
-        return;
-    }
-
     var status_buf: [3]u8 = undefined;
     const status_str = try std.fmt.bufPrint(&status_buf, "{d:0>3}", .{res.status});
 
@@ -151,31 +84,6 @@ pub fn write(
     }
 }
 
-test "rawPartsCopy matches raw bytes" {
-    const base =
-        "HTTP/1.1 200 OK\r\n" ++
-        "Server: F\r\n" ++
-        "Content-Type: text/plain\r\n" ++
-        "Content-Length: 13\r\n";
-    const date = "Date: Wed, 24 Feb 2021 12:00:00 GMT";
-    const body = "Hello, World!";
-    const res = Res.rawPartsCopy(&.{ base, date, "\r\n\r\n", body });
-
-    var out: [256]u8 = undefined;
-    var w = std.Io.Writer.fixed(out[0..]);
-    try write(&w, res, true, true);
-
-    const expected =
-        "HTTP/1.1 200 OK\r\n" ++
-        "Server: F\r\n" ++
-        "Content-Type: text/plain\r\n" ++
-        "Content-Length: 13\r\n" ++
-        "Date: Wed, 24 Feb 2021 12:00:00 GMT\r\n" ++
-        "\r\n" ++
-        "Hello, World!";
-    try std.testing.expectEqualStrings(expected, out[0..w.end]);
-}
-
 test "write: HEAD omits body but keeps content-length" {
     const res = Res.text(200, "hello");
     var out: [256]u8 = undefined;
@@ -189,31 +97,6 @@ test "write: HEAD omits body but keeps content-length" {
         "content-length: 5\r\n" ++
         "\r\n";
     try std.testing.expectEqualStrings(expected, out[0..w.end]);
-}
-
-test "write: raw_parts HEAD streams long headers" {
-    const gpa = std.testing.allocator;
-    const long_len: usize = 600;
-    const long_value = try gpa.alloc(u8, long_len);
-    defer gpa.free(long_value);
-    @memset(long_value, 'a');
-
-    const part1 = "HTTP/1.1 200 OK\r\nX-Long: ";
-    const part3 = "\r\n\r\n";
-    const body = "BODY";
-    const res = Res.rawParts(&.{ part1, long_value, part3, body });
-
-    const expected_len = part1.len + long_len + part3.len;
-    const out = try gpa.alloc(u8, expected_len);
-    defer gpa.free(out);
-    var w = std.Io.Writer.fixed(out[0..]);
-    try write(&w, res, true, false);
-
-    try std.testing.expectEqual(expected_len, w.end);
-    try std.testing.expectEqualSlices(u8, part1, out[0..part1.len]);
-    try std.testing.expectEqualSlices(u8, long_value, out[part1.len .. part1.len + long_len]);
-    try std.testing.expectEqualStrings("\r\n\r\n", out[expected_len - 4 .. expected_len]);
-    try std.testing.expect(std.mem.indexOf(u8, out[0..w.end], body) == null);
 }
 
 test "write: keep-alive false emits close" {

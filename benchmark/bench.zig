@@ -285,18 +285,16 @@ fn runBenchmark(init: std.process.Init, address: std.Io.net.IpAddress, request_b
 }
 
 fn plaintext() !zhttp.Res {
-    // FaF's plaintext path is essentially a memcopy of a pre-rendered response,
-    // plus an injected `Date:` header. Keep our benchmark response layout
-    // aligned so the wire bytes are comparable.
-    const base =
-        "HTTP/1.1 200 OK\r\n" ++
-        "Server: F\r\n" ++
-        "Content-Type: text/plain\r\n" ++
-        "Content-Length: 13\r\n";
-    // Match FaF: date bytes do not include trailing CRLF; that comes from CRLFCRLF.
-    const date = "Date: Wed, 24 Feb 2021 12:00:00 GMT";
     const body = "Hello, World!";
-    return zhttp.Res.rawParts(&.{ base, date, "\r\n\r\n", body });
+    return .{
+        .status = 200,
+        .headers = &.{
+            .{ .name = "Server", .value = "F" },
+            .{ .name = "Content-Type", .value = "text/plain" },
+            .{ .name = "Date", .value = "Wed, 24 Feb 2021 12:00:00 GMT" },
+        },
+        .body = body,
+    };
 }
 
 fn runZhttp(init: std.process.Init, cfg: Config) !void {

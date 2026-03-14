@@ -10,18 +10,11 @@ pub fn build(b: *std.Build) void {
 
     const mod_tests = b.addTest(.{
         .root_module = mod,
+        .test_runner = .{ .path = b.path("test_runner.zig"), .mode = .simple },
     });
     const run_mod_tests = b.addRunArtifact(mod_tests);
     const test_step = b.step("test", "Run tests");
     test_step.dependOn(&run_mod_tests.step);
-
-    const mod_tests_simple = b.addTest(.{
-        .root_module = mod,
-        .test_runner = .{ .path = b.path("test_runner.zig"), .mode = .simple },
-    });
-    const run_mod_tests_simple = b.addRunArtifact(mod_tests_simple);
-    const test_simple_step = b.step("test-simple", "Run tests (custom runner)");
-    test_simple_step.dependOn(&run_mod_tests_simple.step);
 
     const bench_exe = b.addExecutable(.{
         .name = "zhttp-bench",
@@ -61,6 +54,7 @@ pub fn build(b: *std.Build) void {
     const examples = [_]struct { name: []const u8, path: []const u8 }{
         .{ .name = "basic_server", .path = "examples/basic_server.zig" },
         .{ .name = "middleware", .path = "examples/middleware.zig" },
+        .{ .name = "builtin_middlewares", .path = "examples/builtin_middlewares.zig" },
         .{ .name = "echo_body", .path = "examples/echo_body.zig" },
         .{ .name = "fast_plaintext", .path = "examples/fast_plaintext.zig" },
     };

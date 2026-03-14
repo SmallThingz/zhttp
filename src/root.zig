@@ -34,6 +34,7 @@ pub const parse = @import("parse.zig");
 
 pub const Res = @import("response.zig").Res;
 pub const Server = @import("server.zig").Server;
+pub const middleware = @import("middleware/mod.zig");
 
 pub const route = @import("router.zig").route;
 pub const get = @import("router.zig").get;
@@ -114,5 +115,6 @@ test {
     _ = @import("response.zig");
     _ = @import("router.zig");
     _ = @import("server.zig");
+    _ = @import("middleware/mod.zig");
     _ = @import("urldecode.zig");
 }

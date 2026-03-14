@@ -8,6 +8,10 @@ const parse = @import("parse.zig");
 const request = @import("request.zig");
 const urldecode = @import("urldecode.zig");
 
+comptime {
+    @setEvalBranchQuota(30000);
+}
+
 /// Route options passed at comptime to `route`, `get`, `post`, etc.
 ///
 /// Any struct with a subset of these fields is accepted:
@@ -114,6 +118,151 @@ fn tupleConcat(
         }
         break :blk out;
     };
+}
+
+fn tupleConcatValuesType(comptime a: anytype, comptime b: anytype) type {
+    const la: usize = comptime tupleLen(a);
+    const lb: usize = comptime tupleLen(b);
+    if (la == 0) return @TypeOf(b);
+    if (lb == 0) return @TypeOf(a);
+    const OutFieldTypes = comptime blk: {
+        var out: [la + lb]type = undefined;
+        for (@typeInfo(@TypeOf(a)).@"struct".fields, 0..) |f, i| {
+            out[i] = @TypeOf(@field(a, f.name));
+        }
+        for (@typeInfo(@TypeOf(b)).@"struct".fields, 0..) |f, i| {
+            out[la + i] = @TypeOf(@field(b, f.name));
+        }
+        break :blk out;
+    };
+    return std.meta.Tuple(&OutFieldTypes);
+}
+
+fn tupleConcatValues(comptime a: anytype, comptime b: anytype) tupleConcatValuesType(a, b) {
+    const la: usize = comptime tupleLen(a);
+    const lb: usize = comptime tupleLen(b);
+    if (la == 0) return b;
+    if (lb == 0) return a;
+
+    const OutT = tupleConcatValuesType(a, b);
+    return comptime blk: {
+        var out: OutT = undefined;
+        for (@typeInfo(@TypeOf(a)).@"struct".fields, 0..) |f, i| {
+            @field(out, std.fmt.comptimePrint("{d}", .{i})) = @field(a, f.name);
+        }
+        for (@typeInfo(@TypeOf(b)).@"struct".fields, 0..) |f, i| {
+            @field(out, std.fmt.comptimePrint("{d}", .{la + i})) = @field(b, f.name);
+        }
+        break :blk out;
+    };
+}
+
+fn tupleTailType(comptime t: anytype) type {
+    const fields = @typeInfo(@TypeOf(t)).@"struct".fields;
+    if (fields.len <= 1) return @TypeOf(.{});
+    const OutFieldTypes = comptime blk: {
+        var out: [fields.len - 1]type = undefined;
+        for (fields[1..], 0..) |f, i| {
+            out[i] = @TypeOf(@field(t, f.name));
+        }
+        break :blk out;
+    };
+    return std.meta.Tuple(&OutFieldTypes);
+}
+
+fn tupleTail(comptime t: anytype) tupleTailType(t) {
+    const fields = @typeInfo(@TypeOf(t)).@"struct".fields;
+    if (fields.len <= 1) return .{};
+    const OutT = tupleTailType(t);
+    return comptime blk: {
+        var out: OutT = undefined;
+        for (fields[1..], 0..) |f, i| {
+            @field(out, std.fmt.comptimePrint("{d}", .{i})) = @field(t, f.name);
+        }
+        break :blk out;
+    };
+}
+
+fn middlewareRoutesType(comptime mws: anytype) type {
+    comptime {
+        @setEvalBranchQuota(50000);
+    }
+    const info = @typeInfo(@TypeOf(mws));
+    if (info != .@"struct" or !info.@"struct".is_tuple) @compileError("middlewares must be a tuple");
+    const fields = info.@"struct".fields;
+    if (fields.len == 0) return @TypeOf(.{});
+
+    const First = @field(mws, fields[0].name);
+    const Rest = tupleTail(mws);
+
+    const FirstRoutesT = comptime blk: {
+        if (!@hasDecl(First, "Routes")) break :blk @TypeOf(.{});
+        if (@hasDecl(First, "register_routes") and !First.register_routes) break :blk @TypeOf(.{});
+        break :blk @TypeOf(First.Routes);
+    };
+    const RestRoutesT = middlewareRoutesType(Rest);
+    const a: FirstRoutesT = undefined;
+    const b: RestRoutesT = undefined;
+    return tupleConcatValuesType(a, b);
+}
+
+pub fn middlewareRoutes(comptime mws: anytype) middlewareRoutesType(mws) {
+    const info = @typeInfo(@TypeOf(mws));
+    if (info != .@"struct" or !info.@"struct".is_tuple) @compileError("middlewares must be a tuple");
+    const fields = info.@"struct".fields;
+    if (fields.len == 0) return .{};
+
+    const First = @field(mws, fields[0].name);
+    const Rest = tupleTail(mws);
+
+    const first_routes = comptime blk: {
+        if (!@hasDecl(First, "Routes")) break :blk .{};
+        if (@hasDecl(First, "register_routes") and !First.register_routes) break :blk .{};
+        break :blk First.Routes;
+    };
+    const rest_routes = middlewareRoutes(Rest);
+    return tupleConcatValues(first_routes, rest_routes);
+}
+
+fn assertNoDuplicateRoutes(comptime routes: anytype) void {
+    const fields = @typeInfo(@TypeOf(routes)).@"struct".fields;
+    inline for (fields, 0..) |f, i| {
+        const r = @field(routes, f.name);
+        inline for (fields[0..i]) |pf| {
+            const pr = @field(routes, pf.name);
+            if (comptime std.mem.eql(u8, r.method, pr.method) and std.mem.eql(u8, r.pattern, pr.pattern)) {
+                @compileError("duplicate route: " ++ r.method ++ " " ++ r.pattern);
+            }
+        }
+    }
+}
+
+fn assertNoRouteCollisions(comptime a: anytype, comptime b: anytype) void {
+    const fa = @typeInfo(@TypeOf(a)).@"struct".fields;
+    const fb = @typeInfo(@TypeOf(b)).@"struct".fields;
+    inline for (fa) |f| {
+        const ra = @field(a, f.name);
+        inline for (fb) |g| {
+            const rb = @field(b, g.name);
+            if (comptime std.mem.eql(u8, ra.method, rb.method) and std.mem.eql(u8, ra.pattern, rb.pattern)) {
+                @compileError("route collision: " ++ ra.method ++ " " ++ ra.pattern);
+            }
+        }
+    }
+}
+
+fn mergeRoutesType(comptime user_routes: anytype, comptime extra_routes: anytype) type {
+    if (tupleLen(extra_routes) == 0) return @TypeOf(user_routes);
+    const a: @TypeOf(user_routes) = undefined;
+    const b: @TypeOf(extra_routes) = undefined;
+    return tupleConcatValuesType(a, b);
+}
+
+pub fn mergeRoutes(comptime user_routes: anytype, comptime extra_routes: anytype) mergeRoutesType(user_routes, extra_routes) {
+    if (tupleLen(extra_routes) == 0) return user_routes;
+    assertNoDuplicateRoutes(extra_routes);
+    assertNoRouteCollisions(user_routes, extra_routes);
+    return tupleConcatValues(user_routes, extra_routes);
 }
 
 fn optionsField(
@@ -746,6 +895,9 @@ pub fn Compiled(
         }
 
         fn Chain(comptime MwTuple: anytype, comptime handler: anytype, comptime CtxPtr: type, comptime ReqT: type, comptime MwCtx: type) type {
+            comptime {
+                @setEvalBranchQuota(50000);
+            }
             const fields = @typeInfo(@TypeOf(MwTuple)).@"struct".fields;
             if (fields.len == 0) {
                 return struct {
@@ -938,6 +1090,7 @@ pub fn Compiled(
 
         pub fn dispatch(
             ctx: if (Context == void) void else *Context,
+            io: Io,
             allocator: Allocator,
             r: *Io.Reader,
             line: request.RequestLine,
@@ -957,8 +1110,8 @@ pub fn Compiled(
                     const Q = parse.mergeStructs(NeedQ, optionsField(rd.options, "query", struct {}));
                     const P = parse.mergeStructs(NeedP, optionsField(rd.options, "params", struct {}));
                     const MwCtx = middlewareContextType(MwTuple);
-                    var mw_ctx = initMiddlewareContext(MwTuple, MwCtx);
-                    const ReqT = request.RequestP(H, Q, P, p.param_names, MwCtx);
+                    const mw_ctx = initMiddlewareContext(MwTuple, MwCtx);
+                    const ReqT = request.RequestPWithPattern(H, Q, P, p.param_names, MwCtx, rd.pattern);
 
                     // Copy all path params into a single arena allocation, then percent-decode in place.
                     // We must not keep slices into the Reader's internal buffer, since subsequent reads
@@ -981,7 +1134,7 @@ pub fn Compiled(
                         }
                     }
 
-                    var reqv = ReqT.init(allocator, line, &mw_ctx);
+                    var reqv = ReqT.init(allocator, io, line, mw_ctx);
                     reqv.reader = r;
                     defer reqv.deinit(allocator);
                     errdefer reqv.discardUnreadBody() catch {};
@@ -992,7 +1145,7 @@ pub fn Compiled(
 
                     const CtxPtr = if (Context == void) void else *Context;
                     const ChainT = Dispatch.Chain(MwTuple, rd.handler, CtxPtr, ReqT, MwCtx);
-                    const chain = ChainT{ .mw_ctx = &mw_ctx };
+                    const chain = ChainT{ .mw_ctx = &reqv.mw_ctx };
                     const res = (if (Context == void)
                         chain.call({}, &reqv)
                     else
@@ -1019,6 +1172,7 @@ pub fn Compiled(
 
         pub fn dispatchFast(
             ctx: if (Context == void) void else *Context,
+            io: Io,
             allocator: Allocator,
             r: *Io.Reader,
             line: request.RequestLine,
@@ -1039,9 +1193,9 @@ pub fn Compiled(
                         .query = line.query[0..0],
                     };
                     const MwCtx = struct {};
-                    var mw_ctx: MwCtx = .{};
-                    const ReqT = request.Request(struct {}, struct {}, &.{}, MwCtx);
-                    var reqv = ReqT.init(allocator, empty_line, &mw_ctx);
+                    const mw_ctx: MwCtx = .{};
+                    const ReqT = request.RequestWithPattern(struct {}, struct {}, &.{}, MwCtx, rd.pattern);
+                    var reqv = ReqT.init(allocator, io, empty_line, mw_ctx);
                     defer reqv.deinit(allocator);
                     reqv.reader = r;
 
@@ -1059,7 +1213,7 @@ pub fn Compiled(
                     return .{ .res = res, .keep_alive = line.version == .http11 };
                 }
             }
-            return dispatch(ctx, allocator, r, line, route_index, params_buf, max_header_bytes);
+            return dispatch(ctx, io, allocator, r, line, route_index, params_buf, max_header_bytes);
         }
     };
 }
@@ -1181,14 +1335,14 @@ test "dispatch: pipelined request discards unread content-length body" {
 
     const line1 = try request.parseRequestLineBorrowed(&r, 8 * 1024);
     const rid1 = S.match(line1.method, line1.path, params[0..S.MaxParams]).?;
-    const dr1 = try S.dispatch({}, a, &r, line1, rid1, params[0..S.MaxParams], 8 * 1024);
+    const dr1 = try S.dispatch({}, std.testing.io, a, &r, line1, rid1, params[0..S.MaxParams], 8 * 1024);
     try std.testing.expectEqual(@as(u16, 200), dr1.res.status);
     try std.testing.expectEqualStrings("p", dr1.res.body);
     try std.testing.expect(dr1.keep_alive);
 
     const line2 = try request.parseRequestLineBorrowed(&r, 8 * 1024);
     const rid2 = S.match(line2.method, line2.path, params[0..S.MaxParams]).?;
-    const dr2 = try S.dispatch({}, a, &r, line2, rid2, params[0..S.MaxParams], 8 * 1024);
+    const dr2 = try S.dispatch({}, std.testing.io, a, &r, line2, rid2, params[0..S.MaxParams], 8 * 1024);
     try std.testing.expectEqual(@as(u16, 200), dr2.res.status);
     try std.testing.expectEqualStrings("g", dr2.res.body);
 }
@@ -1223,14 +1377,14 @@ test "dispatch: pipelined request discards unread chunked body" {
 
     const line1 = try request.parseRequestLineBorrowed(&r, 8 * 1024);
     const rid1 = S.match(line1.method, line1.path, params[0..S.MaxParams]).?;
-    const dr1 = try S.dispatch({}, a, &r, line1, rid1, params[0..S.MaxParams], 8 * 1024);
+    const dr1 = try S.dispatch({}, std.testing.io, a, &r, line1, rid1, params[0..S.MaxParams], 8 * 1024);
     try std.testing.expectEqual(@as(u16, 200), dr1.res.status);
     try std.testing.expectEqualStrings("p", dr1.res.body);
     try std.testing.expect(dr1.keep_alive);
 
     const line2 = try request.parseRequestLineBorrowed(&r, 8 * 1024);
     const rid2 = S.match(line2.method, line2.path, params[0..S.MaxParams]).?;
-    const dr2 = try S.dispatch({}, a, &r, line2, rid2, params[0..S.MaxParams], 8 * 1024);
+    const dr2 = try S.dispatch({}, std.testing.io, a, &r, line2, rid2, params[0..S.MaxParams], 8 * 1024);
     try std.testing.expectEqual(@as(u16, 200), dr2.res.status);
     try std.testing.expectEqualStrings("g", dr2.res.body);
 }
@@ -1256,7 +1410,7 @@ test "dispatch: path param percent-decodes and dispatchFast falls back" {
 
     const line = try request.parseRequestLineBorrowed(&r, 8 * 1024);
     const rid = S.match(line.method, line.path, params[0..S.MaxParams]).?;
-    const dr = try S.dispatch({}, a, &r, line, rid, params[0..S.MaxParams], 8 * 1024);
+    const dr = try S.dispatch({}, std.testing.io, a, &r, line, rid, params[0..S.MaxParams], 8 * 1024);
     try std.testing.expectEqualStrings("a/b", dr.res.body);
 
     var r2 = Io.Reader.fixed(
@@ -1265,7 +1419,7 @@ test "dispatch: path param percent-decodes and dispatchFast falls back" {
     );
     const line2 = try request.parseRequestLineBorrowed(&r2, 8 * 1024);
     const rid2 = S.match(line2.method, line2.path, params[0..S.MaxParams]).?;
-    const dr2 = try S.dispatchFast({}, a, &r2, line2, rid2, params[0..S.MaxParams], 8 * 1024);
+    const dr2 = try S.dispatchFast({}, std.testing.io, a, &r2, line2, rid2, params[0..S.MaxParams], 8 * 1024);
     try std.testing.expectEqualStrings("a/b", dr2.res.body);
 }
 
@@ -1294,7 +1448,7 @@ test "dispatchFast: routes with header needs fall back to full dispatch" {
 
     const line = try request.parseRequestLineBorrowed(&r, 8 * 1024);
     const rid = S.match(line.method, line.path, params[0..S.MaxParams]).?;
-    const dr = try S.dispatchFast({}, a, &r, line, rid, params[0..S.MaxParams], 8 * 1024);
+    const dr = try S.dispatchFast({}, std.testing.io, a, &r, line, rid, params[0..S.MaxParams], 8 * 1024);
     try std.testing.expectEqualStrings("ok", dr.res.body);
 }
 
@@ -1320,7 +1474,7 @@ test "dispatch: typed path params via opts.params" {
     var r = Io.Reader.fixed("GET /u/42 HTTP/1.1\r\n\r\n");
     const line = try request.parseRequestLineBorrowed(&r, 8 * 1024);
     const rid = S.match(line.method, line.path, params[0..S.MaxParams]).?;
-    const dr = try S.dispatch({}, a, &r, line, rid, params[0..S.MaxParams], 8 * 1024);
+    const dr = try S.dispatch({}, std.testing.io, a, &r, line, rid, params[0..S.MaxParams], 8 * 1024);
     try std.testing.expectEqualStrings("42", dr.res.body);
 }
 
@@ -1345,7 +1499,7 @@ test "dispatch: typed path params bad value errors" {
     var r = Io.Reader.fixed("GET /u/nope HTTP/1.1\r\n\r\n");
     const line = try request.parseRequestLineBorrowed(&r, 8 * 1024);
     const rid = S.match(line.method, line.path, params[0..S.MaxParams]).?;
-    try std.testing.expectError(error.BadValue, S.dispatch({}, a, &r, line, rid, params[0..S.MaxParams], 8 * 1024));
+    try std.testing.expectError(error.BadValue, S.dispatch({}, std.testing.io, a, &r, line, rid, params[0..S.MaxParams], 8 * 1024));
 }
 
 test "dispatch: path params allocate once" {
@@ -1421,7 +1575,7 @@ test "dispatch: path params allocate once" {
     var ca: CountingAllocator = .{ .inner = fba.allocator() };
     const a = ca.allocator();
 
-    const dr = try S.dispatch({}, a, &r, line, rid, params[0..S.MaxParams], 8 * 1024);
+    const dr = try S.dispatch({}, std.testing.io, a, &r, line, rid, params[0..S.MaxParams], 8 * 1024);
     try std.testing.expectEqualStrings("ok", dr.res.body);
     try std.testing.expectEqual(@as(usize, 1), ca.alloc_calls);
 }
@@ -1457,7 +1611,7 @@ test "dispatch: middleware Needs.params works" {
     var r = Io.Reader.fixed("GET /u/7 HTTP/1.1\r\n\r\n");
     const line = try request.parseRequestLineBorrowed(&r, 8 * 1024);
     const rid = S.match(line.method, line.path, params[0..S.MaxParams]).?;
-    const dr = try S.dispatch({}, a, &r, line, rid, params[0..S.MaxParams], 8 * 1024);
+    const dr = try S.dispatch({}, std.testing.io, a, &r, line, rid, params[0..S.MaxParams], 8 * 1024);
     try std.testing.expectEqualStrings("7", dr.res.body);
 }
 
@@ -1490,7 +1644,7 @@ test "middleware data: set in middleware and handler access" {
     var r = Io.Reader.fixed("GET /x HTTP/1.1\r\n\r\n");
     const line = try request.parseRequestLineBorrowed(&r, 8 * 1024);
     const rid = S.match(line.method, line.path, params[0..S.MaxParams]).?;
-    const dr = try S.dispatch({}, a, &r, line, rid, params[0..S.MaxParams], 8 * 1024);
+    const dr = try S.dispatch({}, std.testing.io, a, &r, line, rid, params[0..S.MaxParams], 8 * 1024);
     try std.testing.expectEqualStrings("ok", dr.res.body);
 }
 
@@ -1518,14 +1672,14 @@ test "error handler: handler error returns response (dispatch/dispatchFast)" {
     var r = Io.Reader.fixed("GET /x HTTP/1.1\r\n\r\n");
     const line = try request.parseRequestLineBorrowed(&r, 8 * 1024);
     const rid = S.match(line.method, line.path, params[0..S.MaxParams]).?;
-    const dr = try S.dispatch({}, a, &r, line, rid, params[0..S.MaxParams], 8 * 1024);
+    const dr = try S.dispatch({}, std.testing.io, a, &r, line, rid, params[0..S.MaxParams], 8 * 1024);
     try std.testing.expectEqual(@as(u16, 555), dr.res.status);
     try std.testing.expectEqualStrings("handled", dr.res.body);
 
     var r2 = Io.Reader.fixed("GET /x HTTP/1.1\r\n\r\n");
     const line2 = try request.parseRequestLineBorrowed(&r2, 8 * 1024);
     const rid2 = S.match(line2.method, line2.path, params[0..S.MaxParams]).?;
-    const dr2 = try S.dispatchFast({}, a, &r2, line2, rid2, params[0..S.MaxParams], 8 * 1024);
+    const dr2 = try S.dispatchFast({}, std.testing.io, a, &r2, line2, rid2, params[0..S.MaxParams], 8 * 1024);
     try std.testing.expectEqual(@as(u16, 555), dr2.res.status);
     try std.testing.expectEqualStrings("handled", dr2.res.body);
 }
@@ -1590,7 +1744,7 @@ test "handler: zero-arg handler supported" {
     var r = Io.Reader.fixed("GET /a HTTP/1.1\r\n\r\n");
     const line = try request.parseRequestLineBorrowed(&r, 8 * 1024);
     const rid = S.match(line.method, line.path, params[0..S.MaxParams]).?;
-    const dr = try S.dispatch({}, a, &r, line, rid, params[0..S.MaxParams], 8 * 1024);
+    const dr = try S.dispatch({}, std.testing.io, a, &r, line, rid, params[0..S.MaxParams], 8 * 1024);
     try std.testing.expectEqualStrings("x", dr.res.body);
 }
 
@@ -1613,7 +1767,7 @@ test "handler: ctx-only handler supported" {
     var r = Io.Reader.fixed("GET /a HTTP/1.1\r\n\r\n");
     const line = try request.parseRequestLineBorrowed(&r, 8 * 1024);
     const rid = S.match(line.method, line.path, params[0..S.MaxParams]).?;
-    const dr = try S.dispatch(&ctx, a, &r, line, rid, params[0..S.MaxParams], 8 * 1024);
+    const dr = try S.dispatch(&ctx, std.testing.io, a, &r, line, rid, params[0..S.MaxParams], 8 * 1024);
     try std.testing.expectEqualStrings("ok", dr.res.body);
 }
 
@@ -1634,5 +1788,5 @@ test "dispatch: invalid path percent-encoding rejected" {
     var r = Io.Reader.fixed("GET /u/%ZZ HTTP/1.1\r\n\r\n");
     const line = try request.parseRequestLineBorrowed(&r, 8 * 1024);
     const rid = S.match(line.method, line.path, params[0..S.MaxParams]).?;
-    try std.testing.expectError(error.InvalidPercentEncoding, S.dispatch({}, a, &r, line, rid, params[0..S.MaxParams], 8 * 1024));
+    try std.testing.expectError(error.InvalidPercentEncoding, S.dispatch({}, std.testing.io, a, &r, line, rid, params[0..S.MaxParams], 8 * 1024));
 }

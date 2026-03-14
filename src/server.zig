@@ -71,9 +71,10 @@ fn isHeadMethodToken(m: []const u8) bool {
 /// - `config: struct`     Optional config overrides (fields match `zhttp.server.Config`).
 pub fn Server(comptime def: anytype) type {
     if (!@hasField(@TypeOf(def), "routes")) @compileError("Server definition must include `.routes = .{ ... }`");
-    const Routes = def.routes;
     const Context = if (@hasField(@TypeOf(def), "Context")) def.Context else void;
     const Middlewares = if (@hasField(@TypeOf(def), "middlewares")) def.middlewares else .{};
+    const MiddlewareRoutes = router.middlewareRoutes(Middlewares);
+    const Routes = router.mergeRoutes(def.routes, MiddlewareRoutes);
     const cfg = if (@hasField(@TypeOf(def), "config")) def.config else .{};
 
     const defaults: Config = .{};
@@ -195,6 +196,7 @@ pub fn Server(comptime def: anytype) type {
                 if (rid) |route_index| {
                     const dr = (if (Conf.fast_benchmark) Compiled.dispatchFast else Compiled.dispatch)(
                         if (Context == void) {} else self.ctx,
+                        self.io,
                         a,
                         &sr.interface,
                         line,
@@ -221,8 +223,8 @@ pub fn Server(comptime def: anytype) type {
                     res = dr.res;
                     keep_alive = dr.keep_alive;
                 } else {
-                    var mw_ctx: EmptyMwCtx = .{};
-                    var reqv = EmptyReq.init(a, line, &mw_ctx);
+                    const mw_ctx: EmptyMwCtx = .{};
+                    var reqv = EmptyReq.init(a, self.io, line, mw_ctx);
                     defer reqv.deinit(a);
                     reqv.parseHeaders(a, &sr.interface, Conf.max_header_bytes) catch |err| {
                         if (err == error.EndOfStream or err == error.ReadFailed) return;
@@ -342,8 +344,8 @@ pub fn Server(comptime def: anytype) type {
                         .path = linebuf[path_start..path_end],
                         .query = linebuf[0..0],
                     };
-                    var mw_ctx: EmptyMwCtx = .{};
-                    var reqv = EmptyReq.init(self.gpa, line, &mw_ctx);
+                    const mw_ctx: EmptyMwCtx = .{};
+                    var reqv = EmptyReq.init(self.gpa, self.io, line, mw_ctx);
                     defer reqv.deinit(self.gpa);
                     reqv.reader = &sr.interface;
 

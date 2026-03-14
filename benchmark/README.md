@@ -23,8 +23,8 @@ zig run benchmark/run_zhttp_external.zig
 ## FaF (external)
 
 FaF is benchmarked against the `faf-example` app (`/plaintext` on port `8080`).
-`zig run benchmark/run_faf.zig` clones both `faf-example` and `faf` into `/tmp/faf-example` and
-`/tmp/faf`, pins FaF to the revision in `Cargo.lock`, and applies a tiny compatibility patch
+`zig run benchmark/run_faf.zig` clones both `faf-example` and `faf` into `.zig-cache/faf-example` and
+`.zig-cache/faf`, pins FaF to the revision in `Cargo.lock`, and applies a tiny compatibility patch
 (for newer Rust nightly intrinsics) before building.
 
 ```sh

@@ -1044,3 +1044,105 @@ test "parseQuery: key without '=' treated as empty value" {
     try reqv.parseQuery(gpa);
     try std.testing.expectEqualStrings("", reqv.queryParam(.k).?);
 }
+
+test "fuzz: parseRequestLineBorrowed" {
+    var prng = std.Random.DefaultPrng.init(std.testing.random_seed);
+    const rnd = prng.random();
+    var buf: [256]u8 = undefined;
+    for (0..400) |_| {
+        var len = rnd.uintLessThan(usize, buf.len);
+        if (len == 0) len = 1;
+        rnd.bytes(buf[0..len]);
+        buf[len - 1] = '\n';
+        var r = Io.Reader.fixed(buf[0..len]);
+        _ = parseRequestLineBorrowed(&r, 8 * 1024) catch {};
+    }
+}
+
+test "fuzz: parseRequestLine owned alloc/free" {
+    var prng = std.Random.DefaultPrng.init(std.testing.random_seed);
+    const rnd = prng.random();
+    var buf: [256]u8 = undefined;
+    const gpa = std.testing.allocator;
+    for (0..200) |_| {
+        var len = rnd.uintLessThan(usize, buf.len);
+        if (len == 0) len = 1;
+        rnd.bytes(buf[0..len]);
+        buf[len - 1] = '\n';
+        var r = Io.Reader.fixed(buf[0..len]);
+        if (parseRequestLine(&r, gpa, 8 * 1024)) |line| {
+            defer gpa.free(line.method);
+            defer gpa.free(line.path);
+            defer gpa.free(line.query);
+        } else |_| {}
+    }
+}
+
+test "fuzz: parseHeaders and discardHeadersOnly" {
+    const ReqT = Request(
+        struct {
+            host: parse.Optional(parse.String),
+            content_length: parse.Optional(parse.Int(usize)),
+        },
+        struct {},
+        &.{},
+        TestMwCtx,
+    );
+
+    var prng = std.Random.DefaultPrng.init(std.testing.random_seed);
+    const rnd = prng.random();
+    var buf: [256]u8 = undefined;
+
+    var path_buf = "/".*;
+    var query_buf: [0]u8 = .{};
+    const line: RequestLine = .{ .method = "GET", .version = .http11, .path = path_buf[0..], .query = query_buf[0..] };
+    const gpa = std.testing.allocator;
+
+    for (0..200) |_| {
+        const len = 4 + rnd.uintLessThan(usize, buf.len - 4);
+        rnd.bytes(buf[0..len]);
+        buf[len - 4] = '\r';
+        buf[len - 3] = '\n';
+        buf[len - 2] = '\r';
+        buf[len - 1] = '\n';
+
+        var r1 = Io.Reader.fixed(buf[0..len]);
+        var mw_ctx: TestMwCtx = .{};
+        var reqv = ReqT.init(gpa, line, &mw_ctx);
+        defer reqv.deinit(gpa);
+        _ = reqv.parseHeaders(gpa, &r1, 512) catch {};
+
+        var r2 = Io.Reader.fixed(buf[0..len]);
+        _ = discardHeadersOnly(&r2, 512) catch {};
+    }
+}
+
+test "fuzz: parseQuery" {
+    const ReqT = Request(
+        struct {},
+        struct {
+            q: parse.Optional(parse.String),
+            n: parse.Optional(parse.Int(u32)),
+            k: parse.SliceOf(parse.String),
+        },
+        &.{},
+        TestMwCtx,
+    );
+
+    var prng = std.Random.DefaultPrng.init(std.testing.random_seed);
+    const rnd = prng.random();
+    const gpa = std.testing.allocator;
+
+    var path_buf = "/".*;
+    for (0..200) |_| {
+        const len = rnd.uintLessThan(usize, 128);
+        const query = try gpa.alloc(u8, len);
+        defer gpa.free(query);
+        rnd.bytes(query);
+        const line: RequestLine = .{ .method = "GET", .version = .http11, .path = path_buf[0..], .query = query };
+        var mw_ctx: TestMwCtx = .{};
+        var reqv = ReqT.init(gpa, line, &mw_ctx);
+        defer reqv.deinit(gpa);
+        _ = reqv.parseQuery(gpa) catch {};
+    }
+}

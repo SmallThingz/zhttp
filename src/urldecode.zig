@@ -91,3 +91,24 @@ test "decodeInPlace: compaction stays within slice" {
     try std.testing.expectEqualStrings("a/b", out);
     try std.testing.expect(out.len == 3);
 }
+
+test "fuzz: decodeInPlace" {
+    var prng = std.Random.DefaultPrng.init(std.testing.random_seed);
+    const rnd = prng.random();
+    var buf: [256]u8 = undefined;
+    var buf2: [256]u8 = undefined;
+
+    for (0..300) |_| {
+        const len = rnd.uintLessThan(usize, buf.len);
+        rnd.bytes(buf[0..len]);
+        @memcpy(buf2[0..len], buf[0..len]);
+
+        if (decodeInPlace(buf[0..len], .path_param)) |out1| {
+            try std.testing.expect(out1.len <= len);
+        } else |_| {}
+
+        if (decodeInPlace(buf2[0..len], .query_value)) |out2| {
+            try std.testing.expect(out2.len <= len);
+        } else |_| {}
+    }
+}

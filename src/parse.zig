@@ -646,3 +646,60 @@ test "SliceOf(String): collects and owns entries" {
     try std.testing.expectEqualStrings("one", items[0]);
     try std.testing.expectEqualStrings("two", items[1]);
 }
+
+test "fuzz: String/Optional/SliceOf/Int/Bool/Float" {
+    var prng = std.Random.DefaultPrng.init(std.testing.random_seed);
+    const rnd = prng.random();
+    const gpa = std.testing.allocator;
+    var buf: [128]u8 = undefined;
+
+    for (0..300) |_| {
+        const len = rnd.uintLessThan(usize, buf.len);
+        rnd.bytes(buf[0..len]);
+        const raw = buf[0..len];
+
+        var s: String = .{};
+        try s.parse(gpa, raw);
+        try s.doneParsing(true);
+        try std.testing.expectEqualSlices(u8, raw, s.get());
+        s.destroy(gpa);
+
+        const Opt = Optional(String);
+        var o: Opt = .{};
+        if (rnd.boolean()) {
+            try o.parse(gpa, raw);
+            try o.doneParsing(true);
+        } else {
+            _ = o.doneParsing(false) catch {};
+        }
+        o.destroy(gpa);
+
+        const L = SliceOf(String);
+        var l: L = .{};
+        defer l.destroy(gpa);
+        const items = rnd.uintLessThan(usize, 3);
+        for (0..items) |_| {
+            try l.parse(gpa, raw);
+        }
+        try l.doneParsing(items != 0);
+        _ = l.get();
+
+        const I = Int(u32);
+        var iv: I = .{};
+        _ = iv.parse(gpa, raw) catch {};
+        _ = iv.doneParsing(true) catch {};
+        iv.destroy(gpa);
+
+        const B = Bool;
+        var bv: B = .{};
+        _ = bv.parse(gpa, raw) catch {};
+        _ = bv.doneParsing(true) catch {};
+        bv.destroy(gpa);
+
+        const F = Float(f64);
+        var fv: F = .{};
+        _ = fv.parse(gpa, raw) catch {};
+        _ = fv.doneParsing(true) catch {};
+        fv.destroy(gpa);
+    }
+}

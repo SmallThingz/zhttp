@@ -1530,6 +1530,45 @@ test "error handler: handler error returns response (dispatch/dispatchFast)" {
     try std.testing.expectEqualStrings("handled", dr2.res.body);
 }
 
+test "fuzz: router match does not crash" {
+    const S = Compiled(void, .{
+        get("/a", struct {
+            fn h(_: void, _: anytype) !Res {
+                return Res.text(200, "a");
+            }
+        }.h, .{}),
+        post("/b/{id}", struct {
+            fn h(_: void, _: anytype) !Res {
+                return Res.text(200, "b");
+            }
+        }.h, .{}),
+        put("/c/*", struct {
+            fn h(_: void, _: anytype) !Res {
+                return Res.text(200, "c");
+            }
+        }.h, .{}),
+    }, .{}, null);
+
+    var params: [S.MaxParams][]u8 = undefined;
+    var prng = std.Random.DefaultPrng.init(std.testing.random_seed);
+    const rnd = prng.random();
+    var method_buf: [8]u8 = undefined;
+    var path_buf: [64]u8 = undefined;
+
+    for (0..400) |_| {
+        var mlen = rnd.uintLessThan(usize, method_buf.len);
+        if (mlen == 0) mlen = 1;
+        rnd.bytes(method_buf[0..mlen]);
+
+        var plen = rnd.uintLessThan(usize, path_buf.len);
+        if (plen == 0) plen = 1;
+        rnd.bytes(path_buf[0..plen]);
+        path_buf[0] = '/';
+
+        _ = S.match(method_buf[0..mlen], path_buf[0..plen], params[0..S.MaxParams]);
+    }
+}
+
 test "handler: zero-arg handler supported" {
     const S = Compiled(void, .{
         get("/a", struct {

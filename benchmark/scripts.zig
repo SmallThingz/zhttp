@@ -13,6 +13,96 @@ pub const BenchConfig = struct {
     quiet: bool = false,
 };
 
+fn trimCR(line: []const u8) []const u8 {
+    if (line.len != 0 and line[line.len - 1] == '\r') return line[0 .. line.len - 1];
+    return line;
+}
+
+fn trimLeftSpaceTab(s: []const u8) []const u8 {
+    var i: usize = 0;
+    while (i < s.len and (s[i] == ' ' or s[i] == '\t')) i += 1;
+    return s[i..];
+}
+
+fn asciiStartsWithIgnoreCase(haystack: []const u8, needle: []const u8) bool {
+    if (haystack.len < needle.len) return false;
+    var i: usize = 0;
+    while (i < needle.len) : (i += 1) {
+        const a = haystack[i];
+        const b = needle[i];
+        const al = if (a >= 'A' and a <= 'Z') a + 32 else a;
+        const bl = if (b >= 'A' and b <= 'Z') b + 32 else b;
+        if (al != bl) return false;
+    }
+    return true;
+}
+
+fn setTcpNoDelay(stream: *const std.Io.net.Stream) void {
+    if (builtin.os.tag != .windows) {
+        const fd = stream.socket.handle;
+        const one: c_int = 1;
+        _ = std.posix.setsockopt(fd, std.posix.IPPROTO.TCP, std.posix.TCP.NODELAY, std.mem.asBytes(&one)) catch {};
+    }
+}
+
+fn buildRequest(a: std.mem.Allocator, host: []const u8, path: []const u8, full: bool) ![]const u8 {
+    if (!full) {
+        return std.fmt.allocPrint(a, "GET {s} HTTP/1.1\r\n\r\n", .{path});
+    }
+    return std.fmt.allocPrint(
+        a,
+        "GET {s} HTTP/1.1\r\n" ++
+            "Host: {s}\r\n" ++
+            "Connection: keep-alive\r\n" ++
+            "\r\n",
+        .{ path, host },
+    );
+}
+
+fn discoverFixedResponseBytes(io: std.Io, address: std.Io.net.IpAddress, request_bytes: []const u8) !usize {
+    var stream = try std.Io.net.IpAddress.connect(address, io, .{ .mode = .stream });
+    defer stream.close(io);
+    setTcpNoDelay(&stream);
+
+    var read_buf: [64 * 1024]u8 = undefined;
+    var write_buf: [2048]u8 = undefined;
+
+    var sr = stream.reader(io, &read_buf);
+    var sw = stream.writer(io, &write_buf);
+
+    try sw.interface.writeAll(request_bytes);
+    try sw.interface.flush();
+
+    var header_bytes: usize = 0;
+    var content_length: ?usize = null;
+
+    while (true) {
+        const line0_incl = sr.interface.takeDelimiterInclusive('\n') catch |err| switch (err) {
+            error.EndOfStream => return error.EndOfStream,
+            else => return err,
+        };
+        header_bytes += line0_incl.len;
+        const line0 = line0_incl[0 .. line0_incl.len - 1];
+        const line = trimCR(line0);
+        if (line.len == 0) break;
+
+        if (asciiStartsWithIgnoreCase(line, "content-length:")) {
+            var v = line["content-length:".len..];
+            v = trimLeftSpaceTab(v);
+            content_length = try std.fmt.parseInt(usize, v, 10);
+        }
+    }
+
+    const body_len = content_length orelse return error.MissingContentLength;
+    var remaining = body_len;
+    while (remaining != 0) {
+        const got = try sr.interface.discard(.limited(remaining));
+        if (got == 0) return error.EndOfStream;
+        remaining -= got;
+    }
+    return header_bytes + body_len;
+}
+
 fn printLabel(io: std.Io, label: []const u8) void {
     var buffer: [256]u8 = undefined;
     const stdout_file = std.Io.File.stdout();
@@ -94,6 +184,8 @@ fn buildZigExe(
     defer allocator.free(zhttp);
     const out = try std.fs.path.join(allocator, &.{ root, out_rel });
     defer allocator.free(out);
+    const out_dir = try std.fs.path.join(allocator, &.{ root, "zig-out", "bin" });
+    defer allocator.free(out_dir);
     const cache_dir = try std.fs.path.join(allocator, &.{ root, ".zig-cache" });
     defer allocator.free(cache_dir);
     const global_cache_dir = try std.fs.path.join(allocator, &.{ root, ".zig-cache-global" });
@@ -105,10 +197,7 @@ fn buildZigExe(
     defer allocator.free(mzhttp);
     const emit_arg = try std.fmt.allocPrint(allocator, "-femit-bin={s}", .{out});
     defer allocator.free(emit_arg);
-    const cache_arg = try std.fmt.allocPrint(allocator, "--cache-dir={s}", .{cache_dir});
-    defer allocator.free(cache_arg);
-    const gcache_arg = try std.fmt.allocPrint(allocator, "--global-cache-dir={s}", .{global_cache_dir});
-    defer allocator.free(gcache_arg);
+    try std.Io.Dir.createDirPath(.cwd(), io, out_dir);
 
     try runChecked(io, &.{
         "zig",
@@ -121,8 +210,10 @@ fn buildZigExe(
         "--name",
         name,
         emit_arg,
-        cache_arg,
-        gcache_arg,
+        "--cache-dir",
+        cache_dir,
+        "--global-cache-dir",
+        global_cache_dir,
     }, root, true);
 }
 
@@ -505,115 +596,12 @@ fn patchFafExampleCargoToml(
     }
 }
 
-fn patchFafExampleMain(io: std.Io, allocator: std.mem.Allocator, path: []const u8) !void {
-    const default_main =
-        \\#![allow(clippy::missing_safety_doc, unused_imports, dead_code)]
-        \\
-        \\#[inline(always)]
-        \\fn likely(b: bool) -> bool { b }
-        \\use faf::const_concat_bytes;
-        \\use faf::const_http::*;
-        \\use faf::epoll;
-        \\use faf::util::memcmp;
-        \\
-        \\const ROUTE_PLAINTEXT: &[u8] = b"/plaintext";
-        \\const ROUTE_PLAINTEXT_LEN: usize = ROUTE_PLAINTEXT.len();
-        \\
-        \\const TEXT_PLAIN_CONTENT_TYPE: &[u8] = b"Content-Type: text/plain";
-        \\const CONTENT_LENGTH: &[u8] = b"Content-Length: ";
-        \\const PLAINTEXT_BODY: &[u8] = b"Hello, World!";
-        \\const PLAINTEXT_BODY_LEN: usize = PLAINTEXT_BODY.len();
-        \\const PLAINTEXT_BODY_SIZE: &[u8] = b"13";
-        \\
-        \\const PLAINTEXT_BASE: &[u8] = const_concat_bytes!(
-        \\   HTTP_200_OK,
-        \\   CRLF,
-        \\   SERVER,
-        \\   CRLF,
-        \\   TEXT_PLAIN_CONTENT_TYPE,
-        \\   CRLF,
-        \\   CONTENT_LENGTH,
-        \\   PLAINTEXT_BODY_SIZE,
-        \\   CRLF
-        \\);
-        \\
-        \\const PLAINTEXT_BASE_LEN: usize = PLAINTEXT_BASE.len();
-        \\
-        \\#[inline(always)]
-        \\fn cb(
-        \\   method: *const u8,
-        \\   method_len: usize,
-        \\   path: *const u8,
-        \\   path_len: usize,
-        \\   response_buffer: *mut u8,
-        \\   date_buff: *const u8,
-        \\) -> usize {
-        \\   unsafe {
-        \\      if likely(method_len == GET_LEN && path_len == ROUTE_PLAINTEXT_LEN) {
-        \\         if likely(memcmp(GET.as_ptr(), method, GET_LEN) == 0) {
-        \\            if likely(memcmp(ROUTE_PLAINTEXT.as_ptr(), path, ROUTE_PLAINTEXT_LEN) == 0) {
-        \\               core::ptr::copy_nonoverlapping(PLAINTEXT_BASE.as_ptr(), response_buffer, PLAINTEXT_BASE_LEN);
-        \\               core::ptr::copy_nonoverlapping(date_buff, response_buffer.add(PLAINTEXT_BASE_LEN), DATE_LEN);
-        \\               core::ptr::copy_nonoverlapping(
-        \\                  CRLFCRLF.as_ptr(),
-        \\                  response_buffer.add(PLAINTEXT_BASE_LEN + DATE_LEN),
-        \\                  CRLFCRLF_LEN,
-        \\               );
-        \\               core::ptr::copy_nonoverlapping(
-        \\                  PLAINTEXT_BODY.as_ptr(),
-        \\                  response_buffer.add(PLAINTEXT_BASE_LEN + DATE_LEN + CRLFCRLF_LEN),
-        \\                  PLAINTEXT_BODY_LEN,
-        \\               );
-        \\
-        \\               PLAINTEXT_BASE_LEN + DATE_LEN + CRLFCRLF_LEN + PLAINTEXT_BODY_LEN
-        \\            } else {
-        \\               core::ptr::copy_nonoverlapping(HTTP_404_NOTFOUND.as_ptr(), response_buffer, HTTP_404_NOTFOUND_LEN);
-        \\               HTTP_404_NOTFOUND_LEN
-        \\            }
-        \\         } else {
-        \\            core::ptr::copy_nonoverlapping(HTTP_405_NOTALLOWED.as_ptr(), response_buffer, HTTP_405_NOTALLOWED_LEN);
-        \\            HTTP_405_NOTALLOWED_LEN
-        \\         }
-        \\      } else {
-        \\         0
-        \\      }
-        \\   }
-        \\}
-        \\
-        \\#[inline(always)]
-        \\pub fn main() {
-        \\   epoll::go(8080, cb);
-        \\}
-        \\
-    ;
-
-    const data = try readFileMaybe(io, allocator, path);
-    if (data == null or data.?.len == 0) {
-        _ = try writeFileIfChanged(io, allocator, path, default_main);
-        return;
-    }
-
-    var out: std.ArrayList(u8) = .empty;
-    defer out.deinit(allocator);
-    var it = std.mem.splitScalar(u8, data.?, '\n');
-    while (it.next()) |line| {
-        const trimmed = std.mem.trim(u8, line, " \t");
-        if (std.mem.startsWith(u8, trimmed, "#![feature(")) continue;
-        if (std.mem.indexOf(u8, line, "use core::intrinsics::likely;") != null or
-            std.mem.indexOf(u8, line, "use std::hint::likely;") != null)
-        {
-            try out.appendSlice(allocator, "#[inline(always)] fn likely(b: bool) -> bool { b }");
-            try out.append(allocator, '\n');
-            continue;
-        }
-        try out.appendSlice(allocator, line);
-        try out.append(allocator, '\n');
-    }
-    if (std.mem.indexOf(u8, out.items, "fn main") == null) {
-        _ = try writeFileIfChanged(io, allocator, path, default_main);
-        return;
-    }
-    _ = try writeFileIfChanged(io, allocator, path, out.items);
+fn patchFafExampleMain(io: std.Io, allocator: std.mem.Allocator, root: []const u8, path: []const u8) !void {
+    const src = try std.fs.path.join(allocator, &.{ root, "benchmark", "faf_example_main.rs" });
+    defer allocator.free(src);
+    const default_main = try readFileMaybe(io, allocator, src) orelse return error.FileNotFound;
+    defer allocator.free(default_main);
+    _ = try writeFileIfChanged(io, allocator, path, default_main);
 }
 
 pub fn runFaf(
@@ -703,9 +691,24 @@ pub fn runFaf(
         }
         if (cargo_data) |buf| allocator.free(buf);
     }
+    if (ex_patched) {
+        const main_data = try readFileMaybe(io, allocator, main_path);
+        if (main_data == null) {
+            ex_patched = false;
+        } else {
+            const tmpl_path = try std.fs.path.join(allocator, &.{ root, "benchmark", "faf_example_main.rs" });
+            defer allocator.free(tmpl_path);
+            const tmpl_data = try readFileMaybe(io, allocator, tmpl_path) orelse return error.FileNotFound;
+            defer allocator.free(tmpl_data);
+            if (!std.mem.eql(u8, main_data.?, tmpl_data)) {
+                ex_patched = false;
+            }
+            allocator.free(main_data.?);
+        }
+    }
     if (!ex_patched) {
         try patchFafExampleCargoToml(io, allocator, cargo_path, faf_core_dir_abs, lock_path);
-        try patchFafExampleMain(io, allocator, main_path);
+        try patchFafExampleMain(io, allocator, root, main_path);
         _ = try writeFileIfChanged(io, allocator, ex_marker, faf_rev.?);
     }
 
@@ -762,6 +765,19 @@ pub fn runFaf(
     defer terminateChild(io, &server);
 
     try std.Io.sleep(io, std.Io.Duration.fromMilliseconds(200), .awake);
+    const addr = try std.Io.net.IpAddress.parseIp4(cfg.host, cfg.port);
+    const req_bytes = try buildRequest(allocator, cfg.host, cfg.path, cfg.full_request);
+    defer allocator.free(req_bytes);
+    const fixed_first = try discoverFixedResponseBytes(io, addr, req_bytes);
+    const fixed_second = try discoverFixedResponseBytes(io, addr, req_bytes);
+    if (fixed_first != fixed_second) return error.ResponseSizeChanged;
+    if (fixed_first != 150) {
+        var err_buf: [128]u8 = undefined;
+        const stderr_file = std.Io.File.stderr();
+        var stderr = stderr_file.writer(io, &err_buf);
+        try stderr.interface.print("FaF response size {d} bytes; expected 150. Ensure no stale server is running on port 8080.\n", .{fixed_first});
+        return error.UnexpectedResponseSize;
+    }
 
     var conns_buf: [32]u8 = undefined;
     var iters_buf: [32]u8 = undefined;
@@ -804,11 +820,11 @@ pub fn runFaf(
     });
     if (cfg.full_request) try bench_args.append(allocator, "--full-request");
     if (cfg.quiet) try bench_args.append(allocator, "--quiet");
-    if (cfg.fixed_bytes) |v| {
-        var fixed_buf: [32]u8 = undefined;
-        const fixed_arg = try std.fmt.bufPrint(&fixed_buf, "--fixed-bytes={d}", .{v});
-        try bench_args.append(allocator, fixed_arg);
-    }
+    const fixed_bytes = cfg.fixed_bytes orelse fixed_first;
+    if (cfg.fixed_bytes != null and fixed_bytes != fixed_first) return error.FixedBytesMismatch;
+    var fixed_buf: [32]u8 = undefined;
+    const fixed_arg = try std.fmt.bufPrint(&fixed_buf, "--fixed-bytes={d}", .{fixed_bytes});
+    try bench_args.append(allocator, fixed_arg);
     try env.put("BENCH_LABEL", "faf ");
     try runCheckedEnv(io, bench_args.items, root, true, &env);
 }

@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
@@ -6,6 +7,18 @@ const Io = std.Io;
 const response = @import("response.zig");
 const request = @import("request.zig");
 const router = @import("router.zig");
+
+fn setTcpNoDelay(stream: *const std.Io.net.Stream) void {
+    if (builtin.os.tag != .linux) return;
+    const linux = std.os.linux;
+    var one: i32 = 1;
+    std.posix.setsockopt(
+        stream.socket.handle,
+        @intCast(linux.IPPROTO.TCP),
+        linux.TCP.NODELAY,
+        std.mem.asBytes(&one),
+    ) catch {};
+}
 
 pub const Config = struct {
     /// Per-connection read buffer size.
@@ -103,6 +116,7 @@ pub fn Server(comptime def: anytype) type {
 
         fn handleConn(self: *Self, stream: std.Io.net.Stream) Io.Cancelable!void {
             defer stream.close(self.io);
+            setTcpNoDelay(&stream);
 
             var read_buf: [Conf.read_buffer]u8 = undefined;
             var write_buf: [Conf.write_buffer]u8 = undefined;

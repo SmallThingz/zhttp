@@ -158,7 +158,7 @@ pub fn write(
 
     // Always emit Content-Length (no chunked responses for now).
     var len_buf: [32]u8 = undefined;
-    const body_len: usize = if (send_body) res.body.len else res.body.len;
+    const body_len: usize = res.body.len;
     const len_str = std.fmt.bufPrint(&len_buf, "{d}", .{body_len}) catch unreachable;
     try w.writeAll("content-length: ");
     try w.writeAll(len_str);

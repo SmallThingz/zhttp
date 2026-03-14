@@ -12,10 +12,7 @@ pub const Version = enum { http10, http11 };
 pub const BodyKind = enum { none, content_length, chunked };
 
 pub const Base = struct {
-    method: Method,
     version: Version,
-    path: []u8,
-    query: []u8,
 
     connection_close: bool = false,
 
@@ -168,16 +165,35 @@ fn containsTokenIgnoreCase(value: []const u8, comptime token: []const u8) bool {
     return false;
 }
 
-pub fn Request(comptime Headers: type, comptime Query: type, comptime param_names: []const []const u8) type {
+pub fn RequestP(comptime Headers: type, comptime Query: type, comptime Params: type, comptime param_names: []const []const u8) type {
     const HeaderLookup = parse.Lookup(Headers, .header);
     const QueryLookup = parse.Lookup(Query, .query);
+    const ParamFields = comptime parse.structFields(Params);
+
+    const ParamIndices = comptime blk: {
+        var out: [ParamFields.len]u8 = undefined;
+        for (ParamFields, 0..) |f, fi| {
+            var found: ?u8 = null;
+            for (param_names, 0..) |pn, pi| {
+                if (std.mem.eql(u8, pn, f.name)) found = @intCast(pi);
+            }
+            if (found == null) {
+                @compileError("params field '" ++ f.name ++ "' is not present in the route pattern");
+            }
+            out[fi] = found.?;
+        }
+        break :blk out;
+    };
 
     return struct {
         arena: Allocator,
         base: Base,
+        query_raw: []u8,
+        reader: ?*Io.Reader = null,
         headers: Headers = parse.emptyStruct(Headers),
         query: Query = parse.emptyStruct(Query),
-        params: [param_names.len][]u8 = undefined,
+        params_parsed: Params = parse.emptyStruct(Params),
+        params_raw: [param_names.len][]u8 = undefined,
 
         const Self = @This();
 
@@ -188,14 +204,12 @@ pub fn Request(comptime Headers: type, comptime Query: type, comptime param_name
             var self: Self = .{
                 .arena = arena,
                 .base = .{
-                    .method = line.method,
                     .version = line.version,
-                    .path = line.path,
-                    .query = line.query,
                 },
+                .query_raw = line.query,
             };
             inline for (param_names, 0..) |_, i| {
-                self.params[i] = params_in[i];
+                self.params_raw[i] = params_in[i];
             }
             return self;
         }
@@ -207,28 +221,53 @@ pub fn Request(comptime Headers: type, comptime Query: type, comptime param_name
         pub fn deinit(self: *Self, a: Allocator) void {
             parse.destroyStruct(&self.headers, a);
             parse.destroyStruct(&self.query, a);
+            parse.destroyStruct(&self.params_parsed, a);
         }
 
-        pub fn header(self: *const Self, comptime field: anytype) @TypeOf(@field(self.headers, @tagName(field)).get()) {
+        /// Get a captured header by field name, e.g. `req.header(.host)`.
+        pub fn header(self: *const Self, comptime field: @EnumLiteral()) @TypeOf(@field(self.headers, @tagName(field)).get()) {
             return @field(self.headers, @tagName(field)).get();
         }
 
-        pub fn queryParam(self: *const Self, comptime field: anytype) @TypeOf(@field(self.query, @tagName(field)).get()) {
+        /// Get a captured query param by field name, e.g. `req.queryParam(.page)`.
+        pub fn queryParam(self: *const Self, comptime field: @EnumLiteral()) @TypeOf(@field(self.query, @tagName(field)).get()) {
             return @field(self.query, @tagName(field)).get();
         }
 
-        pub fn param(self: *const Self, comptime name: anytype) []const u8 {
-            const wanted = @tagName(name);
-            comptime var idx: ?usize = null;
-            inline for (param_names, 0..) |pn, i| {
-                if (comptime std.mem.eql(u8, pn, wanted)) idx = i;
-            }
-            if (idx == null) @compileError("no param '" ++ wanted ++ "' for this route");
-            return self.params[idx.?];
+        /// Get a raw path param slice by name, e.g. `req.param(.id)`.
+        /// This is always a string slice (percent-decoded).
+        pub fn param(self: *const Self, comptime name: @EnumLiteral()) []const u8 {
+            const idx = comptime blk: {
+                const wanted = @tagName(name);
+                var idx: ?usize = null;
+                for (param_names, 0..) |pn, i| {
+                    if (std.mem.eql(u8, pn, wanted)) idx = i;
+                }
+                if (idx == null) @compileError("no param '" ++ wanted ++ "' for this route");
+                break :blk idx;
+            };
+            return self.params_raw[idx.?];
+        }
+
+        /// Get a typed path param value from `.params` captures (or middleware `Needs.params`),
+        /// e.g. `req.paramValue(.id)`.
+        pub fn paramValue(self: *const Self, comptime field: @EnumLiteral()) @TypeOf(@field(self.params_parsed, @tagName(field)).get()) {
+            return @field(self.params_parsed, @tagName(field)).get();
         }
 
         pub fn keepAlive(self: *const Self) bool {
             return self.base.version == .http11 and !self.base.connection_close;
+        }
+
+        pub fn parseParams(self: *Self, a: Allocator) !void {
+            if (ParamFields.len == 0) return;
+            // reset captures each request
+            self.params_parsed = parse.emptyStruct(Params);
+            inline for (ParamFields, 0..) |f, fi| {
+                const raw = self.params_raw[ParamIndices[fi]];
+                try @field(self.params_parsed, f.name).parse(a, raw);
+            }
+            try parse.doneParsingStruct(&self.params_parsed, &([_]bool{true} ** ParamFields.len));
         }
 
         pub fn parseQuery(self: *Self, a: Allocator) !void {
@@ -236,7 +275,7 @@ pub fn Request(comptime Headers: type, comptime Query: type, comptime param_name
             var present: [QueryLookup.count]bool = .{false} ** QueryLookup.count;
 
             var i: usize = 0;
-            const q = self.base.query;
+            const q = self.query_raw;
             while (i <= q.len) {
                 const amp = std.mem.indexOfScalarPos(u8, q, i, '&') orelse q.len;
                 const part = q[i..amp];
@@ -263,6 +302,7 @@ pub fn Request(comptime Headers: type, comptime Query: type, comptime param_name
         }
 
         pub fn parseHeaders(self: *Self, a: Allocator, r: *Io.Reader, max_header_bytes: usize) ParseHeadersError!void {
+            self.reader = r;
             if (HeaderLookup.count != 0) {
                 // reset captures each request
                 self.headers = parse.emptyStruct(Headers);
@@ -336,7 +376,7 @@ pub fn Request(comptime Headers: type, comptime Query: type, comptime param_name
             try r.readSliceAll(buf);
         }
 
-        pub fn bodyAll(self: *Self, a: Allocator, r: *Io.Reader, max_bytes: usize) ![]const u8 {
+        fn bodyAllFrom(self: *Self, a: Allocator, r: *Io.Reader, max_bytes: usize) ![]const u8 {
             return switch (self.base.body_kind) {
                 .none => "",
                 .content_length => blk: {
@@ -386,7 +426,15 @@ pub fn Request(comptime Headers: type, comptime Query: type, comptime param_name
             };
         }
 
-        pub fn discardUnreadBody(self: *Self, r: *Io.Reader) !void {
+        /// Read and return the full request body, up to `max_bytes`.
+        ///
+        /// Requires headers to have been parsed for this request.
+        pub fn bodyAll(self: *Self, max_bytes: usize) ![]const u8 {
+            const r = self.reader orelse return error.BadRequest;
+            return bodyAllFrom(self, self.arena, r, max_bytes);
+        }
+
+        fn discardUnreadBodyFrom(self: *Self, r: *Io.Reader) !void {
             switch (self.base.body_kind) {
                 .none => return,
                 .content_length => {
@@ -432,7 +480,19 @@ pub fn Request(comptime Headers: type, comptime Query: type, comptime param_name
                 },
             }
         }
+
+        /// Discard any unread request body bytes so the connection can be reused.
+        ///
+        /// Requires headers to have been parsed for this request.
+        pub fn discardUnreadBody(self: *Self) !void {
+            const r = self.reader orelse return error.BadRequest;
+            return discardUnreadBodyFrom(self, r);
+        }
     };
+}
+
+pub fn Request(comptime Headers: type, comptime Query: type, comptime param_names: []const []const u8) type {
+    return RequestP(Headers, Query, struct {}, param_names);
 }
 
 test "query capture + decode" {
@@ -508,7 +568,7 @@ test "chunked bodyAll" {
     var reqv = ReqT.init(gpa, line, &.{});
     defer reqv.deinit(gpa);
     try reqv.parseHeaders(gpa, &r, 1024);
-    const body = try reqv.bodyAll(gpa, &r, 32);
+    const body = try reqv.bodyAll(32);
     defer gpa.free(body);
     try std.testing.expectEqualStrings("Wiki", body);
 }

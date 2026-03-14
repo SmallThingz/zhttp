@@ -112,7 +112,7 @@ test "bodyAll: content-length" {
 
     var r = std.Io.Reader.fixed("Content-Length: 5\r\n\r\nhello");
     try reqv.parseHeaders(gpa, @constCast(&r), 8 * 1024);
-    const body = try reqv.bodyAll(gpa, @constCast(&r), 16);
+    const body = try reqv.bodyAll(16);
     defer gpa.free(body);
     try std.testing.expectEqualStrings("hello", body);
 }
@@ -131,7 +131,7 @@ test "bodyAll: chunked" {
 
     var r = std.Io.Reader.fixed("Transfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n0\r\n\r\n");
     try reqv.parseHeaders(gpa, @constCast(&r), 8 * 1024);
-    const body = try reqv.bodyAll(gpa, @constCast(&r), 64);
+    const body = try reqv.bodyAll(64);
     defer gpa.free(body);
     try std.testing.expectEqualStrings("hello", body);
 }
@@ -139,21 +139,21 @@ test "bodyAll: chunked" {
 test "router: exact + param + glob" {
     const App = struct {};
     const S = router.Compiled(App, .{
-        zhttp.get("/a", .{}, struct {
+        zhttp.get("/a", struct {
             fn h(_: *App, _: anytype) !zhttp.Res {
                 return zhttp.Res.text(200, "a");
             }
-        }.h),
-        zhttp.get("/u/{id}", .{}, struct {
+        }.h, .{}),
+        zhttp.get("/u/{id}", struct {
             fn h(_: *App, _: anytype) !zhttp.Res {
                 return zhttp.Res.text(200, "u");
             }
-        }.h),
-        zhttp.get("/g/*", .{}, struct {
+        }.h, .{}),
+        zhttp.get("/g/*", struct {
             fn h(_: *App, _: anytype) !zhttp.Res {
                 return zhttp.Res.text(200, "g");
             }
-        }.h),
+        }.h, .{}),
     }, .{});
 
     var params: [S.MaxParams][]u8 = undefined;
@@ -183,11 +183,11 @@ test "middleware Needs: supports 'headers: type = ...' form" {
     };
 
     _ = router.Compiled(void, .{
-        zhttp.get("/x", .{}, struct {
+        zhttp.get("/x", struct {
             fn h(_: void, _: anytype) !zhttp.Res {
                 return zhttp.Res.text(200, "x");
             }
-        }.h),
+        }.h, .{}),
     }, .{Mw});
 }
 
@@ -304,16 +304,16 @@ test "query: invalid percent-encoding rejected" {
 
 test "dispatch: pipelined request discards unread content-length body" {
     const S = router.Compiled(void, .{
-        zhttp.post("/x", .{}, struct {
+        zhttp.post("/x", struct {
             fn h(_: void, _: anytype) !zhttp.Res {
                 return zhttp.Res.text(200, "p");
             }
-        }.h),
-        zhttp.get("/x", .{}, struct {
+        }.h, .{}),
+        zhttp.get("/x", struct {
             fn h(_: void, _: anytype) !zhttp.Res {
                 return zhttp.Res.text(200, "g");
             }
-        }.h),
+        }.h, .{}),
     }, .{});
 
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
@@ -346,16 +346,16 @@ test "dispatch: pipelined request discards unread content-length body" {
 
 test "dispatch: pipelined request discards unread chunked body" {
     const S = router.Compiled(void, .{
-        zhttp.post("/x", .{}, struct {
+        zhttp.post("/x", struct {
             fn h(_: void, _: anytype) !zhttp.Res {
                 return zhttp.Res.text(200, "p");
             }
-        }.h),
-        zhttp.get("/x", .{}, struct {
+        }.h, .{}),
+        zhttp.get("/x", struct {
             fn h(_: void, _: anytype) !zhttp.Res {
                 return zhttp.Res.text(200, "g");
             }
-        }.h),
+        }.h, .{}),
     }, .{});
 
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
@@ -388,11 +388,11 @@ test "dispatch: pipelined request discards unread chunked body" {
 
 test "dispatch: path param percent-decodes" {
     const S = router.Compiled(void, .{
-        zhttp.get("/u/{id}", .{}, struct {
+        zhttp.get("/u/{id}", struct {
             fn h(_: void, req: anytype) !zhttp.Res {
                 return zhttp.Res.text(200, req.param(.id));
             }
-        }.h),
+        }.h, .{}),
     }, .{});
 
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
@@ -425,12 +425,12 @@ test "dispatchFast: routes with header needs fall back to full dispatch" {
     const H = struct { host: parse.String };
 
     const S = router.Compiled(void, .{
-        zhttp.get("/x", .{ .headers = H }, struct {
+        zhttp.get("/x", struct {
             fn h(_: void, req: anytype) !zhttp.Res {
                 _ = req.header(.host);
                 return zhttp.Res.text(200, "ok");
             }
-        }.h),
+        }.h, .{ .headers = H }),
     }, .{});
 
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
@@ -540,7 +540,7 @@ test "chunked: invalid chunk CRLF rejected" {
     defer reqv.deinit(gpa);
     var r = std.Io.Reader.fixed("Transfer-Encoding: chunked\r\n\r\n1\r\naXY0\r\n\r\n");
     try reqv.parseHeaders(gpa, @constCast(&r), 8 * 1024);
-    try std.testing.expectError(error.BadRequest, reqv.discardUnreadBody(@constCast(&r)));
+    try std.testing.expectError(error.BadRequest, reqv.discardUnreadBody());
 }
 
 test "chunked: truncated body yields EndOfStream" {
@@ -556,7 +556,7 @@ test "chunked: truncated body yields EndOfStream" {
     defer reqv.deinit(gpa);
     var r = std.Io.Reader.fixed("Transfer-Encoding: chunked\r\n\r\n1\r\na");
     try reqv.parseHeaders(gpa, @constCast(&r), 8 * 1024);
-    try std.testing.expectError(error.EndOfStream, reqv.discardUnreadBody(@constCast(&r)));
+    try std.testing.expectError(error.EndOfStream, reqv.discardUnreadBody());
 }
 
 test "bodyAll: max_bytes enforced" {
@@ -572,7 +572,7 @@ test "bodyAll: max_bytes enforced" {
     defer reqv.deinit(gpa);
     var r = std.Io.Reader.fixed("Content-Length: 5\r\n\r\nhello");
     try reqv.parseHeaders(gpa, @constCast(&r), 8 * 1024);
-    try std.testing.expectError(error.PayloadTooLarge, reqv.bodyAll(gpa, @constCast(&r), 4));
+    try std.testing.expectError(error.PayloadTooLarge, reqv.bodyAll(4));
 }
 
 test "discardHeadersOnly: consumes until blank line" {
@@ -600,11 +600,11 @@ test "request line: max length enforced" {
 
 test "router: trailing slash does not match exact literal" {
     const S = router.Compiled(void, .{
-        zhttp.get("/a", .{}, struct {
+        zhttp.get("/a", struct {
             fn h(_: void, _: anytype) !zhttp.Res {
                 return zhttp.Res.text(200, "a");
             }
-        }.h),
+        }.h, .{}),
     }, .{});
 
     var params: [S.MaxParams][]u8 = undefined;
@@ -612,13 +612,176 @@ test "router: trailing slash does not match exact literal" {
     try std.testing.expectEqual(@as(?u16, null), S.match(.GET, p1[0..], params[0..S.MaxParams]));
 }
 
+test "dispatch: typed path params via opts.params" {
+    const S = router.Compiled(void, .{
+        zhttp.get("/u/{id}", struct {
+            fn h(_: void, req: anytype) !zhttp.Res {
+                const body = try std.fmt.allocPrint(req.allocator(), "{d}", .{req.paramValue(.id)});
+                return zhttp.Res.text(200, body);
+            }
+        }.h, .{
+            .params = struct {
+                id: parse.Int(u32),
+            },
+        }),
+    }, .{});
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    var params: [S.MaxParams][]u8 = undefined;
+    var r = std.Io.Reader.fixed("GET /u/42 HTTP/1.1\r\n\r\n");
+    const line = try request.parseRequestLineBorrowed(@constCast(&r), 8 * 1024);
+    const rid = S.match(line.method, line.path, params[0..S.MaxParams]).?;
+    const dr = try S.dispatch({}, a, @constCast(&r), line, rid, params[0..S.MaxParams], 8 * 1024);
+    try std.testing.expectEqualStrings("42", dr.res.body);
+}
+
+test "dispatch: typed path params bad value errors" {
+    const S = router.Compiled(void, .{
+        zhttp.get("/u/{id}", struct {
+            fn h(_: void, _: anytype) !zhttp.Res {
+                return zhttp.Res.text(200, "ok");
+            }
+        }.h, .{
+            .params = struct {
+                id: parse.Int(u32),
+            },
+        }),
+    }, .{});
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    var params: [S.MaxParams][]u8 = undefined;
+    var r = std.Io.Reader.fixed("GET /u/nope HTTP/1.1\r\n\r\n");
+    const line = try request.parseRequestLineBorrowed(@constCast(&r), 8 * 1024);
+    const rid = S.match(line.method, line.path, params[0..S.MaxParams]).?;
+    try std.testing.expectError(error.BadValue, S.dispatch({}, a, @constCast(&r), line, rid, params[0..S.MaxParams], 8 * 1024));
+}
+
+test "dispatch: path params allocate once" {
+    const Allocator = std.mem.Allocator;
+    const Alignment = std.mem.Alignment;
+
+    const CountingAllocator = struct {
+        inner: Allocator,
+        alloc_calls: usize = 0,
+        resize_calls: usize = 0,
+        remap_calls: usize = 0,
+        free_calls: usize = 0,
+
+        fn allocator(self: *@This()) Allocator {
+            return .{ .ptr = self, .vtable = &vtable };
+        }
+
+        const vtable: Allocator.VTable = .{
+            .alloc = alloc,
+            .resize = resize,
+            .remap = remap,
+            .free = free,
+        };
+
+        fn alloc(ctx: *anyopaque, len: usize, alignment: Alignment, ret_addr: usize) ?[*]u8 {
+            const self: *@This() = @ptrCast(@alignCast(ctx));
+            self.alloc_calls += 1;
+            return Allocator.rawAlloc(self.inner, len, alignment, ret_addr);
+        }
+
+        fn resize(ctx: *anyopaque, memory: []u8, alignment: Alignment, new_len: usize, ret_addr: usize) bool {
+            const self: *@This() = @ptrCast(@alignCast(ctx));
+            self.resize_calls += 1;
+            return Allocator.rawResize(self.inner, memory, alignment, new_len, ret_addr);
+        }
+
+        fn remap(ctx: *anyopaque, memory: []u8, alignment: Alignment, new_len: usize, ret_addr: usize) ?[*]u8 {
+            const self: *@This() = @ptrCast(@alignCast(ctx));
+            self.remap_calls += 1;
+            return Allocator.rawRemap(self.inner, memory, alignment, new_len, ret_addr);
+        }
+
+        fn free(ctx: *anyopaque, memory: []u8, alignment: Alignment, ret_addr: usize) void {
+            const self: *@This() = @ptrCast(@alignCast(ctx));
+            self.free_calls += 1;
+            return Allocator.rawFree(self.inner, memory, alignment, ret_addr);
+        }
+    };
+
+    const S = router.Compiled(void, .{
+        zhttp.get("/u/{a}/{b}/{c}/{d}", struct {
+            fn h(_: void, req: anytype) !zhttp.Res {
+                const sum: u32 = req.paramValue(.a) + req.paramValue(.b) + req.paramValue(.c) + req.paramValue(.d);
+                return zhttp.Res.text(200, if (sum == 10) "ok" else "bad");
+            }
+        }.h, .{
+            .params = struct {
+                a: parse.Int(u32),
+                b: parse.Int(u32),
+                c: parse.Int(u32),
+                d: parse.Int(u32),
+            },
+        }),
+    }, .{});
+
+    var params: [S.MaxParams][]u8 = undefined;
+    var r = std.Io.Reader.fixed("GET /u/1/2/3/4 HTTP/1.1\r\n\r\n");
+    const line = try request.parseRequestLineBorrowed(@constCast(&r), 8 * 1024);
+    const rid = S.match(line.method, line.path, params[0..S.MaxParams]).?;
+
+    var backing: [1024]u8 = undefined;
+    var fba = std.heap.FixedBufferAllocator.init(&backing);
+    var ca: CountingAllocator = .{ .inner = fba.allocator() };
+    const a = ca.allocator();
+
+    const dr = try S.dispatch({}, a, @constCast(&r), line, rid, params[0..S.MaxParams], 8 * 1024);
+    try std.testing.expectEqualStrings("ok", dr.res.body);
+    try std.testing.expectEqual(@as(usize, 1), ca.alloc_calls);
+}
+
+test "dispatch: middleware Needs.params works" {
+    const RequireId = struct {
+        pub const Needs = struct {
+            params: type = struct {
+                id: parse.Int(u32),
+            },
+        };
+
+        pub fn call(comptime Next: type, next: Next, _: void, req: anytype) !zhttp.Res {
+            if (req.paramValue(.id) == 0) return zhttp.Res.text(400, "bad");
+            return try next.call({}, req);
+        }
+    };
+
+    const S = router.Compiled(void, .{
+        zhttp.get("/u/{id}", struct {
+            fn h(_: void, req: anytype) !zhttp.Res {
+                const body = try std.fmt.allocPrint(req.allocator(), "{d}", .{req.paramValue(.id)});
+                return zhttp.Res.text(200, body);
+            }
+        }.h, .{}),
+    }, .{RequireId});
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    var params: [S.MaxParams][]u8 = undefined;
+    var r = std.Io.Reader.fixed("GET /u/7 HTTP/1.1\r\n\r\n");
+    const line = try request.parseRequestLineBorrowed(@constCast(&r), 8 * 1024);
+    const rid = S.match(line.method, line.path, params[0..S.MaxParams]).?;
+    const dr = try S.dispatch({}, a, @constCast(&r), line, rid, params[0..S.MaxParams], 8 * 1024);
+    try std.testing.expectEqualStrings("7", dr.res.body);
+}
+
 test "handler: zero-arg handler supported" {
     const S = router.Compiled(void, .{
-        zhttp.get("/a", .{}, struct {
+        zhttp.get("/a", struct {
             fn h() !zhttp.Res {
                 return zhttp.Res.text(200, "x");
             }
-        }.h),
+        }.h, .{}),
     }, .{});
 
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
@@ -636,11 +799,11 @@ test "handler: zero-arg handler supported" {
 test "handler: ctx-only handler supported" {
     const Ctx = struct { v: u8 };
     const S = router.Compiled(Ctx, .{
-        zhttp.get("/a", .{}, struct {
+        zhttp.get("/a", struct {
             fn h(ctx: *Ctx) !zhttp.Res {
                 return zhttp.Res.text(200, if (ctx.v == 1) "ok" else "bad");
             }
-        }.h),
+        }.h, .{}),
     }, .{});
 
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
@@ -658,11 +821,11 @@ test "handler: ctx-only handler supported" {
 
 test "dispatch: invalid path percent-encoding rejected" {
     const S = router.Compiled(void, .{
-        zhttp.get("/u/{id}", .{}, struct {
+        zhttp.get("/u/{id}", struct {
             fn h(_: void, _: anytype) !zhttp.Res {
                 return zhttp.Res.text(200, "x");
             }
-        }.h),
+        }.h, .{}),
     }, .{});
 
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
@@ -697,7 +860,7 @@ test "server: benchmark fast-single route responds + pipelines" {
 
     const SrvT = zhttp.Server(.{
         .routes = .{
-            zhttp.get("/plaintext", .{}, Bench.plaintext),
+            zhttp.get("/plaintext", Bench.plaintext, .{}),
         },
         .config = .{
             .read_buffer = 64 * 1024,
@@ -774,7 +937,7 @@ test "server: benchmark fast-single route handles full request headers" {
 
     const SrvT = zhttp.Server(.{
         .routes = .{
-            zhttp.get("/plaintext", .{}, Bench.plaintext),
+            zhttp.get("/plaintext", Bench.plaintext, .{}),
         },
         .config = .{
             .read_buffer = 64 * 1024,
@@ -855,7 +1018,7 @@ test "server: Connection close header closes socket" {
     // Disable fast benchmark mode here so we honor `Connection: close`.
     const SrvT = zhttp.Server(.{
         .routes = .{
-            zhttp.get("/plaintext", .{}, Bench.plaintext),
+            zhttp.get("/plaintext", Bench.plaintext, .{}),
         },
         .config = .{
             .read_buffer = 64 * 1024,

@@ -296,7 +296,7 @@ fn plaintext() !zhttp.Res {
 fn runZhttp(init: std.process.Init, cfg: Config) !void {
     const SrvT = zhttp.Server(.{
         .routes = .{
-            zhttp.get("/plaintext", .{}, plaintext),
+            zhttp.get("/plaintext", plaintext, .{}),
         },
         .config = .{
             .read_buffer = 64 * 1024,

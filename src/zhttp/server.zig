@@ -22,9 +22,13 @@ pub const Method = enum(u8) {
 };
 
 pub const Config = struct {
+    /// Per-connection read buffer size.
     read_buffer: usize = 32 * 1024,
+    /// Per-connection write buffer size.
     write_buffer: usize = 16 * 1024,
+    /// Maximum request line length (bytes, including `\r\n`).
     max_request_line: usize = 8 * 1024,
+    /// Maximum total header bytes (bytes, including line endings).
     max_header_bytes: usize = 32 * 1024,
     /// Unsafe fast path for benchmarking:
     /// - Only used when the matched route is eligible (exact route, no headers/query/params/middleware needs).
@@ -74,12 +78,22 @@ fn optsHasNeeds(comptime opts: anytype) bool {
     if (@hasField(@TypeOf(opts), "query")) {
         if (parse.structFields(@field(opts, "query")).len != 0) return true;
     }
+    if (@hasField(@TypeOf(opts), "params")) {
+        if (parse.structFields(@field(opts, "params")).len != 0) return true;
+    }
     if (@hasField(@TypeOf(opts), "middlewares")) {
         if (tupleLen(@field(opts, "middlewares")) != 0) return true;
     }
     return false;
 }
 
+/// Server definition options (`def`) are provided at comptime.
+///
+/// Supported fields:
+/// - `Context: type`      Optional user context type. Defaults to `void`.
+/// - `middlewares: tuple` Optional global middleware types. Defaults to `.{}`.
+/// - `routes: struct`     Required routes tuple/struct: `.{ zhttp.get(...), ... }`.
+/// - `config: struct`     Optional config overrides (fields match `zhttp.server.Config`).
 pub fn Server(comptime def: anytype) type {
     if (!@hasField(@TypeOf(def), "routes")) @compileError("Server definition must include `.routes = .{ ... }`");
     const Routes = def.routes;
@@ -240,7 +254,7 @@ pub fn Server(comptime def: anytype) type {
                         writeSimple(self, &sw.interface, status, "bad request");
                         return;
                     };
-                    reqv.discardUnreadBody(&sr.interface) catch {
+                    reqv.discardUnreadBody() catch {
                         return;
                     };
                     keep_alive = reqv.keepAlive();
@@ -352,6 +366,7 @@ pub fn Server(comptime def: anytype) type {
                     };
                     var reqv = EmptyReq.init(self.gpa, line, &.{});
                     defer reqv.deinit(self.gpa);
+                    reqv.reader = &sr.interface;
 
                     if (handler_params.len == 1) break :blk try @call(.auto, handler, .{&reqv});
                     if (handler_params.len == 2) break :blk try @call(.auto, handler, .{ ctx, &reqv });

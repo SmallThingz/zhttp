@@ -9,40 +9,87 @@ const parse = @import("parse.zig");
 const request = @import("request.zig");
 const urldecode = @import("urldecode.zig");
 
+/// Route options passed at comptime to `route`, `get`, `post`, etc.
+///
+/// Any struct with a subset of these fields is accepted:
+/// - `headers: type`  Request header captures (see `zhttp.parse.*` parsers)
+/// - `query: type`    Query-string captures
+/// - `params: type`   Path param captures (parsed from `{name}` segments)
+/// - `middlewares: tuple` Per-route middleware types (same `call(...)` interface as global middlewares)
+///
+/// Notes:
+/// - Captures are *types* (e.g. `struct { id: zhttp.parse.Int(u64) }`), not values.
+/// - Header keys are normalized: `_` in field names matches `-` in header names.
+/// - Query keys are exact (case-sensitive).
+fn validateRouteOptions(comptime opts: anytype) void {
+    const OptT = @TypeOf(opts);
+    const info = @typeInfo(OptT);
+    if (info != .@"struct") @compileError("route options must be a struct literal");
+
+    inline for (info.@"struct".fields) |f| {
+        const name0 = f.name;
+        const name: []const u8 = name0[0..name0.len];
+        comptime {
+            const allowed = std.mem.eql(u8, name, "headers") or
+                std.mem.eql(u8, name, "query") or
+                std.mem.eql(u8, name, "params") or
+                std.mem.eql(u8, name, "middlewares");
+            if (!allowed) @compileError("unknown route option: " ++ name);
+
+            if (std.mem.eql(u8, name, "headers") or std.mem.eql(u8, name, "query") or std.mem.eql(u8, name, "params")) {
+                if (@TypeOf(@field(opts, name0)) != type) {
+                    @compileError("route option '" ++ name ++ "' must be a type (e.g. .{" ++ name ++ " = struct { ... } })");
+                }
+            } else if (std.mem.eql(u8, name, "middlewares")) {
+                const mw = @field(opts, name0);
+                const mw_info = @typeInfo(@TypeOf(mw));
+                if (mw_info != .@"struct" or !mw_info.@"struct".is_tuple) {
+                    @compileError("route option 'middlewares' must be a tuple (e.g. .{ .middlewares = .{Mw1, Mw2} })");
+                }
+            }
+        }
+    }
+}
+
 pub fn route(
-    comptime method: Method,
+    /// HTTP method enum literal, e.g. `.GET`.
+    comptime method: @EnumLiteral(),
     comptime pattern: []const u8,
-    comptime opts: anytype,
+    /// Handler function (see supported signatures in `zhttp/root.zig` docs).
     comptime handler: anytype,
-) @TypeOf(.{ .method = method, .pattern = pattern, .options = opts, .handler = handler }) {
+    /// Route options (see `zhttp/root.zig` docs). Use `.{}` for none.
+    comptime opts: anytype,
+) @TypeOf(.{ .method = @as(Method, method), .pattern = pattern, .options = opts, .handler = handler }) {
+    validateRouteOptions(opts);
+    const m: Method = @as(Method, method);
     return .{
-        .method = method,
+        .method = m,
         .pattern = pattern,
         .options = opts,
         .handler = handler,
     };
 }
 
-pub fn get(comptime pattern: []const u8, comptime opts: anytype, comptime handler: anytype) @TypeOf(route(.GET, pattern, opts, handler)) {
-    return route(.GET, pattern, opts, handler);
+pub fn get(comptime pattern: []const u8, comptime handler: anytype, comptime opts: anytype) @TypeOf(route(.GET, pattern, handler, opts)) {
+    return route(.GET, pattern, handler, opts);
 }
-pub fn post(comptime pattern: []const u8, comptime opts: anytype, comptime handler: anytype) @TypeOf(route(.POST, pattern, opts, handler)) {
-    return route(.POST, pattern, opts, handler);
+pub fn post(comptime pattern: []const u8, comptime handler: anytype, comptime opts: anytype) @TypeOf(route(.POST, pattern, handler, opts)) {
+    return route(.POST, pattern, handler, opts);
 }
-pub fn put(comptime pattern: []const u8, comptime opts: anytype, comptime handler: anytype) @TypeOf(route(.PUT, pattern, opts, handler)) {
-    return route(.PUT, pattern, opts, handler);
+pub fn put(comptime pattern: []const u8, comptime handler: anytype, comptime opts: anytype) @TypeOf(route(.PUT, pattern, handler, opts)) {
+    return route(.PUT, pattern, handler, opts);
 }
-pub fn delete(comptime pattern: []const u8, comptime opts: anytype, comptime handler: anytype) @TypeOf(route(.DELETE, pattern, opts, handler)) {
-    return route(.DELETE, pattern, opts, handler);
+pub fn delete(comptime pattern: []const u8, comptime handler: anytype, comptime opts: anytype) @TypeOf(route(.DELETE, pattern, handler, opts)) {
+    return route(.DELETE, pattern, handler, opts);
 }
-pub fn patch(comptime pattern: []const u8, comptime opts: anytype, comptime handler: anytype) @TypeOf(route(.PATCH, pattern, opts, handler)) {
-    return route(.PATCH, pattern, opts, handler);
+pub fn patch(comptime pattern: []const u8, comptime handler: anytype, comptime opts: anytype) @TypeOf(route(.PATCH, pattern, handler, opts)) {
+    return route(.PATCH, pattern, handler, opts);
 }
-pub fn head(comptime pattern: []const u8, comptime opts: anytype, comptime handler: anytype) @TypeOf(route(.HEAD, pattern, opts, handler)) {
-    return route(.HEAD, pattern, opts, handler);
+pub fn head(comptime pattern: []const u8, comptime handler: anytype, comptime opts: anytype) @TypeOf(route(.HEAD, pattern, handler, opts)) {
+    return route(.HEAD, pattern, handler, opts);
 }
-pub fn options(comptime pattern: []const u8, comptime opts: anytype, comptime handler: anytype) @TypeOf(route(.OPTIONS, pattern, opts, handler)) {
-    return route(.OPTIONS, pattern, opts, handler);
+pub fn options(comptime pattern: []const u8, comptime handler: anytype, comptime opts: anytype) @TypeOf(route(.OPTIONS, pattern, handler, opts)) {
+    return route(.OPTIONS, pattern, handler, opts);
 }
 
 fn tupleLen(comptime t: anytype) usize {
@@ -71,7 +118,11 @@ fn tupleConcat(
     };
 }
 
-fn optionsField(comptime opts: anytype, comptime name: []const u8, default: anytype) @TypeOf(default) {
+fn optionsField(
+    comptime opts: anytype,
+    comptime name: []const u8,
+    comptime default: anytype,
+) @TypeOf(if (@hasField(@TypeOf(opts), name)) @field(opts, name) else default) {
     if (@hasField(@TypeOf(opts), name)) return @field(opts, name);
     return default;
 }
@@ -106,6 +157,24 @@ fn middlewareNeedsQuery(comptime mws: anytype) type {
             } else if (@hasField(NeedsT, "query")) {
                 const needs = NeedsT{};
                 acc = parse.mergeStructs(acc, needs.query);
+            }
+        }
+    }
+    return acc;
+}
+
+fn middlewareNeedsParams(comptime mws: anytype) type {
+    const fields = @typeInfo(@TypeOf(mws)).@"struct".fields;
+    comptime var acc: type = struct {};
+    inline for (fields) |f| {
+        const Mw = @field(mws, f.name);
+        if (@hasDecl(Mw, "Needs")) {
+            const NeedsT = Mw.Needs;
+            if (@hasDecl(NeedsT, "params")) {
+                acc = parse.mergeStructs(acc, NeedsT.params);
+            } else if (@hasField(NeedsT, "params")) {
+                const needs = NeedsT{};
+                acc = parse.mergeStructs(acc, needs.params);
             }
         }
     }
@@ -489,15 +558,18 @@ pub fn Compiled(comptime Context: type, comptime routes: anytype, comptime globa
             const MwTuple = tupleConcat(global_middlewares, optionsField(rd.options, "middlewares", .{}));
             const NeedH = middlewareNeedsHeaders(MwTuple);
             const NeedQ = middlewareNeedsQuery(MwTuple);
+            const NeedP = middlewareNeedsParams(MwTuple);
             const H = parse.mergeStructs(NeedH, optionsField(rd.options, "headers", struct {}));
             const Q = parse.mergeStructs(NeedQ, optionsField(rd.options, "query", struct {}));
+            const P = parse.mergeStructs(NeedP, optionsField(rd.options, "params", struct {}));
 
             const h_fields = parse.structFields(H);
             const q_fields = parse.structFields(Q);
+            const p_fields = parse.structFields(P);
 
             // Only exact routes without params/glob and without any capture needs.
             const exact = p.param_names.len == 0 and !p.glob and std.mem.indexOfScalar(u8, rd.pattern, '{') == null and std.mem.indexOfScalar(u8, rd.pattern, '*') == null;
-            out[i] = exact and h_fields.len == 0 and q_fields.len == 0 and tupleLen(MwTuple) == 0;
+            out[i] = exact and h_fields.len == 0 and q_fields.len == 0 and p_fields.len == 0 and tupleLen(MwTuple) == 0;
         }
         break :blk out;
     };
@@ -548,23 +620,38 @@ pub fn Compiled(comptime Context: type, comptime routes: anytype, comptime globa
                     const MwTuple = tupleConcat(global_middlewares, optionsField(rd.options, "middlewares", .{}));
                     const NeedH = middlewareNeedsHeaders(MwTuple);
                     const NeedQ = middlewareNeedsQuery(MwTuple);
+                    const NeedP = middlewareNeedsParams(MwTuple);
                     const H = parse.mergeStructs(NeedH, optionsField(rd.options, "headers", struct {}));
                     const Q = parse.mergeStructs(NeedQ, optionsField(rd.options, "query", struct {}));
-                    const ReqT = request.Request(H, Q, p.param_names);
+                    const P = parse.mergeStructs(NeedP, optionsField(rd.options, "params", struct {}));
+                    const ReqT = request.RequestP(H, Q, P, p.param_names);
 
-                var params_local: [p.param_names.len][]u8 = undefined;
-                inline for (p.param_names, 0..) |_, pi| {
-                    // Duplicate first, then percent-decode in place within the duplicated buffer.
-                    // This avoids mutating the borrowed request-line buffer (and avoids leaving
-                    // trailing bytes when decoding shrinks the slice).
-                    var buf = try allocator.dupe(u8, params_buf[pi]);
-                    buf = try urldecode.decodeInPlace(buf, .path_param);
-                    params_local[pi] = buf;
-                }
+                    // Copy all path params into a single arena allocation, then percent-decode in place.
+                    // We must not keep slices into the Reader's internal buffer, since subsequent reads
+                    // (headers/body) may overwrite earlier bytes. Doing this in one allocation avoids
+                    // per-param `dupe()` allocations.
+                    var params_local: [p.param_names.len][]u8 = undefined;
+                    if (p.param_names.len != 0) {
+                        var total: usize = 0;
+                        inline for (p.param_names, 0..) |_, pidx| total += params_buf[pidx].len;
+
+                        var backing = try allocator.alloc(u8, total);
+                        var off: usize = 0;
+                        inline for (p.param_names, 0..) |_, pidx| {
+                            const raw = params_buf[pidx];
+                            @memcpy(backing[off .. off + raw.len], raw);
+                            var s = backing[off .. off + raw.len];
+                            s = try urldecode.decodeInPlace(s, .path_param);
+                            params_local[pidx] = s;
+                            off += raw.len;
+                        }
+                    }
 
                     var reqv = ReqT.init(allocator, line, params_local[0..]);
+                    reqv.reader = r;
                     defer reqv.deinit(allocator);
-                    errdefer reqv.discardUnreadBody(r) catch {};
+                    errdefer reqv.discardUnreadBody() catch {};
+                    try reqv.parseParams(allocator);
                     try reqv.parseQuery(allocator);
                     try reqv.parseHeaders(allocator, r, max_header_bytes);
 
@@ -574,7 +661,7 @@ pub fn Compiled(comptime Context: type, comptime routes: anytype, comptime globa
                     const res = if (Context == void) try chain.call({}, &reqv) else try chain.call(ctx, &reqv);
 
                     // Ensure unread body is discarded before next request.
-                    try reqv.discardUnreadBody(r);
+                    try reqv.discardUnreadBody();
                     return .{ .res = res, .keep_alive = reqv.keepAlive() };
                 }
             }
@@ -605,6 +692,7 @@ pub fn Compiled(comptime Context: type, comptime routes: anytype, comptime globa
                     const ReqT = request.Request(struct {}, struct {}, &.{});
                     var reqv = ReqT.init(allocator, empty_line, &.{});
                     defer reqv.deinit(allocator);
+                    reqv.reader = r;
 
                     const res = Dispatch.handlerCall(rd.handler, ctx, &reqv);
                     return .{ .res = try res, .keep_alive = line.version == .http11 };

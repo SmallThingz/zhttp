@@ -25,6 +25,8 @@ pub const Config = struct {
     read_buffer: usize = 32 * 1024,
     /// Per-connection write buffer size.
     write_buffer: usize = 16 * 1024,
+    /// Enable TCP_NODELAY (disables Nagle). Off by default.
+    tcp_nodelay: bool = false,
     /// Maximum request line length (bytes, including `\r\n`).
     max_request_line: usize = 8 * 1024,
     /// Maximum total header bytes (bytes, including line endings).
@@ -55,6 +57,7 @@ pub fn Server(comptime def: anytype) type {
     const Conf: Config = .{
         .read_buffer = configField(cfg, "read_buffer", defaults.read_buffer),
         .write_buffer = configField(cfg, "write_buffer", defaults.write_buffer),
+        .tcp_nodelay = configField(cfg, "tcp_nodelay", defaults.tcp_nodelay),
         .max_request_line = configField(cfg, "max_request_line", defaults.max_request_line),
         .max_header_bytes = configField(cfg, "max_header_bytes", defaults.max_header_bytes),
     };
@@ -116,7 +119,7 @@ pub fn Server(comptime def: anytype) type {
 
         fn handleConn(self: *Self, stream: std.Io.net.Stream) Io.Cancelable!void {
             defer stream.close(self.io);
-            setTcpNoDelay(&stream);
+            if (Conf.tcp_nodelay) setTcpNoDelay(&stream);
 
             var read_buf: [Conf.read_buffer]u8 = undefined;
             var write_buf: [Conf.write_buffer]u8 = undefined;

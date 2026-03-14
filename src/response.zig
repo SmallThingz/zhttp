@@ -73,8 +73,13 @@ pub fn write(
     if (res.raw_parts) |rp| {
         if (send_body) {
             if (rp.parts.len != 0) {
-                const parts = @constCast(rp.parts);
-                try w.writeVecAll(parts);
+                if (rp.parts.len <= 8) {
+                    var tmp: [8][]const u8 = undefined;
+                    for (rp.parts, 0..) |p, i| tmp[i] = p;
+                    try w.writeVecAll(tmp[0..rp.parts.len]);
+                } else {
+                    for (rp.parts) |p| try w.writeAll(p);
+                }
             }
             return;
         }

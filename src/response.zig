@@ -168,3 +168,60 @@ pub fn write(
         try w.writeAll(res.body);
     }
 }
+
+test "rawPartsCopy matches raw bytes" {
+    const base =
+        "HTTP/1.1 200 OK\r\n" ++
+        "Server: F\r\n" ++
+        "Content-Type: text/plain\r\n" ++
+        "Content-Length: 13\r\n";
+    const date = "Date: Wed, 24 Feb 2021 12:00:00 GMT";
+    const body = "Hello, World!";
+    const res = Res.rawPartsCopy(&.{ base, date, "\r\n\r\n", body });
+
+    var out: [256]u8 = undefined;
+    var w = std.Io.Writer.fixed(out[0..]);
+    try write(&w, res, true, true);
+
+    const expected =
+        "HTTP/1.1 200 OK\r\n" ++
+        "Server: F\r\n" ++
+        "Content-Type: text/plain\r\n" ++
+        "Content-Length: 13\r\n" ++
+        "Date: Wed, 24 Feb 2021 12:00:00 GMT\r\n" ++
+        "\r\n" ++
+        "Hello, World!";
+    try std.testing.expectEqualStrings(expected, out[0..w.end]);
+}
+
+test "write: HEAD omits body but keeps content-length" {
+    const res = Res.text(200, "hello");
+    var out: [256]u8 = undefined;
+    var w = std.Io.Writer.fixed(out[0..]);
+    try write(&w, res, true, false);
+
+    const expected =
+        "HTTP/1.1 200 OK\r\n" ++
+        "connection: keep-alive\r\n" ++
+        "content-type: text/plain; charset=utf-8\r\n" ++
+        "content-length: 5\r\n" ++
+        "\r\n";
+    try std.testing.expectEqualStrings(expected, out[0..w.end]);
+}
+
+test "write: keep-alive false emits close" {
+    const res = Res.text(200, "x");
+    var out: [256]u8 = undefined;
+    var w = std.Io.Writer.fixed(out[0..]);
+    try write(&w, res, false, true);
+    try std.testing.expect(std.mem.indexOf(u8, out[0..w.end], "connection: close\r\n") != null);
+}
+
+test "write: res.close forces close" {
+    var res = Res.text(200, "x");
+    res.close = true;
+    var out: [256]u8 = undefined;
+    var w = std.Io.Writer.fixed(out[0..]);
+    try write(&w, res, true, true);
+    try std.testing.expect(std.mem.indexOf(u8, out[0..w.end], "connection: close\r\n") != null);
+}

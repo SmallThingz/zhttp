@@ -572,3 +572,423 @@ test "chunked bodyAll" {
     defer gpa.free(body);
     try std.testing.expectEqualStrings("Wiki", body);
 }
+
+test "request line: borrowed parses path/query" {
+    var r = Io.Reader.fixed("GET /a/b?x=1 HTTP/1.1\r\n");
+    const line = try parseRequestLineBorrowed(&r, 8 * 1024);
+    try std.testing.expectEqual(Method.GET, line.method);
+    try std.testing.expectEqual(Version.http11, line.version);
+    try std.testing.expectEqualStrings("/a/b", line.path);
+    try std.testing.expectEqualStrings("x=1", line.query);
+}
+
+test "request line: owned duplicates path/query" {
+    var r = Io.Reader.fixed("GET /hello HTTP/1.1\r\n");
+    const gpa = std.testing.allocator;
+    const line = try parseRequestLine(&r, gpa, 8 * 1024);
+    defer gpa.free(line.path);
+    defer gpa.free(line.query);
+    try std.testing.expectEqualStrings("/hello", line.path);
+    try std.testing.expectEqualStrings("", line.query);
+}
+
+test "request line: rejects non-absolute path target" {
+    var r = Io.Reader.fixed("GET http://example.com/ HTTP/1.1\r\n");
+    try std.testing.expectError(error.BadRequest, parseRequestLineBorrowed(&r, 8 * 1024));
+}
+
+test "request line: max length enforced" {
+    var r = Io.Reader.fixed("GET /abcd HTTP/1.1\r\n");
+    try std.testing.expectError(error.UriTooLong, parseRequestLineBorrowed(&r, 4));
+}
+
+test "discardHeadersOnly: consumes until blank line" {
+    var r = Io.Reader.fixed("A: 1\r\nB: 2\r\n\r\nGET / HTTP/1.1\r\n");
+    try discardHeadersOnly(&r, 8 * 1024);
+    const line = try parseRequestLineBorrowed(&r, 8 * 1024);
+    try std.testing.expectEqual(Method.GET, line.method);
+    try std.testing.expectEqualStrings("/", line.path);
+}
+
+test "discardHeadersOnly: max bytes enforced" {
+    var r = Io.Reader.fixed("A: 1234567890\r\n\r\n");
+    try std.testing.expectError(error.HeadersTooLarge, discardHeadersOnly(&r, 8));
+}
+
+test "headers: underscore field matches dash header" {
+    const ReqT = Request(
+        struct {
+            content_type: parse.Optional(parse.String),
+        },
+        struct {},
+        &.{},
+    );
+
+    const gpa = std.testing.allocator;
+    const path = try gpa.dupe(u8, "/");
+    defer gpa.free(path);
+    const query = try gpa.dupe(u8, "");
+    defer gpa.free(query);
+    const line: RequestLine = .{ .method = .GET, .version = .http11, .path = path, .query = query };
+    var reqv = ReqT.init(gpa, line, &.{});
+    defer reqv.deinit(gpa);
+
+    var r = Io.Reader.fixed("Content-Type: text/plain\r\n\r\n");
+    try reqv.parseHeaders(gpa, &r, 8 * 1024);
+    try std.testing.expectEqualStrings("text/plain", reqv.header(.content_type).?);
+}
+
+test "headers: too large rejected" {
+    const ReqT = Request(struct {}, struct {}, &.{});
+    const gpa = std.testing.allocator;
+
+    const path = try gpa.dupe(u8, "/");
+    defer gpa.free(path);
+    const query = try gpa.dupe(u8, "");
+    defer gpa.free(query);
+    const line: RequestLine = .{ .method = .GET, .version = .http11, .path = path, .query = query };
+
+    var reqv = ReqT.init(gpa, line, &.{});
+    defer reqv.deinit(gpa);
+
+    var r = Io.Reader.fixed("X: 1234567890\r\n\r\n");
+    try std.testing.expectError(error.HeadersTooLarge, reqv.parseHeaders(gpa, &r, 8));
+}
+
+test "headers: duplicate Content-Length mismatch rejected" {
+    const ReqT = Request(struct {}, struct {}, &.{});
+    const gpa = std.testing.allocator;
+
+    const path = try gpa.dupe(u8, "/");
+    defer gpa.free(path);
+    const query = try gpa.dupe(u8, "");
+    defer gpa.free(query);
+    const line: RequestLine = .{ .method = .POST, .version = .http11, .path = path, .query = query };
+
+    var reqv = ReqT.init(gpa, line, &.{});
+    defer reqv.deinit(gpa);
+
+    var r = Io.Reader.fixed("Content-Length: 1\r\nContent-Length: 2\r\n\r\n");
+    try std.testing.expectError(error.BadRequest, reqv.parseHeaders(gpa, &r, 8 * 1024));
+}
+
+test "headers: chunked + Content-Length rejected" {
+    const ReqT = Request(struct {}, struct {}, &.{});
+    const gpa = std.testing.allocator;
+
+    const path = try gpa.dupe(u8, "/");
+    defer gpa.free(path);
+    const query = try gpa.dupe(u8, "");
+    defer gpa.free(query);
+    const line: RequestLine = .{ .method = .POST, .version = .http11, .path = path, .query = query };
+
+    var reqv = ReqT.init(gpa, line, &.{});
+    defer reqv.deinit(gpa);
+
+    var r = Io.Reader.fixed("Transfer-Encoding: chunked\r\nContent-Length: 0\r\n\r\n");
+    try std.testing.expectError(error.BadRequest, reqv.parseHeaders(gpa, &r, 8 * 1024));
+}
+
+test "headers: Connection close disables keep-alive" {
+    const ReqT = Request(struct {}, struct {}, &.{});
+    const gpa = std.testing.allocator;
+
+    const path = try gpa.dupe(u8, "/");
+    defer gpa.free(path);
+    const query = try gpa.dupe(u8, "");
+    defer gpa.free(query);
+    const line: RequestLine = .{ .method = .GET, .version = .http11, .path = path, .query = query };
+
+    var reqv = ReqT.init(gpa, line, &.{});
+    defer reqv.deinit(gpa);
+
+    var r = Io.Reader.fixed("Connection: keep-alive, Close\r\n\r\n");
+    try reqv.parseHeaders(gpa, &r, 8 * 1024);
+    try std.testing.expect(!reqv.keepAlive());
+}
+
+test "headers: trim value + case-insensitive match" {
+    const ReqT = Request(
+        struct { host: parse.Optional(parse.String) },
+        struct {},
+        &.{},
+    );
+    const gpa = std.testing.allocator;
+    const path = try gpa.dupe(u8, "/");
+    defer gpa.free(path);
+    const query = try gpa.dupe(u8, "");
+    defer gpa.free(query);
+    const line: RequestLine = .{ .method = .GET, .version = .http11, .path = path, .query = query };
+
+    var reqv = ReqT.init(gpa, line, &.{});
+    defer reqv.deinit(gpa);
+
+    var r = Io.Reader.fixed("hOsT:\t  example.com \t\r\n\r\n");
+    try reqv.parseHeaders(gpa, &r, 8 * 1024);
+    try std.testing.expectEqualStrings("example.com", reqv.header(.host).?);
+}
+
+test "headers: transfer-encoding list sets chunked" {
+    const ReqT = Request(struct {}, struct {}, &.{});
+    const gpa = std.testing.allocator;
+    const path = try gpa.dupe(u8, "/");
+    defer gpa.free(path);
+    const query = try gpa.dupe(u8, "");
+    defer gpa.free(query);
+    const line: RequestLine = .{ .method = .POST, .version = .http11, .path = path, .query = query };
+
+    var reqv = ReqT.init(gpa, line, &.{});
+    defer reqv.deinit(gpa);
+    var r = Io.Reader.fixed("Transfer-Encoding: gzip, chunked\r\n\r\n");
+    try reqv.parseHeaders(gpa, &r, 8 * 1024);
+    try std.testing.expectEqual(BodyKind.chunked, reqv.base.body_kind);
+}
+
+test "chunked: invalid chunk CRLF rejected" {
+    const ReqT = Request(struct {}, struct {}, &.{});
+    const gpa = std.testing.allocator;
+    const path = try gpa.dupe(u8, "/");
+    defer gpa.free(path);
+    const query = try gpa.dupe(u8, "");
+    defer gpa.free(query);
+    const line: RequestLine = .{ .method = .POST, .version = .http11, .path = path, .query = query };
+
+    var reqv = ReqT.init(gpa, line, &.{});
+    defer reqv.deinit(gpa);
+    var r = Io.Reader.fixed("Transfer-Encoding: chunked\r\n\r\n1\r\naXY0\r\n\r\n");
+    try reqv.parseHeaders(gpa, &r, 8 * 1024);
+    try std.testing.expectError(error.BadRequest, reqv.discardUnreadBody());
+}
+
+test "chunked: truncated body yields EndOfStream" {
+    const ReqT = Request(struct {}, struct {}, &.{});
+    const gpa = std.testing.allocator;
+    const path = try gpa.dupe(u8, "/");
+    defer gpa.free(path);
+    const query = try gpa.dupe(u8, "");
+    defer gpa.free(query);
+    const line: RequestLine = .{ .method = .POST, .version = .http11, .path = path, .query = query };
+
+    var reqv = ReqT.init(gpa, line, &.{});
+    defer reqv.deinit(gpa);
+    var r = Io.Reader.fixed("Transfer-Encoding: chunked\r\n\r\n1\r\na");
+    try reqv.parseHeaders(gpa, &r, 8 * 1024);
+    try std.testing.expectError(error.EndOfStream, reqv.discardUnreadBody());
+}
+
+test "bodyAll: content-length" {
+    const ReqT = Request(struct {}, struct {}, &.{});
+
+    const gpa = std.testing.allocator;
+    const path = try gpa.dupe(u8, "/");
+    defer gpa.free(path);
+    const query = try gpa.dupe(u8, "");
+    defer gpa.free(query);
+    const line: RequestLine = .{ .method = .POST, .version = .http11, .path = path, .query = query };
+    var reqv = ReqT.init(gpa, line, &.{});
+    defer reqv.deinit(gpa);
+
+    var r = Io.Reader.fixed("Content-Length: 5\r\n\r\nhello");
+    try reqv.parseHeaders(gpa, &r, 8 * 1024);
+    const body = try reqv.bodyAll(16);
+    defer gpa.free(body);
+    try std.testing.expectEqualStrings("hello", body);
+}
+
+test "bodyAll: max_bytes enforced" {
+    const ReqT = Request(struct {}, struct {}, &.{});
+    const gpa = std.testing.allocator;
+    const path = try gpa.dupe(u8, "/");
+    defer gpa.free(path);
+    const query = try gpa.dupe(u8, "");
+    defer gpa.free(query);
+    const line: RequestLine = .{ .method = .POST, .version = .http11, .path = path, .query = query };
+
+    var reqv = ReqT.init(gpa, line, &.{});
+    defer reqv.deinit(gpa);
+    var r = Io.Reader.fixed("Content-Length: 5\r\n\r\nhello");
+    try reqv.parseHeaders(gpa, &r, 8 * 1024);
+    try std.testing.expectError(error.PayloadTooLarge, reqv.bodyAll(4));
+}
+
+test "query: required missing rejected" {
+    const ReqT = Request(
+        struct {},
+        struct {
+            q: parse.String,
+        },
+        &.{},
+    );
+
+    const gpa = std.testing.allocator;
+    const path = try gpa.dupe(u8, "/");
+    defer gpa.free(path);
+    const query = try gpa.dupe(u8, "");
+    defer gpa.free(query);
+    const line: RequestLine = .{ .method = .GET, .version = .http11, .path = path, .query = query };
+    var reqv = ReqT.init(gpa, line, &.{});
+    defer reqv.deinit(gpa);
+
+    try std.testing.expectError(error.MissingRequired, reqv.parseQuery(gpa));
+}
+
+test "query: invalid percent-encoding rejected" {
+    const ReqT = Request(
+        struct {},
+        struct {
+            name: parse.Optional(parse.String),
+        },
+        &.{},
+    );
+
+    const gpa = std.testing.allocator;
+    const path = try gpa.dupe(u8, "/");
+    defer gpa.free(path);
+    const query = try gpa.dupe(u8, "name=%ZZ");
+    defer gpa.free(query);
+    const line: RequestLine = .{ .method = .GET, .version = .http11, .path = path, .query = query };
+    var reqv = ReqT.init(gpa, line, &.{});
+    defer reqv.deinit(gpa);
+
+    try std.testing.expectError(error.InvalidPercentEncoding, reqv.parseQuery(gpa));
+}
+
+test "query: repeated keys last-wins, SliceOf collects" {
+    const ReqLast = Request(
+        struct {},
+        struct { k: parse.Optional(parse.String) },
+        &.{},
+    );
+    const ReqList = Request(
+        struct {},
+        struct { k: parse.SliceOf(parse.String) },
+        &.{},
+    );
+
+    const gpa = std.testing.allocator;
+    const path = try gpa.dupe(u8, "/");
+    defer gpa.free(path);
+
+    {
+        const query = try gpa.dupe(u8, "k=one&k=two");
+        defer gpa.free(query);
+        const line: RequestLine = .{ .method = .GET, .version = .http11, .path = path, .query = query };
+        var reqv = ReqLast.init(gpa, line, &.{});
+        defer reqv.deinit(gpa);
+        try reqv.parseQuery(gpa);
+        try std.testing.expectEqualStrings("two", reqv.queryParam(.k).?);
+    }
+
+    {
+        const query = try gpa.dupe(u8, "k=one&k=two");
+        defer gpa.free(query);
+        const line: RequestLine = .{ .method = .GET, .version = .http11, .path = path, .query = query };
+        var reqv = ReqList.init(gpa, line, &.{});
+        defer reqv.deinit(gpa);
+        try reqv.parseQuery(gpa);
+        const items = reqv.queryParam(.k);
+        try std.testing.expectEqual(@as(usize, 2), items.len);
+        try std.testing.expectEqualStrings("one", items[0]);
+        try std.testing.expectEqualStrings("two", items[1]);
+    }
+}
+
+test "parseHeaders: rejects header line without colon" {
+    const ReqT = Request(struct {}, struct {}, &.{});
+    const gpa = std.testing.allocator;
+    const path = try gpa.dupe(u8, "/");
+    defer gpa.free(path);
+    const query = try gpa.dupe(u8, "");
+    defer gpa.free(query);
+    const line: RequestLine = .{ .method = .GET, .version = .http11, .path = path, .query = query };
+
+    var reqv = ReqT.init(gpa, line, &.{});
+    defer reqv.deinit(gpa);
+    var r = Io.Reader.fixed("NoColon\r\n\r\n");
+    try std.testing.expectError(error.BadRequest, reqv.parseHeaders(gpa, &r, 8 * 1024));
+}
+
+test "parseHeaders: repeated Content-Length same value accepted" {
+    const ReqT = Request(struct {}, struct {}, &.{});
+    const gpa = std.testing.allocator;
+    const path = try gpa.dupe(u8, "/");
+    defer gpa.free(path);
+    const query = try gpa.dupe(u8, "");
+    defer gpa.free(query);
+    const line: RequestLine = .{ .method = .POST, .version = .http11, .path = path, .query = query };
+
+    var reqv = ReqT.init(gpa, line, &.{});
+    defer reqv.deinit(gpa);
+    var r = Io.Reader.fixed("Content-Length: 2\r\nContent-Length: 2\r\n\r\nok");
+    try reqv.parseHeaders(gpa, &r, 8 * 1024);
+    const body = try reqv.bodyAll(8);
+    defer gpa.free(body);
+    try std.testing.expectEqualStrings("ok", body);
+}
+
+test "parseHeaders: invalid Content-Length rejected" {
+    const ReqT = Request(struct {}, struct {}, &.{});
+    const gpa = std.testing.allocator;
+    const path = try gpa.dupe(u8, "/");
+    defer gpa.free(path);
+    const query = try gpa.dupe(u8, "");
+    defer gpa.free(query);
+    const line: RequestLine = .{ .method = .POST, .version = .http11, .path = path, .query = query };
+
+    var reqv = ReqT.init(gpa, line, &.{});
+    defer reqv.deinit(gpa);
+    var r = Io.Reader.fixed("Content-Length: nope\r\n\r\n");
+    try std.testing.expectError(error.BadRequest, reqv.parseHeaders(gpa, &r, 8 * 1024));
+}
+
+test "chunked bodyAll: chunk extensions supported" {
+    const ReqT = Request(struct {}, struct {}, &.{});
+    const gpa = std.testing.allocator;
+    const path = try gpa.dupe(u8, "/");
+    defer gpa.free(path);
+    const query = try gpa.dupe(u8, "");
+    defer gpa.free(query);
+    const line: RequestLine = .{ .method = .POST, .version = .http11, .path = path, .query = query };
+
+    var r = Io.Reader.fixed("Transfer-Encoding: chunked\r\n\r\n4;ext=1\r\nWiki\r\n0\r\n\r\n");
+    var reqv = ReqT.init(gpa, line, &.{});
+    defer reqv.deinit(gpa);
+    try reqv.parseHeaders(gpa, &r, 1024);
+    const body = try reqv.bodyAll(32);
+    defer gpa.free(body);
+    try std.testing.expectEqualStrings("Wiki", body);
+}
+
+test "bodyAll/discardUnreadBody: require parseHeaders first" {
+    const ReqT = Request(struct {}, struct {}, &.{});
+    const gpa = std.testing.allocator;
+    const path = try gpa.dupe(u8, "/");
+    defer gpa.free(path);
+    const query = try gpa.dupe(u8, "");
+    defer gpa.free(query);
+    const line: RequestLine = .{ .method = .POST, .version = .http11, .path = path, .query = query };
+
+    var reqv = ReqT.init(gpa, line, &.{});
+    defer reqv.deinit(gpa);
+    try std.testing.expectError(error.BadRequest, reqv.bodyAll(1));
+    try std.testing.expectError(error.BadRequest, reqv.discardUnreadBody());
+}
+
+test "parseQuery: key without '=' treated as empty value" {
+    const ReqT = Request(
+        struct {},
+        struct { k: parse.Optional(parse.String) },
+        &.{},
+    );
+    const gpa = std.testing.allocator;
+    const path = try gpa.dupe(u8, "/");
+    defer gpa.free(path);
+    const query = try gpa.dupe(u8, "k");
+    defer gpa.free(query);
+    const line: RequestLine = .{ .method = .GET, .version = .http11, .path = path, .query = query };
+
+    var reqv = ReqT.init(gpa, line, &.{});
+    defer reqv.deinit(gpa);
+    try reqv.parseQuery(gpa);
+    try std.testing.expectEqualStrings("", reqv.queryParam(.k).?);
+}

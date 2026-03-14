@@ -380,3 +380,357 @@ pub fn Server(comptime def: anytype) type {
         }
     };
 }
+
+test "benchmark fast-single route responds + pipelines" {
+    const Bench = struct {
+        fn plaintext(_: void, _: anytype) !response.Res {
+            const resp =
+                "HTTP/1.1 200 OK\r\n" ++
+                "Server: F\r\n" ++
+                "Content-Type: text/plain\r\n" ++
+                "Content-Length: 13\r\n" ++
+                "Date: Wed, 24 Feb 2021 12:00:00 GMT\r\n" ++
+                "\r\n" ++
+                "Hello, World!";
+            return response.Res.rawResponse(resp);
+        }
+    };
+
+    var threaded = Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const SrvT = Server(.{
+        .routes = .{
+            router.get("/plaintext", Bench.plaintext, .{}),
+        },
+        .config = .{
+            .read_buffer = 64 * 1024,
+            .write_buffer = 16 * 1024,
+            .fast_benchmark = true,
+            .fast_benchmark_empty_headers = true,
+        },
+    });
+
+    const addr0: Io.net.IpAddress = .{ .ip4 = Io.net.Ip4Address.loopback(0) };
+    var server = try SrvT.init(std.testing.allocator, io, addr0, {});
+    defer server.deinit();
+
+    const port: u16 = server.listener.socket.address.getPort();
+    try std.testing.expect(port != 0);
+
+    var group: Io.Group = .init;
+    defer group.cancel(io);
+    try group.concurrent(io, SrvT.run, .{&server});
+
+    const addr: Io.net.IpAddress = .{ .ip4 = Io.net.Ip4Address.loopback(port) };
+    var stream = try Io.net.IpAddress.connect(addr, io, .{ .mode = .stream });
+    defer stream.close(io);
+
+    const req = "GET /plaintext HTTP/1.1\r\n\r\n";
+    const resp =
+        "HTTP/1.1 200 OK\r\n" ++
+        "Server: F\r\n" ++
+        "Content-Type: text/plain\r\n" ++
+        "Content-Length: 13\r\n" ++
+        "Date: Wed, 24 Feb 2021 12:00:00 GMT\r\n" ++
+        "\r\n" ++
+        "Hello, World!";
+    const resp_len: usize = resp.len;
+
+    var rb: [4 * 1024]u8 = undefined;
+    var wb: [128]u8 = undefined;
+    var sr = stream.reader(io, &rb);
+    var sw = stream.writer(io, &wb);
+
+    try sw.interface.writeAll(req ++ req);
+    try sw.interface.flush();
+
+    var got1: [resp_len]u8 = undefined;
+    var got2: [resp_len]u8 = undefined;
+    try sr.interface.readSliceAll(got1[0..]);
+    try sr.interface.readSliceAll(got2[0..]);
+    try std.testing.expect(std.mem.eql(u8, got1[0..], resp));
+    try std.testing.expect(std.mem.eql(u8, got2[0..], resp));
+
+    group.cancel(io);
+    group.await(io) catch {};
+}
+
+test "benchmark fast-single route handles full request headers" {
+    const Bench = struct {
+        fn plaintext(_: void, _: anytype) !response.Res {
+            const resp =
+                "HTTP/1.1 200 OK\r\n" ++
+                "Server: F\r\n" ++
+                "Content-Type: text/plain\r\n" ++
+                "Content-Length: 13\r\n" ++
+                "Date: Wed, 24 Feb 2021 12:00:00 GMT\r\n" ++
+                "\r\n" ++
+                "Hello, World!";
+            return response.Res.rawResponse(resp);
+        }
+    };
+
+    var threaded = Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const SrvT = Server(.{
+        .routes = .{
+            router.get("/plaintext", Bench.plaintext, .{}),
+        },
+        .config = .{
+            .read_buffer = 64 * 1024,
+            .write_buffer = 16 * 1024,
+            .fast_benchmark = true,
+        },
+    });
+
+    const addr0: Io.net.IpAddress = .{ .ip4 = Io.net.Ip4Address.loopback(0) };
+    var server = try SrvT.init(std.testing.allocator, io, addr0, {});
+    defer server.deinit();
+
+    const port: u16 = server.listener.socket.address.getPort();
+    try std.testing.expect(port != 0);
+
+    var group: Io.Group = .init;
+    defer group.cancel(io);
+    try group.concurrent(io, SrvT.run, .{&server});
+
+    const addr: Io.net.IpAddress = .{ .ip4 = Io.net.Ip4Address.loopback(port) };
+    var stream = try Io.net.IpAddress.connect(addr, io, .{ .mode = .stream });
+    defer stream.close(io);
+
+    const req =
+        "GET /plaintext HTTP/1.1\r\n" ++
+        "Host: 127.0.0.1\r\n" ++
+        "Connection: keep-alive\r\n" ++
+        "\r\n";
+    const resp =
+        "HTTP/1.1 200 OK\r\n" ++
+        "Server: F\r\n" ++
+        "Content-Type: text/plain\r\n" ++
+        "Content-Length: 13\r\n" ++
+        "Date: Wed, 24 Feb 2021 12:00:00 GMT\r\n" ++
+        "\r\n" ++
+        "Hello, World!";
+    const resp_len: usize = resp.len;
+
+    var rb: [4 * 1024]u8 = undefined;
+    var wb: [256]u8 = undefined;
+    var sr = stream.reader(io, &rb);
+    var sw = stream.writer(io, &wb);
+
+    try sw.interface.writeAll(req ++ req);
+    try sw.interface.flush();
+
+    var got1: [resp_len]u8 = undefined;
+    var got2: [resp_len]u8 = undefined;
+    try sr.interface.readSliceAll(got1[0..]);
+    try sr.interface.readSliceAll(got2[0..]);
+    try std.testing.expect(std.mem.eql(u8, got1[0..], resp));
+    try std.testing.expect(std.mem.eql(u8, got2[0..], resp));
+
+    group.cancel(io);
+    group.await(io) catch {};
+}
+
+test "Connection: close header closes socket" {
+    const Bench = struct {
+        fn plaintext(_: void, _: anytype) !response.Res {
+            const resp =
+                "HTTP/1.1 200 OK\r\n" ++
+                "Server: F\r\n" ++
+                "Content-Type: text/plain\r\n" ++
+                "Content-Length: 13\r\n" ++
+                "Date: Wed, 24 Feb 2021 12:00:00 GMT\r\n" ++
+                "\r\n" ++
+                "Hello, World!";
+            return response.Res.rawResponse(resp);
+        }
+    };
+
+    var threaded = Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const SrvT = Server(.{
+        .routes = .{
+            router.get("/plaintext", Bench.plaintext, .{}),
+        },
+        .config = .{
+            .read_buffer = 64 * 1024,
+            .write_buffer = 16 * 1024,
+            .fast_benchmark = false,
+        },
+    });
+
+    const addr0: Io.net.IpAddress = .{ .ip4 = Io.net.Ip4Address.loopback(0) };
+    var server = try SrvT.init(std.testing.allocator, io, addr0, {});
+    defer server.deinit();
+
+    const port: u16 = server.listener.socket.address.getPort();
+    try std.testing.expect(port != 0);
+
+    var group: Io.Group = .init;
+    defer group.cancel(io);
+    try group.concurrent(io, SrvT.run, .{&server});
+
+    const addr: Io.net.IpAddress = .{ .ip4 = Io.net.Ip4Address.loopback(port) };
+    var stream = try Io.net.IpAddress.connect(addr, io, .{ .mode = .stream });
+    defer stream.close(io);
+
+    const req =
+        "GET /plaintext HTTP/1.1\r\n" ++
+        "Host: 127.0.0.1\r\n" ++
+        "Connection: close\r\n" ++
+        "\r\n";
+    const resp =
+        "HTTP/1.1 200 OK\r\n" ++
+        "Server: F\r\n" ++
+        "Content-Type: text/plain\r\n" ++
+        "Content-Length: 13\r\n" ++
+        "Date: Wed, 24 Feb 2021 12:00:00 GMT\r\n" ++
+        "\r\n" ++
+        "Hello, World!";
+    const resp_len: usize = resp.len;
+
+    var rb: [4 * 1024]u8 = undefined;
+    var wb: [256]u8 = undefined;
+    var sr = stream.reader(io, &rb);
+    var sw = stream.writer(io, &wb);
+
+    try sw.interface.writeAll(req);
+    try sw.interface.flush();
+
+    var got: [resp_len]u8 = undefined;
+    try sr.interface.readSliceAll(got[0..]);
+    try std.testing.expect(std.mem.eql(u8, got[0..], resp));
+
+    var one: [1]u8 = undefined;
+    try std.testing.expectError(error.EndOfStream, sr.interface.readSliceAll(one[0..]));
+
+    group.cancel(io);
+    group.await(io) catch {};
+}
+
+test "handler res.close closes socket" {
+    const Handlers = struct {
+        fn close_me(_: void, _: anytype) !response.Res {
+            var r = response.Res.text(200, "bye");
+            r.close = true;
+            return r;
+        }
+    };
+
+    var threaded = Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const SrvT = Server(.{
+        .routes = .{
+            router.get("/x", Handlers.close_me, .{}),
+        },
+        .config = .{
+            .fast_benchmark = false,
+        },
+    });
+
+    const addr0: Io.net.IpAddress = .{ .ip4 = Io.net.Ip4Address.loopback(0) };
+    var server = try SrvT.init(std.testing.allocator, io, addr0, {});
+    defer server.deinit();
+    const port: u16 = server.listener.socket.address.getPort();
+
+    var group: Io.Group = .init;
+    defer group.cancel(io);
+    try group.concurrent(io, SrvT.run, .{&server});
+
+    const addr: Io.net.IpAddress = .{ .ip4 = Io.net.Ip4Address.loopback(port) };
+    var stream = try Io.net.IpAddress.connect(addr, io, .{ .mode = .stream });
+    defer stream.close(io);
+
+    var rb: [4 * 1024]u8 = undefined;
+    var wb: [256]u8 = undefined;
+    var sr = stream.reader(io, &rb);
+    var sw = stream.writer(io, &wb);
+
+    try sw.interface.writeAll("GET /x HTTP/1.1\r\nHost: x\r\n\r\n");
+    try sw.interface.flush();
+
+    const resp =
+        "HTTP/1.1 200 OK\r\n" ++
+        "connection: close\r\n" ++
+        "content-type: text/plain; charset=utf-8\r\n" ++
+        "content-length: 3\r\n" ++
+        "\r\n" ++
+        "bye";
+    var got: [resp.len]u8 = undefined;
+    try sr.interface.readSliceAll(got[0..]);
+    try std.testing.expectEqualStrings(resp, got[0..]);
+
+    var one: [1]u8 = undefined;
+    try std.testing.expectError(error.EndOfStream, sr.interface.readSliceAll(one[0..]));
+
+    group.cancel(io);
+    group.await(io) catch {};
+}
+
+test "HTTP/1.0 request does not keep-alive" {
+    const Handlers = struct {
+        fn ok() !response.Res {
+            return response.Res.text(200, "ok");
+        }
+    };
+
+    var threaded = Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const SrvT = Server(.{
+        .routes = .{
+            router.get("/x", Handlers.ok, .{}),
+        },
+        .config = .{
+            .fast_benchmark = false,
+        },
+    });
+
+    const addr0: Io.net.IpAddress = .{ .ip4 = Io.net.Ip4Address.loopback(0) };
+    var server = try SrvT.init(std.testing.allocator, io, addr0, {});
+    defer server.deinit();
+    const port: u16 = server.listener.socket.address.getPort();
+
+    var group: Io.Group = .init;
+    defer group.cancel(io);
+    try group.concurrent(io, SrvT.run, .{&server});
+
+    const addr: Io.net.IpAddress = .{ .ip4 = Io.net.Ip4Address.loopback(port) };
+    var stream = try Io.net.IpAddress.connect(addr, io, .{ .mode = .stream });
+    defer stream.close(io);
+
+    var rb: [4 * 1024]u8 = undefined;
+    var wb: [256]u8 = undefined;
+    var sr = stream.reader(io, &rb);
+    var sw = stream.writer(io, &wb);
+
+    try sw.interface.writeAll("GET /x HTTP/1.0\r\n\r\n");
+    try sw.interface.flush();
+
+    const resp =
+        "HTTP/1.1 200 OK\r\n" ++
+        "connection: close\r\n" ++
+        "content-type: text/plain; charset=utf-8\r\n" ++
+        "content-length: 2\r\n" ++
+        "\r\n" ++
+        "ok";
+    var got: [resp.len]u8 = undefined;
+    try sr.interface.readSliceAll(got[0..]);
+    try std.testing.expectEqualStrings(resp, got[0..]);
+
+    var one: [1]u8 = undefined;
+    try std.testing.expectError(error.EndOfStream, sr.interface.readSliceAll(one[0..]));
+
+    group.cancel(io);
+    group.await(io) catch {};
+}

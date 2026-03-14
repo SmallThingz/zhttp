@@ -61,3 +61,33 @@ test decodeInPlace {
     try std.testing.expectEqualStrings("/", out3);
 }
 
+test "decodeInPlace: invalid percent sequences rejected" {
+    var a = "%".*;
+    try std.testing.expectError(error.InvalidPercentEncoding, decodeInPlace(a[0..], .path_param));
+
+    var b = "%1".*;
+    try std.testing.expectError(error.InvalidPercentEncoding, decodeInPlace(b[0..], .path_param));
+
+    var c = "%GG".*;
+    try std.testing.expectError(error.InvalidPercentEncoding, decodeInPlace(c[0..], .path_param));
+
+    var d = "x%G0y".*;
+    try std.testing.expectError(error.InvalidPercentEncoding, decodeInPlace(d[0..], .path_param));
+}
+
+test "decodeInPlace: '+' is only space in query_value mode" {
+    var q = "a+b".*;
+    const out_q = try decodeInPlace(q[0..], .query_value);
+    try std.testing.expectEqualStrings("a b", out_q);
+
+    var p = "a+b".*;
+    const out_p = try decodeInPlace(p[0..], .path_param);
+    try std.testing.expectEqualStrings("a+b", out_p);
+}
+
+test "decodeInPlace: compaction stays within slice" {
+    var buf = "a%2Fb".*;
+    const out = try decodeInPlace(buf[0..], .path_param);
+    try std.testing.expectEqualStrings("a/b", out);
+    try std.testing.expect(out.len == 3);
+}

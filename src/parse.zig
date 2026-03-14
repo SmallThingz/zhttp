@@ -549,3 +549,74 @@ pub fn SliceOf(comptime P: type) type {
         }
     };
 }
+
+test "Lookup: header find is case-insensitive and '_' matches '-'" {
+    const H = struct {
+        content_type: Optional(String),
+        host: Optional(String),
+    };
+    const L = Lookup(H, .header);
+    try std.testing.expectEqual(@as(?u16, 0), L.find("Content-Type"));
+    try std.testing.expectEqual(@as(?u16, 0), L.find("content-type"));
+    try std.testing.expectEqual(@as(?u16, 1), L.find("HOST"));
+    try std.testing.expectEqual(@as(?u16, null), L.find("x-nope"));
+}
+
+test "Lookup: query find is case-sensitive" {
+    const Q = struct {
+        page: Optional(Int(u32)),
+    };
+    const L = Lookup(Q, .query);
+    try std.testing.expectEqual(@as(?u16, 0), L.find("page"));
+    try std.testing.expectEqual(@as(?u16, null), L.find("Page"));
+}
+
+test "mergeStructs: merges without losing fields" {
+    const A = struct { a: Int(u32), b: Optional(String) };
+    const B = struct { b: Optional(String), c: Bool };
+    const M = mergeStructs(A, B);
+    comptime {
+        const mf = structFields(M);
+        std.debug.assert(mf.len == 3);
+        std.debug.assert(std.mem.eql(u8, mf[0].name, "a"));
+        std.debug.assert(std.mem.eql(u8, mf[1].name, "b"));
+        std.debug.assert(std.mem.eql(u8, mf[2].name, "c"));
+    }
+}
+
+test "String: parse duplicates and destroy resets" {
+    var s: String = .{};
+    const gpa = std.testing.allocator;
+    try s.parse(gpa, "hello");
+    try s.doneParsing(true);
+    try std.testing.expectEqualStrings("hello", s.get());
+    s.destroy(gpa);
+    try std.testing.expectEqualStrings("", s.get());
+}
+
+test "Optional(String): get returns null when missing" {
+    const Opt = Optional(String);
+    var o: Opt = .{};
+    const gpa = std.testing.allocator;
+    try o.doneParsing(false);
+    try std.testing.expect(o.get() == null);
+    try o.parse(gpa, "x");
+    try o.doneParsing(true);
+    try std.testing.expectEqualStrings("x", o.get().?);
+    o.destroy(gpa);
+    try std.testing.expect(o.get() == null);
+}
+
+test "SliceOf(String): collects and owns entries" {
+    const L = SliceOf(String);
+    var l: L = .{};
+    const gpa = std.testing.allocator;
+    defer l.destroy(gpa);
+    try l.parse(gpa, "one");
+    try l.parse(gpa, "two");
+    try l.doneParsing(true);
+    const items = l.get();
+    try std.testing.expectEqual(@as(usize, 2), items.len);
+    try std.testing.expectEqualStrings("one", items[0]);
+    try std.testing.expectEqualStrings("two", items[1]);
+}

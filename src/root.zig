@@ -35,7 +35,3 @@ pub const delete = @import("router.zig").delete;
 pub const patch = @import("router.zig").patch;
 pub const head = @import("router.zig").head;
 pub const options = @import("router.zig").options;
-
-test {
-    _ = @import("tests.zig");
-}

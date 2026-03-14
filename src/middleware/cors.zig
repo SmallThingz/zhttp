@@ -23,6 +23,13 @@ fn parseHeaderList(value: []const u8, allocator: std.mem.Allocator) ![]const []c
     return parts.toOwnedSlice(allocator);
 }
 
+fn allocHeaders(allocator: std.mem.Allocator, src: []const Header) ![]const Header {
+    if (src.len == 0) return &.{};
+    const out = try allocator.alloc(Header, src.len);
+    @memcpy(out, src);
+    return out;
+}
+
 pub fn Cors(comptime opts: anytype) type {
     const origins: []const []const u8 = if (@hasField(@TypeOf(opts), "origins")) opts.origins else &.{};
     const methods: []const []const u8 = if (@hasField(@TypeOf(opts), "methods")) opts.methods else &.{ "GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS" };
@@ -190,7 +197,8 @@ pub fn Cors(comptime opts: anytype) type {
                     n += 1;
                 }
 
-                return .{ .status = 204, .headers = hdrs[0..n], .body = "" };
+                const headers = try allocHeaders(req.allocator(), hdrs[0..n]);
+                return .{ .status = 204, .headers = headers, .body = "" };
             }
 
             if (!allowed) {

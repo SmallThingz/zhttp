@@ -40,8 +40,9 @@ pub fn main(init: std.process.Init) !void {
     const faf_core_dir = scripts.envString(env, "FAF_CORE_DIR", ".zig-cache/faf");
     const rustc_env = env.get("RUSTC_BIN") orelse env.get("RUSTC");
     const rustc_bin = rustc_env orelse "rustc";
+    const bench_bin = env.get("BENCH_BIN");
 
-    scripts.runFaf(init.io, allocator, faf_cfg, faf_dir, faf_core_dir, rustc_bin, init.minimal.environ, root) catch |err| switch (err) {
+    scripts.runFaf(init.io, allocator, faf_cfg, faf_dir, faf_core_dir, rustc_bin, bench_bin, init.minimal.environ, root) catch |err| switch (err) {
         error.CargoMissing => {
             var buffer: [256]u8 = undefined;
             const stderr_file = std.Io.File.stderr();

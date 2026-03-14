@@ -36,18 +36,52 @@ pub fn discardHeadersOnly(
     max_header_bytes: usize,
 ) (error{ BadRequest, HeadersTooLarge } || Io.Reader.Error)!void {
     var total: usize = 0;
+    var line_len: usize = 0;
+    var prev_cr = false;
     while (true) {
-        const line0_incl = r.takeDelimiterInclusive('\n') catch |err| switch (err) {
-            error.StreamTooLong => return error.HeadersTooLarge,
+        const available = r.peekGreedy(1) catch |err| switch (err) {
             error.EndOfStream => return error.EndOfStream,
             error.ReadFailed => return error.ReadFailed,
         };
-        total += line0_incl.len;
-        if (total > max_header_bytes) return error.HeadersTooLarge;
+        if (available.len == 0) return error.EndOfStream;
 
-        const line0 = line0_incl[0 .. line0_incl.len - 1];
-        const line = trimCR(line0);
-        if (line.len == 0) return;
+        var i: usize = 0;
+        while (i < available.len) : (i += 1) {
+            const b = available[i];
+            total += 1;
+            if (total > max_header_bytes) return error.HeadersTooLarge;
+
+            if (prev_cr) {
+                if (b == '\n') {
+                    if (line_len == 0) {
+                        r.toss(i + 1);
+                        return;
+                    }
+                    line_len = 0;
+                    prev_cr = false;
+                    continue;
+                } else {
+                    line_len += 1;
+                    prev_cr = false;
+                }
+            }
+
+            if (b == '\r') {
+                prev_cr = true;
+                continue;
+            }
+            if (b == '\n') {
+                if (line_len == 0) {
+                    r.toss(i + 1);
+                    return;
+                }
+                line_len = 0;
+                continue;
+            }
+            line_len += 1;
+        }
+
+        r.toss(available.len);
     }
 }
 
@@ -421,6 +455,7 @@ pub fn RequestPWithPattern(
                             break;
                         }
                         const start = out.items.len;
+                        if (size > max_bytes or start > max_bytes - size) return error.PayloadTooLarge;
                         try out.resize(a, start + size);
                         try readExact(r, out.items[start..][0..size]);
                         if (out.items.len > max_bytes) return error.PayloadTooLarge;
@@ -609,6 +644,23 @@ test "chunked bodyAll" {
     const body = try reqv.bodyAll(32);
     defer gpa.free(body);
     try std.testing.expectEqualStrings("Wiki", body);
+}
+
+test "chunked bodyAll: max_bytes enforced" {
+    const ReqT = Request(struct {}, struct {}, &.{}, TestMwCtx);
+    const gpa = std.testing.allocator;
+    const path = try gpa.dupe(u8, "/");
+    defer gpa.free(path);
+    const query = try gpa.dupe(u8, "");
+    defer gpa.free(query);
+    const line: RequestLine = .{ .method = "POST", .version = .http11, .path = path, .query = query };
+
+    var r = Io.Reader.fixed("Transfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n0\r\n\r\n");
+    const mw_ctx: TestMwCtx = .{};
+    var reqv = ReqT.init(gpa, std.testing.io, line, mw_ctx);
+    defer reqv.deinit(gpa);
+    try reqv.parseHeaders(gpa, &r, 1024);
+    try std.testing.expectError(error.PayloadTooLarge, reqv.bodyAll(4));
 }
 
 test "request line: borrowed parses path/query" {

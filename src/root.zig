@@ -4,7 +4,7 @@
 //!
 //! You register routes at comptime via `zhttp.Server(.{ .routes = .{ ... } })`.
 //! Route helpers accept a pattern, a handler, then comptime options:
-//! 
+//!
 //! - With options: `zhttp.get("/users/{id}", handler, .{ .params = struct { id: zhttp.parse.Int(u64) } })`
 //! - No options: `zhttp.get("/health", handler, .{})`
 //!

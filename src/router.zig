@@ -842,8 +842,8 @@ pub fn Compiled(
 
         fn middlewareDataPtr(comptime Mw: type, mw_ctx: anytype) ?*middlewareDataType(Mw) {
             if (!middlewareHasStoredData(Mw)) return null;
-        const name = comptime middlewareName(Mw).?;
-        return &@field(mw_ctx.*, name);
+            const name = comptime middlewareName(Mw).?;
+            return &@field(mw_ctx.*, name);
         }
 
         fn errorHandlerCall(comptime handler: anytype, ctx: anytype, reqp: anytype, err: anyerror) !Res {

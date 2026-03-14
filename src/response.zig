@@ -108,18 +108,26 @@ pub fn write(
             return;
         }
 
-        // HEAD: concatenate (up to 512) and emit only header bytes.
-        var tmp: [512]u8 = undefined;
-        var off: usize = 0;
+        // HEAD: stream until end of headers.
+        var window: [4]u8 = undefined;
+        var seen: usize = 0;
         for (rp.parts) |p| {
-            if (off + p.len > tmp.len) return error.WriteFailed;
-            @memcpy(tmp[off .. off + p.len], p);
-            off += p.len;
+            for (p) |b| {
+                try w.writeByte(b);
+                if (seen < 4) {
+                    window[seen] = b;
+                    seen += 1;
+                } else {
+                    window[0] = window[1];
+                    window[1] = window[2];
+                    window[2] = window[3];
+                    window[3] = b;
+                }
+                if (seen >= 4 and std.mem.eql(u8, window[0..], "\r\n\r\n")) {
+                    return;
+                }
+            }
         }
-        const raw = tmp[0..off];
-        const end = std.mem.indexOf(u8, raw, "\r\n\r\n") orelse raw.len;
-        const n = @min(raw.len, end + 4);
-        try w.writeAll(raw[0..n]);
         return;
     }
 
@@ -207,6 +215,31 @@ test "write: HEAD omits body but keeps content-length" {
         "content-length: 5\r\n" ++
         "\r\n";
     try std.testing.expectEqualStrings(expected, out[0..w.end]);
+}
+
+test "write: raw_parts HEAD streams long headers" {
+    const gpa = std.testing.allocator;
+    const long_len: usize = 600;
+    const long_value = try gpa.alloc(u8, long_len);
+    defer gpa.free(long_value);
+    @memset(long_value, 'a');
+
+    const part1 = "HTTP/1.1 200 OK\r\nX-Long: ";
+    const part3 = "\r\n\r\n";
+    const body = "BODY";
+    const res = Res.rawParts(&.{ part1, long_value, part3, body });
+
+    const expected_len = part1.len + long_len + part3.len;
+    const out = try gpa.alloc(u8, expected_len);
+    defer gpa.free(out);
+    var w = std.Io.Writer.fixed(out[0..]);
+    try write(&w, res, true, false);
+
+    try std.testing.expectEqual(expected_len, w.end);
+    try std.testing.expectEqualSlices(u8, part1, out[0..part1.len]);
+    try std.testing.expectEqualSlices(u8, long_value, out[part1.len .. part1.len + long_len]);
+    try std.testing.expectEqualStrings("\r\n\r\n", out[expected_len - 4 .. expected_len]);
+    try std.testing.expect(std.mem.indexOf(u8, out[0..w.end], body) == null);
 }
 
 test "write: keep-alive false emits close" {

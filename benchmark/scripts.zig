@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 
 pub const BenchConfig = struct {
     port: u16,
@@ -69,6 +70,18 @@ pub fn spawnBackground(io: std.Io, argv: []const []const u8, cwd: ?[]const u8, i
     });
 }
 
+fn terminateChild(io: std.Io, child: *std.process.Child) void {
+    if (child.id == null) return;
+    if (builtin.os.tag == .windows) {
+        child.kill(io);
+        return;
+    }
+    if (child.id) |pid| {
+        std.posix.kill(pid, .KILL) catch {};
+    }
+    _ = child.wait(io) catch {};
+}
+
 pub fn runZhttpExternal(io: std.Io, allocator: std.mem.Allocator, cfg: BenchConfig, root: []const u8) !void {
     printLabel(io, "== zhttp ==");
     try runChecked(io, &.{ "zig", "build", "-Doptimize=ReleaseFast" }, root, true);
@@ -82,9 +95,7 @@ pub fn runZhttpExternal(io: std.Io, allocator: std.mem.Allocator, cfg: BenchConf
         root,
         false,
     );
-    defer {
-        server.kill(io);
-    }
+    defer terminateChild(io, &server);
 
     try std.Io.sleep(io, std.Io.Duration.fromMilliseconds(200), .awake);
 
@@ -124,6 +135,19 @@ fn hasGitDir(io: std.Io, allocator: std.mem.Allocator, dir: []const u8) !bool {
     const git_path = try std.fs.path.join(allocator, &.{ dir, ".git" });
     defer allocator.free(git_path);
     return dirExists(io, git_path);
+}
+
+fn absPath(allocator: std.mem.Allocator, root: []const u8, path: []const u8) ![]const u8 {
+    if (std.fs.path.isAbsolute(path)) return try allocator.dupe(u8, path);
+    return try std.fs.path.join(allocator, &.{ root, path });
+}
+
+fn markerMatches(io: std.Io, allocator: std.mem.Allocator, path: []const u8, rev: []const u8) bool {
+    const data = readFileMaybe(io, allocator, path) catch return false;
+    if (data == null) return false;
+    defer allocator.free(data.?);
+    const trimmed = std.mem.trim(u8, data.?, " \t\r\n");
+    return std.mem.eql(u8, trimmed, rev);
 }
 
 fn readFileMaybe(io: std.Io, allocator: std.mem.Allocator, path: []const u8) !?[]u8 {
@@ -193,6 +217,16 @@ fn writeFile(io: std.Io, path: []const u8, data: []const u8) !void {
     try writer.interface.flush();
 }
 
+fn writeFileIfChanged(io: std.Io, allocator: std.mem.Allocator, path: []const u8, data: []const u8) !bool {
+    const old = try readFileMaybe(io, allocator, path);
+    if (old) |buf| {
+        defer allocator.free(buf);
+        if (std.mem.eql(u8, buf, data)) return false;
+    }
+    try writeFile(io, path, data);
+    return true;
+}
+
 fn patchFafUtil(io: std.Io, allocator: std.mem.Allocator, path: []const u8) !void {
     const data = try readFileMaybe(io, allocator, path) orelse return;
     if (std.mem.indexOf(u8, data, "prefetch_read_data") == null) return;
@@ -209,7 +243,7 @@ fn patchFafUtil(io: std.Io, allocator: std.mem.Allocator, path: []const u8) !voi
         try out.appendSlice(allocator, line);
         try out.append(allocator, '\n');
     }
-    try writeFile(io, path, out.items);
+    _ = try writeFileIfChanged(io, allocator, path, out.items);
 }
 
 fn patchFafLib(io: std.Io, allocator: std.mem.Allocator, path: []const u8) !void {
@@ -222,7 +256,7 @@ fn patchFafLib(io: std.Io, allocator: std.mem.Allocator, path: []const u8) !void
         try out.appendSlice(allocator, line);
         try out.append(allocator, '\n');
     }
-    try writeFile(io, path, out.items);
+    _ = try writeFileIfChanged(io, allocator, path, out.items);
 }
 
 fn patchFafHints(io: std.Io, allocator: std.mem.Allocator, path: []const u8) !void {
@@ -243,7 +277,7 @@ fn patchFafHints(io: std.Io, allocator: std.mem.Allocator, path: []const u8) !vo
         try out.appendSlice(allocator, line);
         try out.append(allocator, '\n');
     }
-    try writeFile(io, path, out.items);
+    _ = try writeFileIfChanged(io, allocator, path, out.items);
 }
 
 fn patchFafWarnings(io: std.Io, allocator: std.mem.Allocator, faf_core_dir: []const u8) !void {
@@ -269,7 +303,7 @@ fn patchFafWarnings(io: std.Io, allocator: std.mem.Allocator, faf_core_dir: []co
             }
             try out.append(allocator, '\n');
         }
-        try writeFile(io, net_path, out.items);
+        _ = try writeFileIfChanged(io, allocator, net_path, out.items);
     }
 
     if (readFileMaybe(io, allocator, epoll_path) catch null) |data| {
@@ -350,7 +384,7 @@ fn patchFafWarnings(io: std.Io, allocator: std.mem.Allocator, faf_core_dir: []co
             try final.append(allocator, '\n');
         }
 
-        try writeFile(io, epoll_path, final.items);
+        _ = try writeFileIfChanged(io, allocator, epoll_path, final.items);
     }
 
     if (readFileMaybe(io, allocator, http_date_path) catch null) |data| {
@@ -369,29 +403,40 @@ fn patchFafWarnings(io: std.Io, allocator: std.mem.Allocator, faf_core_dir: []co
             }
             try out.append(allocator, '\n');
         }
-        try writeFile(io, http_date_path, out.items);
+        _ = try writeFileIfChanged(io, allocator, http_date_path, out.items);
     }
 }
 
-fn patchFafExampleCargoToml(io: std.Io, allocator: std.mem.Allocator, path: []const u8, core_dir: []const u8) !void {
+fn patchFafExampleCargoToml(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    path: []const u8,
+    core_dir: []const u8,
+    lock_path: []const u8,
+) !void {
     const data = try readFileMaybe(io, allocator, path) orelse return;
-    const needle = "faf = { git = \"https://github.com/errantmind/faf.git\" }";
+    const needle = "faf = { git = \"https://github.com/errantmind/faf.git\"";
     if (std.mem.indexOf(u8, data, needle) == null) return;
 
     var out: std.ArrayList(u8) = .empty;
     defer out.deinit(allocator);
     var it = std.mem.splitScalar(u8, data, '\n');
+    var changed = false;
     while (it.next()) |line| {
-        if (std.mem.eql(u8, std.mem.trim(u8, line, " \t"), needle)) {
+        if (std.mem.indexOf(u8, line, needle) != null) {
             try out.appendSlice(allocator, "faf = { path = \"");
             try out.appendSlice(allocator, core_dir);
             try out.appendSlice(allocator, "\" }");
+            changed = true;
         } else {
             try out.appendSlice(allocator, line);
         }
         try out.append(allocator, '\n');
     }
-    try writeFile(io, path, out.items);
+    if (changed) {
+        _ = try writeFileIfChanged(io, allocator, path, out.items);
+        std.Io.Dir.deleteFileAbsolute(io, lock_path) catch {};
+    }
 }
 
 fn patchFafExampleMain(io: std.Io, allocator: std.mem.Allocator, path: []const u8) !void {
@@ -478,7 +523,7 @@ fn patchFafExampleMain(io: std.Io, allocator: std.mem.Allocator, path: []const u
 
     const data = try readFileMaybe(io, allocator, path);
     if (data == null or data.?.len == 0) {
-        try writeFile(io, path, default_main);
+        _ = try writeFileIfChanged(io, allocator, path, default_main);
         return;
     }
 
@@ -499,10 +544,10 @@ fn patchFafExampleMain(io: std.Io, allocator: std.mem.Allocator, path: []const u
         try out.append(allocator, '\n');
     }
     if (std.mem.indexOf(u8, out.items, "fn main") == null) {
-        try writeFile(io, path, default_main);
+        _ = try writeFileIfChanged(io, allocator, path, default_main);
         return;
     }
-    try writeFile(io, path, out.items);
+    _ = try writeFileIfChanged(io, allocator, path, out.items);
 }
 
 pub fn runFaf(
@@ -512,56 +557,91 @@ pub fn runFaf(
     faf_dir: []const u8,
     faf_core_dir: []const u8,
     rustc_bin: []const u8,
+    bench_bin_opt: ?[]const u8,
     environ: std.process.Environ,
     root: []const u8,
 ) !void {
     printLabel(io, "== FaF ==");
     if (cfg.port != 8080) return error.InvalidPort;
 
-    if (!try hasGitDir(io, allocator, faf_dir)) {
-        try runChecked(io, &.{ "git", "clone", "https://github.com/errantmind/faf-example", faf_dir }, null, true);
+    const faf_dir_abs = try absPath(allocator, root, faf_dir);
+    defer allocator.free(faf_dir_abs);
+    const faf_core_dir_abs = try absPath(allocator, root, faf_core_dir);
+    defer allocator.free(faf_core_dir_abs);
+
+    if (!try hasGitDir(io, allocator, faf_dir_abs)) {
+        try runChecked(io, &.{ "git", "clone", "https://github.com/errantmind/faf-example", faf_dir_abs }, null, true);
     }
 
-    const lock_path = try std.fs.path.join(allocator, &.{ faf_dir, "Cargo.lock" });
+    const lock_path = try std.fs.path.join(allocator, &.{ faf_dir_abs, "Cargo.lock" });
     defer allocator.free(lock_path);
-    const rev_file = try std.fs.path.join(allocator, &.{ faf_dir, ".faf_rev" });
+    const rev_file = try std.fs.path.join(allocator, &.{ faf_dir_abs, ".faf_rev" });
     defer allocator.free(rev_file);
-    const main_path = try std.fs.path.join(allocator, &.{ faf_dir, "src", "main.rs" });
+    const main_path = try std.fs.path.join(allocator, &.{ faf_dir_abs, "src", "main.rs" });
     defer allocator.free(main_path);
-    const cargo_path = try std.fs.path.join(allocator, &.{ faf_dir, "Cargo.toml" });
+    const cargo_path = try std.fs.path.join(allocator, &.{ faf_dir_abs, "Cargo.toml" });
     defer allocator.free(cargo_path);
 
     var faf_rev = try detectFafRevFromLock(io, allocator, lock_path);
     if (faf_rev == null) faf_rev = try detectFafRevFromFile(io, allocator, rev_file);
-    if (faf_rev == null and dirExists(io, faf_core_dir)) faf_rev = try gitRevParse(io, allocator, faf_core_dir);
+
+    if (faf_rev == null) {
+        if (!try hasGitDir(io, allocator, faf_core_dir_abs)) {
+            try runChecked(io, &.{ "git", "clone", "https://github.com/errantmind/faf", faf_core_dir_abs }, null, true);
+        }
+        faf_rev = try gitRevParse(io, allocator, faf_core_dir_abs);
+    }
+
     if (faf_rev == null) return error.MissingFafRevision;
 
     try writeFile(io, rev_file, faf_rev.?);
 
-    if (!try hasGitDir(io, allocator, faf_core_dir)) {
-        try runChecked(io, &.{ "git", "clone", "https://github.com/errantmind/faf", faf_core_dir }, null, true);
+    if (!try hasGitDir(io, allocator, faf_core_dir_abs)) {
+        try runChecked(io, &.{ "git", "clone", "https://github.com/errantmind/faf", faf_core_dir_abs }, null, true);
     }
 
-    _ = runChecked(io, &.{ "git", "-C", faf_core_dir, "fetch", "--all", "--tags" }, null, false) catch {};
-    try runChecked(io, &.{ "git", "-C", faf_core_dir, "reset", "--hard", "-q" }, null, true);
-    try runChecked(io, &.{ "git", "-C", faf_core_dir, "checkout", "-q", faf_rev.? }, null, true);
+    const core_marker = try std.fs.path.join(allocator, &.{ faf_core_dir_abs, ".zhttp_patch_rev" });
+    defer allocator.free(core_marker);
+    const core_patched = markerMatches(io, allocator, core_marker, faf_rev.?);
 
-    const util_path = try std.fs.path.join(allocator, &.{ faf_core_dir, "src", "util.rs" });
+    if (!core_patched) {
+        _ = runChecked(io, &.{ "git", "-C", faf_core_dir_abs, "fetch", "--all", "--tags" }, null, false) catch {};
+        try runChecked(io, &.{ "git", "-C", faf_core_dir_abs, "reset", "--hard", "-q" }, null, true);
+        try runChecked(io, &.{ "git", "-C", faf_core_dir_abs, "checkout", "-q", faf_rev.? }, null, true);
+    }
+
+    const util_path = try std.fs.path.join(allocator, &.{ faf_core_dir_abs, "src", "util.rs" });
     defer allocator.free(util_path);
-    const lib_path = try std.fs.path.join(allocator, &.{ faf_core_dir, "src", "lib.rs" });
+    const lib_path = try std.fs.path.join(allocator, &.{ faf_core_dir_abs, "src", "lib.rs" });
     defer allocator.free(lib_path);
-    const epoll_path = try std.fs.path.join(allocator, &.{ faf_core_dir, "src", "epoll.rs" });
+    const epoll_path = try std.fs.path.join(allocator, &.{ faf_core_dir_abs, "src", "epoll.rs" });
     defer allocator.free(epoll_path);
-    const req_path = try std.fs.path.join(allocator, &.{ faf_core_dir, "src", "http_request_path.rs" });
+    const req_path = try std.fs.path.join(allocator, &.{ faf_core_dir_abs, "src", "http_request_path.rs" });
     defer allocator.free(req_path);
-    try patchFafUtil(io, allocator, util_path);
-    try patchFafLib(io, allocator, lib_path);
-    try patchFafHints(io, allocator, epoll_path);
-    try patchFafHints(io, allocator, req_path);
-    try patchFafWarnings(io, allocator, faf_core_dir);
+    if (!core_patched) {
+        try patchFafUtil(io, allocator, util_path);
+        try patchFafLib(io, allocator, lib_path);
+        try patchFafHints(io, allocator, epoll_path);
+        try patchFafHints(io, allocator, req_path);
+        try patchFafWarnings(io, allocator, faf_core_dir_abs);
+        _ = try writeFileIfChanged(io, allocator, core_marker, faf_rev.?);
+    }
 
-    try patchFafExampleCargoToml(io, allocator, cargo_path, faf_core_dir);
-    try patchFafExampleMain(io, allocator, main_path);
+    const ex_marker = try std.fs.path.join(allocator, &.{ faf_dir_abs, ".zhttp_patch_rev" });
+    defer allocator.free(ex_marker);
+    var ex_patched = markerMatches(io, allocator, ex_marker, faf_rev.?);
+    if (ex_patched) {
+        const cargo_data = try readFileMaybe(io, allocator, cargo_path);
+        if (cargo_data == null or std.mem.indexOf(u8, cargo_data.?, faf_core_dir_abs) == null) {
+            ex_patched = false;
+        }
+        if (cargo_data) |buf| allocator.free(buf);
+    }
+    if (!ex_patched) {
+        try patchFafExampleCargoToml(io, allocator, cargo_path, faf_core_dir_abs, lock_path);
+        try patchFafExampleMain(io, allocator, main_path);
+        _ = try writeFileIfChanged(io, allocator, ex_marker, faf_rev.?);
+    }
 
     var env = try std.process.Environ.createMap(environ, allocator);
     defer env.deinit();
@@ -579,10 +659,19 @@ pub fn runFaf(
         }
     }
     try env.put("RUSTC", rustc_cmd);
-    {
+    const faf_bin = try std.fs.path.join(allocator, &.{ faf_dir_abs, "target", "release", "faf-ex" });
+    defer allocator.free(faf_bin);
+    var bin_exists = false;
+    if (std.Io.Dir.openFileAbsolute(io, faf_bin, .{})) |file| {
+        file.close(io);
+        bin_exists = true;
+    } else |_| {}
+
+    const need_build = !core_patched or !ex_patched or !bin_exists;
+    if (need_build) {
         var child = std.process.spawn(io, .{
             .argv = &.{ "cargo", "build", "--release" },
-            .cwd = .{ .path = faf_dir },
+            .cwd = .{ .path = faf_dir_abs },
             .environ_map = &env,
             .stdin = .ignore,
             .stdout = .inherit,
@@ -600,13 +689,11 @@ pub fn runFaf(
 
     var server = try spawnBackground(
         io,
-        &.{ "./target/release/faf-ex" },
-        faf_dir,
+        &.{"./target/release/faf-ex"},
+        faf_dir_abs,
         false,
     );
-    defer {
-        server.kill(io);
-    }
+    defer terminateChild(io, &server);
 
     try std.Io.sleep(io, std.Io.Duration.fromMilliseconds(200), .awake);
 
@@ -617,12 +704,24 @@ pub fn runFaf(
     const iters_arg = try std.fmt.bufPrint(&iters_buf, "--iters={d}", .{cfg.iters});
     const warmup_arg = try std.fmt.bufPrint(&warmup_buf, "--warmup={d}", .{cfg.warmup});
 
-    try runChecked(io, &.{ "zig", "build", "-Doptimize=ReleaseFast" }, root, true);
+    var bench_path: []const u8 = undefined;
+    if (bench_bin_opt) |p| {
+        bench_path = p;
+    } else {
+        bench_path = "./zig-out/bin/zhttp-bench";
+        const abs_bench = try std.fs.path.join(allocator, &.{ root, "zig-out", "bin", "zhttp-bench" });
+        defer allocator.free(abs_bench);
+        if (std.Io.Dir.openFileAbsolute(io, abs_bench, .{})) |file| {
+            file.close(io);
+        } else |_| {
+            return error.BenchBinaryMissing;
+        }
+    }
 
     var bench_args: std.ArrayList([]const u8) = .empty;
     defer bench_args.deinit(allocator);
     try bench_args.appendSlice(allocator, &.{
-        "./zig-out/bin/zhttp-bench",
+        bench_path,
         "--mode=external",
         "--host=127.0.0.1",
         "--port=8080",

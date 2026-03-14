@@ -53,6 +53,8 @@ pub fn build(b: *std.Build) void {
         "run",
         b.pathFromRoot("benchmark/run_faf.zig"),
     });
+    bench_faf_cmd.step.dependOn(&bench_exe.step);
+    bench_faf_cmd.step.dependOn(&bench_cmd.step);
     bench_step.dependOn(&bench_faf_cmd.step);
 
     const examples_step = b.step("examples", "Build all examples");

@@ -70,6 +70,13 @@ fn etagMatches(if_none_match: []const u8, tag: []const u8) bool {
     return false;
 }
 
+fn allocHeaders(allocator: std.mem.Allocator, src: []const Header) ![]const Header {
+    if (src.len == 0) return &.{};
+    const out = try allocator.alloc(Header, src.len);
+    @memcpy(out, src);
+    return out;
+}
+
 pub fn Static(comptime opts: anytype) type {
     if (!@hasField(@TypeOf(opts), "dir")) @compileError("Static requires .dir");
     const dir_path: []const u8 = opts.dir;
@@ -168,12 +175,14 @@ pub fn Static(comptime opts: anytype) type {
                 hcount += 1;
                 if (req.header(.if_none_match)) |hdr| {
                     if (etagMatches(hdr, tag)) {
-                        return .{ .status = 304, .headers = headers_buf[0..hcount], .body = "" };
+                        const headers = try allocHeaders(a, headers_buf[0..hcount]);
+                        return .{ .status = 304, .headers = headers, .body = "" };
                     }
                 }
             }
 
-            return .{ .status = 200, .headers = headers_buf[0..hcount], .body = body };
+            const headers = try allocHeaders(a, headers_buf[0..hcount]);
+            return .{ .status = 200, .headers = headers, .body = body };
         }
     };
 }
@@ -251,5 +260,52 @@ test "static: serves file and index, blocks traversal" {
         defer reqv.deinit(gpa);
         const res = try S.Routes[0].handler(&reqv);
         try std.testing.expectEqual(@as(u16, 404), res.status);
+    }
+}
+
+test "static: etag returns 304 on match" {
+    const S = Static(.{ .dir = "testdata/static", .mount = "/static" });
+    const MwCtx = struct {};
+    const ReqT = @import("../request.zig").Request(
+        struct { if_none_match: parse.Optional(parse.String) },
+        struct {},
+        &.{},
+        MwCtx,
+    );
+
+    const gpa = std.testing.allocator;
+    const path_buf = "/static/hello.txt".*;
+    const query_buf: [0]u8 = .{};
+
+    {
+        const line: @import("../request.zig").RequestLine = .{
+            .method = "GET",
+            .version = .http11,
+            .path = @constCast(path_buf[0..]),
+            .query = @constCast(query_buf[0..]),
+        };
+        const mw_ctx: MwCtx = .{};
+        var reqv = ReqT.init(gpa, std.testing.io, line, mw_ctx);
+        defer reqv.deinit(gpa);
+        const res = try S.Routes[0].handler(&reqv);
+        const tag = headerValue(res.headers, "etag") orelse return error.TestExpectedEqual;
+        const header_line = try std.fmt.allocPrint(gpa, "If-None-Match: {s}\r\n\r\n", .{tag});
+        gpa.free(@constCast(tag));
+        defer gpa.free(header_line);
+
+        const line2: @import("../request.zig").RequestLine = .{
+            .method = "GET",
+            .version = .http11,
+            .path = @constCast(path_buf[0..]),
+            .query = @constCast(query_buf[0..]),
+        };
+        const mw_ctx2: MwCtx = .{};
+        var reqv2 = ReqT.init(gpa, std.testing.io, line2, mw_ctx2);
+        defer reqv2.deinit(gpa);
+        var r = std.Io.Reader.fixed(header_line);
+        try reqv2.parseHeaders(gpa, &r, 1024);
+        const res2 = try S.Routes[0].handler(&reqv2);
+        try std.testing.expectEqual(@as(u16, 304), res2.status);
+        try std.testing.expectEqualStrings("", res2.body);
     }
 }

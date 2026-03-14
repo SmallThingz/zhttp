@@ -459,7 +459,7 @@ pub fn RequestPWithPattern(
                         break;
                     }
 
-                    const col = std.mem.indexOfScalar(u8, line, ':') orelse return error.BadRequest;
+                    const col = std.mem.indexOfScalarPos(u8, line, 1, ':') orelse return error.BadRequest;
                     const name = line[0..col];
                     var value = line[col + 1 ..];
                     value = trimSpaces(value);

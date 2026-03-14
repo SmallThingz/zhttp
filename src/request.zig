@@ -433,6 +433,7 @@ pub fn RequestPWithPattern(
 
                 var line_start: usize = 0;
                 var search_pos: usize = 0;
+                @setRuntimeSafety(false);
                 while (true) {
                     const nl = std.mem.indexOfScalarPos(u8, available, search_pos, '\n') orelse break;
                     total += (nl - line_start + 1);

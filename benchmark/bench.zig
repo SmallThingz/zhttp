@@ -10,7 +10,7 @@ const Mode = enum {
 };
 
 const Config = struct {
-    mode: Mode = .zhttp,
+    mode: Mode = .external,
     host: []const u8 = "127.0.0.1",
     port: u16 = 0,
     path: []const u8 = "/plaintext",
@@ -54,8 +54,8 @@ fn usage() void {
         \\  zig build bench -Doptimize=ReleaseFast -- [options]
         \\
         \\Modes:
-        \\  --mode=zhttp        Run an in-process zhttp server (default)
-        \\  --mode=external     Benchmark an external server (e.g. FaF)
+        \\  --mode=zhttp        Run an in-process zhttp server
+        \\  --mode=external     Benchmark an external server (default)
         \\
         \\Options:
         \\  --host=127.0.0.1    IPv4 literal (external mode)
@@ -345,6 +345,7 @@ fn runExternal(init: std.process.Init, cfg: Config) !void {
 pub fn main(init: std.process.Init) !void {
     const a = init.arena.allocator();
     var cfg: Config = .{};
+    var port_set = false;
 
     var it = try std.process.Args.Iterator.initAllocator(init.minimal.args, init.gpa);
     defer it.deinit();
@@ -374,6 +375,7 @@ pub fn main(init: std.process.Init) !void {
                 cfg.path = try a.dupe(u8, kv.val);
             } else if (std.mem.eql(u8, kv.key, "port")) {
                 cfg.port = try std.fmt.parseInt(u16, kv.val, 10);
+                port_set = true;
             } else if (std.mem.eql(u8, kv.key, "conns")) {
                 cfg.conns = try std.fmt.parseInt(usize, kv.val, 10);
             } else if (std.mem.eql(u8, kv.key, "iters")) {
@@ -393,6 +395,9 @@ pub fn main(init: std.process.Init) !void {
 
     if (cfg.conns == 0) return error.BadConns;
     if (cfg.iters == 0) return error.BadIters;
+    if (!port_set) {
+        if (cfg.mode == .external) cfg.port = 8080 else cfg.port = 0;
+    }
     if (cfg.mode == .external and cfg.port == 0) return error.BadPort;
 
     if (!cfg.quiet and cfg.mode == .zhttp) {

@@ -191,6 +191,30 @@ fn buildZigExe(
     const global_cache_dir = try std.fs.path.join(allocator, &.{ root, ".zig-cache-global" });
     defer allocator.free(global_cache_dir);
 
+    const out_stat = blk: {
+        if (std.Io.Dir.openFileAbsolute(io, out, .{})) |file| {
+            defer file.close(io);
+            break :blk file.stat(io) catch null;
+        } else |_| break :blk null;
+    };
+    if (out_stat) |ost| {
+        const src_stat = blk: {
+            const file = try std.Io.Dir.openFileAbsolute(io, src, .{});
+            defer file.close(io);
+            break :blk try file.stat(io);
+        };
+        const zhttp_stat = blk: {
+            const file = try std.Io.Dir.openFileAbsolute(io, zhttp, .{});
+            defer file.close(io);
+            break :blk try file.stat(io);
+        };
+        if (src_stat.mtime.nanoseconds <= ost.mtime.nanoseconds and
+            zhttp_stat.mtime.nanoseconds <= ost.mtime.nanoseconds)
+        {
+            return;
+        }
+    }
+
     const mroot = try std.fmt.allocPrint(allocator, "-Mroot={s}", .{src});
     defer allocator.free(mroot);
     const mzhttp = try std.fmt.allocPrint(allocator, "-Mzhttp={s}", .{zhttp});
@@ -229,7 +253,13 @@ fn terminateChild(io: std.Io, child: *std.process.Child) void {
     _ = child.wait(io) catch {};
 }
 
-pub fn runZhttpExternal(io: std.Io, allocator: std.mem.Allocator, cfg: BenchConfig, root: []const u8) !void {
+pub fn runZhttpExternal(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    cfg: BenchConfig,
+    root: []const u8,
+    environ: std.process.Environ,
+) !void {
     printLabel(io, "== zhttp ==");
     try buildZigExe(io, allocator, root, "benchmark/zhttp_server.zig", "zig-out/bin/zhttp-bench-server", "zhttp-bench-server");
 
@@ -279,7 +309,10 @@ pub fn runZhttpExternal(io: std.Io, allocator: std.mem.Allocator, cfg: BenchConf
         const fixed_arg = try std.fmt.bufPrint(&fixed_buf, "--fixed-bytes={d}", .{v});
         try bench_args.append(allocator, fixed_arg);
     }
-    try runChecked(io, bench_args.items, root, true);
+    var env = try std.process.Environ.createMap(environ, allocator);
+    defer env.deinit();
+    try env.put("BENCH_LABEL", "zhttp ");
+    try runCheckedEnv(io, bench_args.items, root, true, &env);
 }
 
 fn dirExists(io: std.Io, path: []const u8) bool {

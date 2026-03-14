@@ -25,7 +25,7 @@ pub fn main(init: std.process.Init) !void {
         .warmup = warmup,
         .full_request = full_request,
     };
-    try scripts.runZhttpExternal(init.io, allocator, zhttp_cfg, root);
+    try scripts.runZhttpExternal(init.io, allocator, zhttp_cfg, root, init.minimal.environ);
 
     try stdout.interface.writeAll("\n== FaF ==\n");
     const faf_cfg: scripts.BenchConfig = .{

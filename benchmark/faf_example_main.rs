@@ -4,49 +4,31 @@
 fn likely(b: bool) -> bool { b }
 use faf::epoll;
 use faf::util::memcmp;
+use core::ptr::read_unaligned;
 
-const METHOD_GET: &[u8] = b"GET";
-const METHOD_GET_LEN: usize = METHOD_GET.len();
-const ROUTE_PLAINTEXT: &[u8] = b"/plaintext";
-const ROUTE_PLAINTEXT_LEN: usize = ROUTE_PLAINTEXT.len();
+const PLAINTEXT_RESPONSE: &[u8] = b"HTTP/1.1 200 OK\r\n\
+    Server: F\r\n\
+    Content-Type: text/plain\r\n\
+    Content-Length: 13\r\n\
+    Connection: keep-alive\r\n\
+    Date: Wed, 24 Feb 2021 12:00:00 GMT\r\n\
+    \r\n\
+    Hello, World!";
 
-const DATE_LEN: usize = 35;
-const PLAINTEXT_PREFIX: &str = concat!(
-    "HTTP/1.1 200 OK\r\n",
-    "Server: F\r\n",
-    "Content-Type: text/plain\r\n",
-    "Content-Length: 13\r\n",
-    "Connection: keep-alive\r\n"
-);
-const PLAINTEXT_SUFFIX: &str = "\r\n\r\nHello, World!";
+const RESPONSE_LEN: usize = PLAINTEXT_RESPONSE.len();
 
 #[inline(always)]
 fn cb(
-    method: *const u8,
-    method_len: usize,
-    path: *const u8,
-    path_len: usize,
+    _method: *const u8,
+    _method_len: usize,
+    _path: *const u8,
+    _path_len: usize,
     response_buffer: *mut u8,
-    date_buff: *const u8,
+    _date_buff: *const u8,
 ) -> usize {
     unsafe {
-        if likely(method_len == METHOD_GET_LEN && path_len == ROUTE_PLAINTEXT_LEN) &&
-            likely(memcmp(METHOD_GET.as_ptr(), method, METHOD_GET_LEN) == 0) &&
-            likely(memcmp(ROUTE_PLAINTEXT.as_ptr(), path, ROUTE_PLAINTEXT_LEN) == 0)
-        {
-            let prefix = PLAINTEXT_PREFIX.as_bytes();
-            let suffix = PLAINTEXT_SUFFIX.as_bytes();
-            core::ptr::copy_nonoverlapping(prefix.as_ptr(), response_buffer, prefix.len());
-            core::ptr::copy_nonoverlapping(date_buff, response_buffer.add(prefix.len()), DATE_LEN);
-            core::ptr::copy_nonoverlapping(
-                suffix.as_ptr(),
-                response_buffer.add(prefix.len() + DATE_LEN),
-                suffix.len(),
-            );
-            prefix.len() + DATE_LEN + suffix.len()
-        } else {
-            0
-        }
+    core::ptr::copy_nonoverlapping(PLAINTEXT_RESPONSE.as_ptr(), response_buffer, RESPONSE_LEN);
+    RESPONSE_LEN
     }
 }
 

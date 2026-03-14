@@ -43,11 +43,19 @@ pub fn build(b: *std.Build) void {
     bench_server_step.dependOn(&bench_server_exe.step);
 
     const bench_step = b.step("bench", "Run benchmarks");
-    const bench_cmd = b.addRunArtifact(bench_exe);
-    bench_step.dependOn(&bench_cmd.step);
+    const bench_zhttp_exe = b.addExecutable(.{
+        .name = "zhttp-bench-zhttp",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("benchmark/run_zhttp_external.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    const bench_zhttp_run = b.addRunArtifact(bench_zhttp_exe);
     if (b.args) |args| {
-        bench_cmd.addArgs(args);
+        bench_zhttp_run.addArgs(args);
     }
+    bench_step.dependOn(&bench_zhttp_run.step);
     const bench_faf_exe = b.addExecutable(.{
         .name = "zhttp-bench-faf",
         .root_module = b.createModule(.{
@@ -61,7 +69,7 @@ pub fn build(b: *std.Build) void {
     if (b.args) |args| {
         bench_faf_run.addArgs(args);
     }
-    bench_faf_run.step.dependOn(&bench_cmd.step);
+    bench_faf_run.step.dependOn(&bench_exe.step);
     bench_step.dependOn(&bench_faf_run.step);
 
     const examples_step = b.step("examples", "Build all examples");

@@ -772,6 +772,14 @@ pub fn Compiled(
     const pattern_storage: [method_count][route_count]u16 = tables.pattern_storage;
     const pattern_counts: [method_count]usize = tables.pattern_counts;
 
+    const single_method: []const u8 = if (route_count == 1) @field(routes, route_fields[0].name).method else "";
+    const single_pattern: []const u8 = if (route_count == 1) @field(routes, route_fields[0].name).pattern else "";
+    const single_exact: bool = route_count == 1 and
+        compiled.patterns[0].param_names.len == 0 and
+        !compiled.patterns[0].glob and
+        std.mem.indexOfScalar(u8, single_pattern, '{') == null and
+        std.mem.indexOfScalar(u8, single_pattern, '*') == null;
+
     const head_id: ?u8 = comptime blk: {
         const Methods0 = method_names.arr[0..method_names.len];
         var out: ?u8 = null;
@@ -917,30 +925,6 @@ pub fn Compiled(
     const DispatchResult = struct { res: Res, keep_alive: bool };
     const has_error_handler: bool = @TypeOf(error_handler) != @TypeOf(null);
 
-    const fast_allowed = comptime blk: {
-        var out: [route_count]bool = .{false} ** route_count;
-        for (route_fields, 0..) |f, i| {
-            const rd = @field(routes, f.name);
-            const p = compiled.patterns[i];
-            const MwTuple = tupleConcat(global_middlewares, optionsField(rd.options, "middlewares", .{}));
-            const NeedH = middlewareNeedsHeaders(MwTuple);
-            const NeedQ = middlewareNeedsQuery(MwTuple);
-            const NeedP = middlewareNeedsParams(MwTuple);
-            const H = parse.mergeStructs(NeedH, optionsField(rd.options, "headers", struct {}));
-            const Q = parse.mergeStructs(NeedQ, optionsField(rd.options, "query", struct {}));
-            const P = parse.mergeStructs(NeedP, optionsField(rd.options, "params", struct {}));
-
-            const h_fields = parse.structFields(H);
-            const q_fields = parse.structFields(Q);
-            const p_fields = parse.structFields(P);
-
-            // Only exact routes without params/glob and without any capture needs.
-            const exact = p.param_names.len == 0 and !p.glob and std.mem.indexOfScalar(u8, rd.pattern, '{') == null and std.mem.indexOfScalar(u8, rd.pattern, '*') == null;
-            out[i] = exact and h_fields.len == 0 and q_fields.len == 0 and p_fields.len == 0 and util.tupleLen(MwTuple) == 0;
-        }
-        break :blk out;
-    };
-
     return struct {
         pub const RouteCount: usize = route_count;
         pub const MaxParams: usize = compiled.max_params;
@@ -1013,6 +997,14 @@ pub fn Compiled(
             return null;
         }
 
+        fn eqLiteral(bytes: []const u8, comptime lit: []const u8) bool {
+            if (bytes.len != lit.len) return false;
+            inline for (lit, 0..) |c, i| {
+                if (bytes[i] != c) return false;
+            }
+            return true;
+        }
+
         fn dispatchByMethod(
             comptime ids: []const u8,
             comptime offset: usize,
@@ -1050,6 +1042,17 @@ pub fn Compiled(
         }
 
         pub fn match(method_token: []const u8, path: []u8, params_out: [][]u8) ?u16 {
+            if (single_exact) {
+                if (eqLiteral(method_token, "HEAD")) {
+                    if (eqLiteral(single_method, "HEAD") or eqLiteral(single_method, "GET")) {
+                        if (eqLiteral(path, single_pattern)) return 0;
+                    }
+                    return null;
+                }
+                if (!eqLiteral(method_token, single_method)) return null;
+                if (!eqLiteral(path, single_pattern)) return null;
+                return 0;
+            }
             // HEAD fallback to GET.
             if (std.mem.eql(u8, method_token, "HEAD")) {
                 if (head_id) |hid| {
@@ -1144,52 +1147,6 @@ pub fn Compiled(
                 }
             }
             return error.BadRequest;
-        }
-
-        pub fn dispatchFast(
-            ctx: if (Context == void) void else *Context,
-            io: Io,
-            allocator: Allocator,
-            r: *Io.Reader,
-            line: request.RequestLine,
-            route_index: u16,
-            params_buf: []const []u8,
-            max_header_bytes: usize,
-        ) !DispatchResult {
-            inline for (route_fields, 0..) |f, i| {
-                if (route_index == i and fast_allowed[i]) {
-                    const rd = @field(routes, f.name);
-                    // Consume headers quickly (unsafe: ignores bodies).
-                    try request.discardHeadersOnly(r, max_header_bytes);
-
-                    const empty_line: request.RequestLine = .{
-                        .method = "",
-                        .version = line.version,
-                        .path = line.path[0..0],
-                        .query = line.query[0..0],
-                    };
-                    const MwCtx = struct {};
-                    const mw_ctx: MwCtx = .{};
-                    const ReqT = request.RequestWithPattern(struct {}, struct {}, &.{}, MwCtx, rd.pattern);
-                    var reqv = ReqT.init(allocator, io, empty_line, mw_ctx);
-                    defer reqv.deinit(allocator);
-                    reqv.reader = r;
-
-                    const res = Dispatch.handlerCall(rd.handler, ctx, &reqv) catch |err| {
-                        if (has_error_handler) {
-                            const eh = error_handler;
-                            const handled = if (Context == void)
-                                try Dispatch.errorHandlerCall(eh, {}, &reqv, err)
-                            else
-                                try Dispatch.errorHandlerCall(eh, ctx, &reqv, err);
-                            return .{ .res = handled, .keep_alive = line.version == .http11 };
-                        }
-                        return err;
-                    };
-                    return .{ .res = res, .keep_alive = line.version == .http11 };
-                }
-            }
-            return dispatch(ctx, io, allocator, r, line, route_index, params_buf, max_header_bytes);
         }
     };
 }
@@ -1365,7 +1322,7 @@ test "dispatch: pipelined request discards unread chunked body" {
     try std.testing.expectEqualStrings("g", dr2.res.body);
 }
 
-test "dispatch: path param percent-decodes and dispatchFast falls back" {
+test "dispatch: path param percent-decodes" {
     const S = Compiled(void, .{
         get("/u/{id}", struct {
             fn h(_: void, req: anytype) !Res {
@@ -1388,44 +1345,6 @@ test "dispatch: path param percent-decodes and dispatchFast falls back" {
     const rid = S.match(line.method, line.path, params[0..S.MaxParams]).?;
     const dr = try S.dispatch({}, std.testing.io, a, &r, line, rid, params[0..S.MaxParams], 8 * 1024);
     try std.testing.expectEqualStrings("a/b", dr.res.body);
-
-    var r2 = Io.Reader.fixed(
-        "GET /u/a%2Fb HTTP/1.1\r\n" ++
-            "\r\n",
-    );
-    const line2 = try request.parseRequestLineBorrowed(&r2, 8 * 1024);
-    const rid2 = S.match(line2.method, line2.path, params[0..S.MaxParams]).?;
-    const dr2 = try S.dispatchFast({}, std.testing.io, a, &r2, line2, rid2, params[0..S.MaxParams], 8 * 1024);
-    try std.testing.expectEqualStrings("a/b", dr2.res.body);
-}
-
-test "dispatchFast: routes with header needs fall back to full dispatch" {
-    const H = struct { host: parse.String };
-
-    const S = Compiled(void, .{
-        get("/x", struct {
-            fn h(_: void, req: anytype) !Res {
-                _ = req.header(.host);
-                return Res.text(200, "ok");
-            }
-        }.h, .{ .headers = H }),
-    }, .{}, null);
-
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    const a = arena.allocator();
-
-    var params: [S.MaxParams][]u8 = undefined;
-    var r = Io.Reader.fixed(
-        "GET /x HTTP/1.1\r\n" ++
-            "Host: example\r\n" ++
-            "\r\n",
-    );
-
-    const line = try request.parseRequestLineBorrowed(&r, 8 * 1024);
-    const rid = S.match(line.method, line.path, params[0..S.MaxParams]).?;
-    const dr = try S.dispatchFast({}, std.testing.io, a, &r, line, rid, params[0..S.MaxParams], 8 * 1024);
-    try std.testing.expectEqualStrings("ok", dr.res.body);
 }
 
 test "dispatch: typed path params via opts.params" {
@@ -1624,7 +1543,7 @@ test "middleware data: set in middleware and handler access" {
     try std.testing.expectEqualStrings("ok", dr.res.body);
 }
 
-test "error handler: handler error returns response (dispatch/dispatchFast)" {
+test "error handler: handler error returns response" {
     const ErrHandler = struct {
         fn h(err: anyerror) !Res {
             _ = @errorName(err);
@@ -1651,13 +1570,6 @@ test "error handler: handler error returns response (dispatch/dispatchFast)" {
     const dr = try S.dispatch({}, std.testing.io, a, &r, line, rid, params[0..S.MaxParams], 8 * 1024);
     try std.testing.expectEqual(@as(u16, 555), dr.res.status);
     try std.testing.expectEqualStrings("handled", dr.res.body);
-
-    var r2 = Io.Reader.fixed("GET /x HTTP/1.1\r\n\r\n");
-    const line2 = try request.parseRequestLineBorrowed(&r2, 8 * 1024);
-    const rid2 = S.match(line2.method, line2.path, params[0..S.MaxParams]).?;
-    const dr2 = try S.dispatchFast({}, std.testing.io, a, &r2, line2, rid2, params[0..S.MaxParams], 8 * 1024);
-    try std.testing.expectEqual(@as(u16, 555), dr2.res.status);
-    try std.testing.expectEqualStrings("handled", dr2.res.body);
 }
 
 test "fuzz: router match does not crash" {

@@ -307,7 +307,6 @@ fn runZhttp(init: std.process.Init, cfg: Config) !void {
         .config = .{
             .read_buffer = 64 * 1024,
             .write_buffer = 16 * 1024,
-            .fast_benchmark = true,
         },
     });
 

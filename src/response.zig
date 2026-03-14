@@ -74,6 +74,13 @@ pub fn write(
     if (res.raw_parts) |rp| {
         if (send_body) {
             if (!rp.copy) {
+                if (rp.parts.len != 0 and rp.parts.len <= 8) {
+                    var tmp: [8][]const u8 = undefined;
+                    for (rp.parts, 0..) |p, i| tmp[i] = p;
+                    const vec = tmp[0..rp.parts.len];
+                    try w.writeVecAll(vec);
+                    return;
+                }
                 for (rp.parts) |p| try w.writeAll(p);
                 return;
             }

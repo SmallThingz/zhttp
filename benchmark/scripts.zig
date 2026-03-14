@@ -70,6 +70,52 @@ pub fn spawnBackground(io: std.Io, argv: []const []const u8, cwd: ?[]const u8, i
     });
 }
 
+fn buildZigExe(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    root: []const u8,
+    src_rel: []const u8,
+    out_rel: []const u8,
+    name: []const u8,
+) !void {
+    const src = try std.fs.path.join(allocator, &.{ root, src_rel });
+    defer allocator.free(src);
+    const zhttp = try std.fs.path.join(allocator, &.{ root, "src", "root.zig" });
+    defer allocator.free(zhttp);
+    const out = try std.fs.path.join(allocator, &.{ root, out_rel });
+    defer allocator.free(out);
+    const cache_dir = try std.fs.path.join(allocator, &.{ root, ".zig-cache" });
+    defer allocator.free(cache_dir);
+    const global_cache_dir = try std.fs.path.join(allocator, &.{ root, ".zig-cache-global" });
+    defer allocator.free(global_cache_dir);
+
+    const mroot = try std.fmt.allocPrint(allocator, "-Mroot={s}", .{src});
+    defer allocator.free(mroot);
+    const mzhttp = try std.fmt.allocPrint(allocator, "-Mzhttp={s}", .{zhttp});
+    defer allocator.free(mzhttp);
+    const emit_arg = try std.fmt.allocPrint(allocator, "-femit-bin={s}", .{out});
+    defer allocator.free(emit_arg);
+    const cache_arg = try std.fmt.allocPrint(allocator, "--cache-dir={s}", .{cache_dir});
+    defer allocator.free(cache_arg);
+    const gcache_arg = try std.fmt.allocPrint(allocator, "--global-cache-dir={s}", .{global_cache_dir});
+    defer allocator.free(gcache_arg);
+
+    try runChecked(io, &.{
+        "zig",
+        "build-exe",
+        "-OReleaseFast",
+        "--dep",
+        "zhttp",
+        mroot,
+        mzhttp,
+        "--name",
+        name,
+        emit_arg,
+        cache_arg,
+        gcache_arg,
+    }, root, true);
+}
+
 fn terminateChild(io: std.Io, child: *std.process.Child) void {
     if (child.id == null) return;
     if (builtin.os.tag == .windows) {
@@ -84,7 +130,7 @@ fn terminateChild(io: std.Io, child: *std.process.Child) void {
 
 pub fn runZhttpExternal(io: std.Io, allocator: std.mem.Allocator, cfg: BenchConfig, root: []const u8) !void {
     printLabel(io, "== zhttp ==");
-    try runChecked(io, &.{ "zig", "build", "-Doptimize=ReleaseFast" }, root, true);
+    try buildZigExe(io, allocator, root, "benchmark/zhttp_server.zig", "zig-out/bin/zhttp-bench-server", "zhttp-bench-server");
 
     var port_buf: [16]u8 = undefined;
     const port_arg = try std.fmt.bufPrint(&port_buf, "--port={d}", .{cfg.port});
@@ -110,7 +156,7 @@ pub fn runZhttpExternal(io: std.Io, allocator: std.mem.Allocator, cfg: BenchConf
 
     var bench_args: std.ArrayList([]const u8) = .empty;
     defer bench_args.deinit(allocator);
-    try runChecked(io, &.{ "zig", "build", "-Doptimize=ReleaseFast" }, root, true);
+    try buildZigExe(io, allocator, root, "benchmark/bench.zig", "zig-out/bin/zhttp-bench", "zhttp-bench");
     try bench_args.appendSlice(allocator, &.{
         "./zig-out/bin/zhttp-bench",
         "--mode=external",

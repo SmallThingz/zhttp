@@ -6,8 +6,6 @@ const Io = std.Io;
 const response = @import("response.zig");
 const request = @import("request.zig");
 const router = @import("router.zig");
-const parse = @import("parse.zig");
-const util = @import("util.zig");
 
 pub const Config = struct {
     /// Per-connection read buffer size.
@@ -18,12 +16,6 @@ pub const Config = struct {
     max_request_line: usize = 8 * 1024,
     /// Maximum total header bytes (bytes, including line endings).
     max_header_bytes: usize = 32 * 1024,
-    /// Unsafe fast path for benchmarking:
-    /// - Only used when the matched route is eligible (exact route, no headers/query/params/middleware needs).
-    /// - Skips header parsing (assumes no request body; ignores `Connection: close`).
-    fast_benchmark: bool = false,
-    /// Additional benchmark-only assumption: there are no request headers (i.e. request line is followed by `\r\n`).
-    fast_benchmark_empty_headers: bool = false,
 };
 
 fn configField(comptime cfg: anytype, comptime name: []const u8, default: anytype) @TypeOf(default) {
@@ -52,40 +44,12 @@ pub fn Server(comptime def: anytype) type {
         .write_buffer = configField(cfg, "write_buffer", defaults.write_buffer),
         .max_request_line = configField(cfg, "max_request_line", defaults.max_request_line),
         .max_header_bytes = configField(cfg, "max_header_bytes", defaults.max_header_bytes),
-        .fast_benchmark = configField(cfg, "fast_benchmark", defaults.fast_benchmark),
-        .fast_benchmark_empty_headers = configField(cfg, "fast_benchmark_empty_headers", defaults.fast_benchmark_empty_headers),
     };
 
     const ErrorHandler = if (@hasField(@TypeOf(def), "error_handler")) def.error_handler else null;
     const Compiled = router.Compiled(Context, Routes, Middlewares, ErrorHandler);
     const EmptyMwCtx = struct {};
     const EmptyReq = request.Request(struct {}, struct {}, &.{}, EmptyMwCtx);
-
-    const routes_info = @typeInfo(@TypeOf(Routes));
-    const route_fields = routes_info.@"struct".fields;
-
-    const fast_single_route = comptime blk: {
-        if (!Conf.fast_benchmark) break :blk false;
-        if (route_fields.len != 1) break :blk false;
-        if (util.tupleLen(Middlewares) != 0) break :blk false;
-        const rd0 = @field(Routes, route_fields[0].name);
-        if (std.mem.indexOfScalar(u8, rd0.pattern, '{') != null) break :blk false;
-        if (std.mem.indexOfScalar(u8, rd0.pattern, '*') != null) break :blk false;
-        const opts = rd0.options;
-        if (@hasField(@TypeOf(opts), "headers")) {
-            if (parse.structFields(@field(opts, "headers")).len != 0) break :blk false;
-        }
-        if (@hasField(@TypeOf(opts), "query")) {
-            if (parse.structFields(@field(opts, "query")).len != 0) break :blk false;
-        }
-        if (@hasField(@TypeOf(opts), "params")) {
-            if (parse.structFields(@field(opts, "params")).len != 0) break :blk false;
-        }
-        if (@hasField(@TypeOf(opts), "middlewares")) {
-            if (util.tupleLen(@field(opts, "middlewares")) != 0) break :blk false;
-        }
-        break :blk true;
-    };
 
     return struct {
         io: Io,
@@ -124,8 +88,7 @@ pub fn Server(comptime def: anytype) type {
                     error.Canceled => return error.Canceled,
                     else => return,
                 };
-                const ConnFn = if (fast_single_route) handleConnFastSingle else handleConn;
-                self.group.concurrent(self.io, ConnFn, .{ self, stream }) catch {
+                self.group.concurrent(self.io, handleConn, .{ self, stream }) catch {
                     stream.close(self.io);
                 };
             }
@@ -176,7 +139,7 @@ pub fn Server(comptime def: anytype) type {
                 var keep_alive: bool = false;
 
                 if (rid) |route_index| {
-                    const dr = (if (Conf.fast_benchmark) Compiled.dispatchFast else Compiled.dispatch)(
+                    const dr = Compiled.dispatch(
                         if (Context == void) {} else self.ctx,
                         self.io,
                         a,
@@ -227,275 +190,16 @@ pub fn Server(comptime def: anytype) type {
                 response.write(&sw.interface, res, keep_alive, send_body) catch {
                     return;
                 };
-                sw.interface.flush() catch {
-                    return;
-                };
+                if (sw.interface.buffered().len != 0) {
+                    sw.interface.flush() catch {
+                        return;
+                    };
+                }
 
                 if (!keep_alive or res.close) return;
             }
         }
-
-        fn handleConnFastSingle(self: *Self, stream: std.Io.net.Stream) Io.Cancelable!void {
-            defer stream.close(self.io);
-
-            comptime std.debug.assert(route_fields.len == 1);
-            const rd0 = @field(Routes, route_fields[0].name);
-            const method_str = rd0.method;
-            const pattern = rd0.pattern;
-            const expected_line = comptime method_str ++ " " ++ pattern ++ " HTTP/1.1\r\n";
-            const path_start: usize = comptime method_str.len + 1;
-            const path_end: usize = comptime path_start + pattern.len;
-            const handler = rd0.handler;
-            const handler_params = @typeInfo(@TypeOf(handler)).@"fn".params;
-            const CtxPtr = if (Context == void) void else *Context;
-            const handler_ctx_only = comptime blk: {
-                if (CtxPtr == void) break :blk false;
-                if (handler_params.len != 1) break :blk false;
-                if (handler_params[0].type) |pt| {
-                    if (pt == CtxPtr) break :blk true;
-                }
-                break :blk false;
-            };
-            const handler_needs_req = comptime handler_params.len == 2 or (handler_params.len == 1 and !handler_ctx_only);
-            const send_body = comptime !std.mem.eql(u8, method_str, "HEAD");
-
-            var read_buf: [Conf.read_buffer]u8 = undefined;
-            var write_buf: [Conf.write_buffer]u8 = undefined;
-
-            var sr = stream.reader(self.io, &read_buf);
-            var sw = stream.writer(self.io, &write_buf);
-
-            // Benchmark-only: avoid arena resets and route dispatch overhead.
-            // Assumes the route is exact and has no headers/query/params/middleware needs.
-            while (true) {
-                var linebuf: [expected_line.len]u8 = undefined;
-                const line_bytes: []u8 = if (handler_needs_req) blk: {
-                    sr.interface.readSliceAll(linebuf[0..]) catch |err| switch (err) {
-                        error.EndOfStream => return,
-                        else => {
-                            writeSimple(self, &sw.interface, 400, "bad request");
-                            return;
-                        },
-                    };
-                    break :blk linebuf[0..];
-                } else blk: {
-                    const got = sr.interface.takeArray(expected_line.len) catch |err| switch (err) {
-                        error.EndOfStream => return,
-                        else => {
-                            writeSimple(self, &sw.interface, 400, "bad request");
-                            return;
-                        },
-                    };
-                    break :blk got[0..];
-                };
-
-                if (!std.mem.eql(u8, line_bytes, expected_line)) {
-                    writeSimple(self, &sw.interface, 400, "bad request");
-                    return;
-                }
-
-                if (Conf.fast_benchmark_empty_headers) {
-                    const crlf = sr.interface.takeArray(2) catch {
-                        return;
-                    };
-                    if (crlf[0] != '\r' or crlf[1] != '\n') {
-                        writeSimple(self, &sw.interface, 400, "bad request");
-                        return;
-                    }
-                } else {
-                    request.discardHeadersOnly(&sr.interface, Conf.max_header_bytes) catch |err| {
-                        if (err == error.EndOfStream or err == error.ReadFailed) return;
-                        const status: u16 = switch (err) {
-                            error.HeadersTooLarge => 431,
-                            else => 400,
-                        };
-                        writeSimple(self, &sw.interface, status, "bad request");
-                        return;
-                    };
-                }
-
-                const ctx: CtxPtr = if (Context == void) {} else self.ctx;
-                const res: response.Res = if (!handler_needs_req) blk: {
-                    if (handler_params.len == 0) break :blk try @call(.auto, handler, .{});
-                    if (handler_ctx_only) break :blk try @call(.auto, handler, .{ctx});
-                    unreachable;
-                } else blk: {
-                    const line: request.RequestLine = .{
-                        .method = method_str,
-                        .version = .http11,
-                        .path = linebuf[path_start..path_end],
-                        .query = linebuf[0..0],
-                    };
-                    const mw_ctx: EmptyMwCtx = .{};
-                    var reqv = EmptyReq.init(self.gpa, self.io, line, mw_ctx);
-                    defer reqv.deinit(self.gpa);
-                    reqv.reader = &sr.interface;
-
-                    if (handler_params.len == 1) break :blk try @call(.auto, handler, .{&reqv});
-                    if (handler_params.len == 2) break :blk try @call(.auto, handler, .{ ctx, &reqv });
-                    @compileError("handler must be fn(), fn(req), fn(ctx), or fn(ctx, req)");
-                };
-
-                response.write(&sw.interface, res, true, send_body) catch return;
-                sw.interface.flush() catch return;
-            }
-        }
     };
-}
-
-test "benchmark fast-single route responds + pipelines" {
-    const Bench = struct {
-        fn plaintext(_: void, _: anytype) !response.Res {
-            const resp =
-                "HTTP/1.1 200 OK\r\n" ++
-                "Server: F\r\n" ++
-                "Content-Type: text/plain\r\n" ++
-                "Content-Length: 13\r\n" ++
-                "Date: Wed, 24 Feb 2021 12:00:00 GMT\r\n" ++
-                "\r\n" ++
-                "Hello, World!";
-            return response.Res.rawResponse(resp);
-        }
-    };
-
-    var threaded = Io.Threaded.init(std.testing.allocator, .{});
-    defer threaded.deinit();
-    const io = threaded.io();
-
-    const SrvT = Server(.{
-        .routes = .{
-            router.get("/plaintext", Bench.plaintext, .{}),
-        },
-        .config = .{
-            .read_buffer = 64 * 1024,
-            .write_buffer = 16 * 1024,
-            .fast_benchmark = true,
-            .fast_benchmark_empty_headers = true,
-        },
-    });
-
-    const addr0: Io.net.IpAddress = .{ .ip4 = Io.net.Ip4Address.loopback(0) };
-    var server = try SrvT.init(std.testing.allocator, io, addr0, {});
-    defer server.deinit();
-
-    const port: u16 = server.listener.socket.address.getPort();
-    try std.testing.expect(port != 0);
-
-    var group: Io.Group = .init;
-    defer group.cancel(io);
-    try group.concurrent(io, SrvT.run, .{&server});
-
-    const addr: Io.net.IpAddress = .{ .ip4 = Io.net.Ip4Address.loopback(port) };
-    var stream = try Io.net.IpAddress.connect(addr, io, .{ .mode = .stream });
-    defer stream.close(io);
-
-    const req = "GET /plaintext HTTP/1.1\r\n\r\n";
-    const resp =
-        "HTTP/1.1 200 OK\r\n" ++
-        "Server: F\r\n" ++
-        "Content-Type: text/plain\r\n" ++
-        "Content-Length: 13\r\n" ++
-        "Date: Wed, 24 Feb 2021 12:00:00 GMT\r\n" ++
-        "\r\n" ++
-        "Hello, World!";
-    const resp_len: usize = resp.len;
-
-    var rb: [4 * 1024]u8 = undefined;
-    var wb: [128]u8 = undefined;
-    var sr = stream.reader(io, &rb);
-    var sw = stream.writer(io, &wb);
-
-    try sw.interface.writeAll(req ++ req);
-    try sw.interface.flush();
-
-    var got1: [resp_len]u8 = undefined;
-    var got2: [resp_len]u8 = undefined;
-    try sr.interface.readSliceAll(got1[0..]);
-    try sr.interface.readSliceAll(got2[0..]);
-    try std.testing.expect(std.mem.eql(u8, got1[0..], resp));
-    try std.testing.expect(std.mem.eql(u8, got2[0..], resp));
-
-    group.cancel(io);
-    group.await(io) catch {};
-}
-
-test "benchmark fast-single route handles full request headers" {
-    const Bench = struct {
-        fn plaintext(_: void, _: anytype) !response.Res {
-            const resp =
-                "HTTP/1.1 200 OK\r\n" ++
-                "Server: F\r\n" ++
-                "Content-Type: text/plain\r\n" ++
-                "Content-Length: 13\r\n" ++
-                "Date: Wed, 24 Feb 2021 12:00:00 GMT\r\n" ++
-                "\r\n" ++
-                "Hello, World!";
-            return response.Res.rawResponse(resp);
-        }
-    };
-
-    var threaded = Io.Threaded.init(std.testing.allocator, .{});
-    defer threaded.deinit();
-    const io = threaded.io();
-
-    const SrvT = Server(.{
-        .routes = .{
-            router.get("/plaintext", Bench.plaintext, .{}),
-        },
-        .config = .{
-            .read_buffer = 64 * 1024,
-            .write_buffer = 16 * 1024,
-            .fast_benchmark = true,
-        },
-    });
-
-    const addr0: Io.net.IpAddress = .{ .ip4 = Io.net.Ip4Address.loopback(0) };
-    var server = try SrvT.init(std.testing.allocator, io, addr0, {});
-    defer server.deinit();
-
-    const port: u16 = server.listener.socket.address.getPort();
-    try std.testing.expect(port != 0);
-
-    var group: Io.Group = .init;
-    defer group.cancel(io);
-    try group.concurrent(io, SrvT.run, .{&server});
-
-    const addr: Io.net.IpAddress = .{ .ip4 = Io.net.Ip4Address.loopback(port) };
-    var stream = try Io.net.IpAddress.connect(addr, io, .{ .mode = .stream });
-    defer stream.close(io);
-
-    const req =
-        "GET /plaintext HTTP/1.1\r\n" ++
-        "Host: 127.0.0.1\r\n" ++
-        "Connection: keep-alive\r\n" ++
-        "\r\n";
-    const resp =
-        "HTTP/1.1 200 OK\r\n" ++
-        "Server: F\r\n" ++
-        "Content-Type: text/plain\r\n" ++
-        "Content-Length: 13\r\n" ++
-        "Date: Wed, 24 Feb 2021 12:00:00 GMT\r\n" ++
-        "\r\n" ++
-        "Hello, World!";
-    const resp_len: usize = resp.len;
-
-    var rb: [4 * 1024]u8 = undefined;
-    var wb: [256]u8 = undefined;
-    var sr = stream.reader(io, &rb);
-    var sw = stream.writer(io, &wb);
-
-    try sw.interface.writeAll(req ++ req);
-    try sw.interface.flush();
-
-    var got1: [resp_len]u8 = undefined;
-    var got2: [resp_len]u8 = undefined;
-    try sr.interface.readSliceAll(got1[0..]);
-    try sr.interface.readSliceAll(got2[0..]);
-    try std.testing.expect(std.mem.eql(u8, got1[0..], resp));
-    try std.testing.expect(std.mem.eql(u8, got2[0..], resp));
-
-    group.cancel(io);
-    group.await(io) catch {};
 }
 
 test "Connection: close header closes socket" {
@@ -524,7 +228,6 @@ test "Connection: close header closes socket" {
         .config = .{
             .read_buffer = 64 * 1024,
             .write_buffer = 16 * 1024,
-            .fast_benchmark = false,
         },
     });
 
@@ -594,9 +297,6 @@ test "handler res.close closes socket" {
         .routes = .{
             router.get("/x", Handlers.close_me, .{}),
         },
-        .config = .{
-            .fast_benchmark = false,
-        },
     });
 
     const addr0: Io.net.IpAddress = .{ .ip4 = Io.net.Ip4Address.loopback(0) };
@@ -652,9 +352,6 @@ test "HTTP/1.0 request does not keep-alive" {
     const SrvT = Server(.{
         .routes = .{
             router.get("/x", Handlers.ok, .{}),
-        },
-        .config = .{
-            .fast_benchmark = false,
         },
     });
 

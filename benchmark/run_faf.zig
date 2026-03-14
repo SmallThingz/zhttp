@@ -8,6 +8,22 @@ pub fn main(init: std.process.Init) !void {
     const root = try std.process.currentPathAlloc(init.io, allocator);
     defer allocator.free(root);
 
+    var bench_bin_arg: ?[]const u8 = null;
+    var it = try std.process.Args.Iterator.initAllocator(init.minimal.args, allocator);
+    defer it.deinit();
+    _ = it.next(); // argv[0]
+    while (it.next()) |arg_z| {
+        const arg: []const u8 = arg_z;
+        if (std.mem.startsWith(u8, arg, "--bench-bin=")) {
+            bench_bin_arg = arg["--bench-bin=".len..];
+            continue;
+        }
+        if (std.mem.eql(u8, arg, "--help")) {
+            return;
+        }
+        return error.UnknownArg;
+    }
+
     const env = init.environ_map;
     const port = @as(u16, @intCast(scripts.envInt(env, "PORT", 8080)));
     const conns = scripts.envInt(env, "CONNS", 1);
@@ -19,7 +35,7 @@ pub fn main(init: std.process.Init) !void {
     const faf_core_dir = scripts.envString(env, "FAF_CORE_DIR", ".zig-cache/faf");
 
     const rustc_env = env.get("RUSTC_BIN") orelse env.get("RUSTC");
-    const bench_bin = env.get("BENCH_BIN");
+    const bench_bin = bench_bin_arg orelse env.get("BENCH_BIN");
     const rustc_bin = rustc_env orelse "rustc";
 
     const cfg: scripts.BenchConfig = .{

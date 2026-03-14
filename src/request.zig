@@ -126,16 +126,23 @@ pub fn parseRequestLineBorrowed(r: *Io.Reader, max_line_len: usize) ParseLineErr
         error.StreamTooLong => return error.UriTooLong,
         error.ReadFailed => return error.ReadFailed,
     };
-    const line0 = line0_incl[0 .. line0_incl.len - 1]; // strip '\n'
-    if (line0.len > max_line_len) return error.UriTooLong;
-    const line = trimCR(line0);
+    if (line0_incl.len == 0) return error.BadRequest;
+    var end: usize = line0_incl.len - 1; // strip '\n'
+    if (end > max_line_len) return error.UriTooLong;
+    if (end != 0 and line0_incl[end - 1] == '\r') end -= 1;
+    const line = line0_incl[0..end];
 
-    const sp1 = std.mem.indexOfScalar(u8, line, ' ') orelse return error.BadRequest;
-    const sp2 = std.mem.indexOfScalarPos(u8, line, sp1 + 1, ' ') orelse return error.BadRequest;
+    var sp1: usize = 0;
+    while (sp1 < line.len and line[sp1] != ' ') : (sp1 += 1) {}
+    if (sp1 == 0 or sp1 >= line.len) return error.BadRequest;
+    var sp2: usize = sp1 + 1;
+    while (sp2 < line.len and line[sp2] != ' ') : (sp2 += 1) {}
+    if (sp2 == sp1 + 1 or sp2 >= line.len) return error.BadRequest;
 
     const method_str = line[0..sp1];
     const target = line[sp1 + 1 .. sp2];
     const version_str = line[sp2 + 1 ..];
+    if (version_str.len == 0) return error.BadRequest;
 
     const version: Version = if (std.mem.eql(u8, version_str, "HTTP/1.1"))
         .http11
@@ -146,7 +153,13 @@ pub fn parseRequestLineBorrowed(r: *Io.Reader, max_line_len: usize) ParseLineErr
 
     if (target.len == 0 or target[0] != '/') return error.BadRequest;
 
-    const qpos = std.mem.indexOfScalar(u8, target, '?');
+    var qpos: ?usize = null;
+    for (target, 0..) |c, i| {
+        if (c == '?') {
+            qpos = i;
+            break;
+        }
+    }
     const path_raw = if (qpos) |p| target[0..p] else target;
     const query_raw: []u8 = if (qpos) |p| target[p + 1 ..] else target[0..0];
 
@@ -355,6 +368,21 @@ pub fn RequestPWithPattern(
             var total: usize = 0;
             var content_length: ?usize = null;
             var has_chunked: bool = false;
+
+            // Fast path: empty header section.
+            const peek = r.peekGreedy(2) catch |err| switch (err) {
+                error.EndOfStream => return error.EndOfStream,
+                error.ReadFailed => return error.ReadFailed,
+            };
+            if (peek.len >= 2 and peek[0] == '\r' and peek[1] == '\n') {
+                r.toss(2);
+                self.base.body_kind = .none;
+                self.base.body_remaining = 0;
+                if (HeaderLookup.count != 0) {
+                    try parse.doneParsingStruct(&self.headers, present[0..]);
+                }
+                return;
+            }
 
             while (true) {
                 const line0_incl = r.takeDelimiterInclusive('\n') catch |err| switch (err) {

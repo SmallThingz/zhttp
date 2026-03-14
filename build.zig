@@ -27,7 +27,6 @@ pub fn build(b: *std.Build) void {
             },
         }),
     });
-    b.installArtifact(bench_exe);
 
     const bench_server_exe = b.addExecutable(.{
         .name = "zhttp-bench-server",
@@ -40,7 +39,8 @@ pub fn build(b: *std.Build) void {
             },
         }),
     });
-    b.installArtifact(bench_server_exe);
+    const bench_server_step = b.step("bench-server", "Build the benchmark server");
+    bench_server_step.dependOn(&bench_server_exe.step);
 
     const bench_step = b.step("bench", "Run benchmarks");
     const bench_cmd = b.addRunArtifact(bench_exe);
@@ -48,14 +48,18 @@ pub fn build(b: *std.Build) void {
     if (b.args) |args| {
         bench_cmd.addArgs(args);
     }
-    const bench_faf_cmd = b.addSystemCommand(&.{
-        "zig",
-        "run",
-        b.pathFromRoot("benchmark/run_faf.zig"),
+    const bench_faf_exe = b.addExecutable(.{
+        .name = "zhttp-bench-faf",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("benchmark/run_faf.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
     });
-    bench_faf_cmd.step.dependOn(&bench_exe.step);
-    bench_faf_cmd.step.dependOn(&bench_cmd.step);
-    bench_step.dependOn(&bench_faf_cmd.step);
+    const bench_faf_run = b.addRunArtifact(bench_faf_exe);
+    bench_faf_run.addPrefixedArtifactArg("--bench-bin=", bench_exe);
+    bench_faf_run.step.dependOn(&bench_cmd.step);
+    bench_step.dependOn(&bench_faf_run.step);
 
     const examples_step = b.step("examples", "Build all examples");
     const examples_check_step = b.step("examples-check", "Run all examples with --smoke");
@@ -80,7 +84,6 @@ pub fn build(b: *std.Build) void {
                 },
             }),
         });
-        b.installArtifact(exe);
         examples_step.dependOn(&exe.step);
 
         const run = b.addRunArtifact(exe);

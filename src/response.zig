@@ -73,33 +73,12 @@ pub fn write(
     if (res.raw_parts) |rp| {
         if (send_body) {
             if (rp.parts.len != 0) {
-                if (w.buffered().len != 0) {
-                    try w.flush();
-                }
-                var index: usize = 0;
-                var offset: usize = 0;
-                const max_iov: usize = 32;
-                while (index < rp.parts.len) {
-                    var tmp: [max_iov][]const u8 = undefined;
-                    var count: usize = 0;
-                    tmp[count] = rp.parts[index][offset..];
-                    count += 1;
-                    var i: usize = index + 1;
-                    while (i < rp.parts.len and count < max_iov) : (i += 1) {
-                        tmp[count] = rp.parts[i];
-                        count += 1;
-                    }
-                    const written = try w.vtable.drain(w, tmp[0..count], 1);
-                    if (written == 0) return error.WriteFailed;
-                    var remaining = written;
-                    while (index < rp.parts.len and remaining >= (rp.parts[index].len - offset)) {
-                        remaining -= (rp.parts[index].len - offset);
-                        index += 1;
-                        offset = 0;
-                    }
-                    if (index < rp.parts.len and remaining != 0) {
-                        offset += remaining;
-                    }
+                if (rp.parts.len <= 8) {
+                    var tmp: [8][]const u8 = undefined;
+                    for (rp.parts, 0..) |p, i| tmp[i] = p;
+                    try w.writeVecAll(tmp[0..rp.parts.len]);
+                } else {
+                    for (rp.parts) |p| try w.writeAll(p);
                 }
             }
             return;

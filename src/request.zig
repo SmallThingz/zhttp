@@ -90,7 +90,7 @@ fn trimCR(line: []u8) []u8 {
     return line;
 }
 
-fn trimSpaces(s: []u8) []u8 {
+fn trimSpaces(s: []const u8) []const u8 {
     var a: usize = 0;
     var b: usize = s.len;
     while (a < b and (s[a] == ' ' or s[a] == '\t')) a += 1;
@@ -406,13 +406,19 @@ pub fn RequestPWithPattern(
                     if (b != '\n') continue;
 
                     const seg = available[line_start..i];
-                    if (!in_accum) line_buf.clearRetainingCapacity();
-                    try line_buf.appendSlice(a, seg);
-                    if (line_buf.items.len != 0 and line_buf.items[line_buf.items.len - 1] == '\r') {
-                        line_buf.items.len -= 1;
+                    var line: []const u8 = undefined;
+                    if (in_accum) {
+                        try line_buf.appendSlice(a, seg);
+                        if (line_buf.items.len != 0 and line_buf.items[line_buf.items.len - 1] == '\r') {
+                            line_buf.items.len -= 1;
+                        }
+                        line = line_buf.items;
+                    } else {
+                        line = seg;
+                        if (line.len != 0 and line[line.len - 1] == '\r') {
+                            line = line[0 .. line.len - 1];
+                        }
                     }
-
-                    const line = line_buf.items;
                     if (line.len == 0) {
                         r.toss(i + 1);
                         done = true;
@@ -429,7 +435,7 @@ pub fn RequestPWithPattern(
                     const col = colon orelse return error.BadRequest;
                     const name = line[0..col];
                     var value = line[col + 1 ..];
-                    value = trimSpaces(@constCast(value));
+                    value = trimSpaces(value);
 
                     if (headerIs(name, "connection")) {
                         if (containsTokenIgnoreCase(value, "close")) self.base.connection_close = true;
@@ -457,8 +463,10 @@ pub fn RequestPWithPattern(
                         }
                     }
 
-                    line_buf.clearRetainingCapacity();
-                    in_accum = false;
+                    if (in_accum) {
+                        line_buf.clearRetainingCapacity();
+                        in_accum = false;
+                    }
                     line_start = i + 1;
                 }
 

@@ -16,8 +16,7 @@ pub const Res = struct {
     pub const RawParts = struct {
         /// Ordered pieces of the full HTTP response bytes (headers + optional body).
         parts: []const []const u8,
-        /// If true, force a contiguous temp copy before writing.
-        /// This is useful for 1:1 fairness in microbenchmarks (e.g. FaF-style memcpy path).
+        /// If true, prefer a contiguous temp copy before writing (reserved).
         copy: bool = false,
     };
 
@@ -73,45 +72,10 @@ pub fn write(
 ) !void {
     if (res.raw_parts) |rp| {
         if (send_body) {
-            if (!rp.copy) {
-                if (rp.parts.len != 0 and rp.parts.len <= 8) {
-                    var tmp: [8][]const u8 = undefined;
-                    for (rp.parts, 0..) |p, i| tmp[i] = p;
-                    const vec = tmp[0..rp.parts.len];
-                    try w.writeVecAll(vec);
-                    return;
-                }
-                for (rp.parts) |p| try w.writeAll(p);
-                return;
+            if (rp.parts.len != 0) {
+                const parts = @constCast(rp.parts);
+                try w.writeVecAll(parts);
             }
-
-            var total: usize = 0;
-            for (rp.parts) |p| total += p.len;
-
-            // Copy directly into the Writer buffer (FaF-style "response buffer" memcpy).
-            if (total <= (w.buffer.len - w.end)) {
-                var off: usize = w.end;
-                for (rp.parts) |p| {
-                    @memcpy(w.buffer[off .. off + p.len], p);
-                    off += p.len;
-                }
-                w.end = off;
-                return;
-            }
-
-            try w.flush();
-            if (total <= w.buffer.len) {
-                var off: usize = 0;
-                for (rp.parts) |p| {
-                    @memcpy(w.buffer[off .. off + p.len], p);
-                    off += p.len;
-                }
-                w.end = off;
-                return;
-            }
-
-            // Fallback for unusually large responses.
-            for (rp.parts) |p| try w.writeAll(p);
             return;
         }
 

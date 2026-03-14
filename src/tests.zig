@@ -1,6 +1,6 @@
 const std = @import("std");
 
-const zhttp = @import("../root.zig");
+const zhttp = @import("root.zig");
 
 const request = @import("request.zig");
 const response = @import("response.zig");

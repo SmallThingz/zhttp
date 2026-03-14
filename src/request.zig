@@ -146,20 +146,23 @@ pub fn parseRequestLineBorrowed(r: *Io.Reader, max_line_len: usize) ParseLineErr
     var sp1_opt: ?usize = null;
     var sp2_opt: ?usize = null;
     var qpos_opt: ?usize = null;
-    var i: usize = 0;
-    while (i < line.len) : (i += 1) {
-        const c = line[i];
-        if (c == ' ') {
-            if (sp1_opt == null) {
-                sp1_opt = i;
-            } else {
-                sp2_opt = i;
-                break;
+    {
+        @setRuntimeSafety(false);
+        var i: usize = 0;
+        while (i < line.len) : (i += 1) {
+            const c = line[i];
+            if (c == ' ') {
+                if (sp1_opt == null) {
+                    sp1_opt = i;
+                } else {
+                    sp2_opt = i;
+                    break;
+                }
+                continue;
             }
-            continue;
-        }
-        if (sp1_opt != null and sp2_opt == null and c == '?') {
-            qpos_opt = i;
+            if (sp1_opt != null and sp2_opt == null and c == '?') {
+                qpos_opt = i;
+            }
         }
     }
     const sp1 = sp1_opt orelse return error.BadRequest;

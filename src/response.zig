@@ -74,9 +74,7 @@ pub fn write(
         if (send_body) {
             if (rp.parts.len != 0) {
                 if (rp.parts.len <= 8) {
-                    var tmp: [8][]const u8 = undefined;
-                    for (rp.parts, 0..) |p, i| tmp[i] = p;
-                    try w.writeVecAll(tmp[0..rp.parts.len]);
+                    try w.writeVecAll(@constCast(rp.parts));
                 } else {
                     for (rp.parts) |p| try w.writeAll(p);
                 }

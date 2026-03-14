@@ -172,12 +172,21 @@ pub fn parseRequestLineBorrowed(r: *Io.Reader, max_line_len: usize) ParseLineErr
     const version_str = line[sp2 + 1 ..];
     if (version_str.len == 0) return error.BadRequest;
 
-    const version: Version = if (std.mem.eql(u8, version_str, "HTTP/1.1"))
-        .http11
-    else if (std.mem.eql(u8, version_str, "HTTP/1.0"))
-        .http10
-    else
+    const version: Version = blk: {
+        if (version_str.len == 8) {
+            if (version_str[0] == 'H' and version_str[1] == 'T' and version_str[2] == 'T' and version_str[3] == 'P' and
+                version_str[4] == '/' and version_str[5] == '1' and version_str[6] == '.' and version_str[7] == '1')
+            {
+                break :blk .http11;
+            }
+            if (version_str[0] == 'H' and version_str[1] == 'T' and version_str[2] == 'T' and version_str[3] == 'P' and
+                version_str[4] == '/' and version_str[5] == '1' and version_str[6] == '.' and version_str[7] == '0')
+            {
+                break :blk .http10;
+            }
+        }
         return error.BadRequest;
+    };
 
     if (target.len == 0 or target[0] != '/') return error.BadRequest;
 

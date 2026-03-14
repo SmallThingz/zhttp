@@ -147,7 +147,6 @@ pub fn parseRequestLineBorrowed(r: *Io.Reader, max_line_len: usize) ParseLineErr
     var sp2_opt: ?usize = null;
     var qpos_opt: ?usize = null;
     {
-        @setRuntimeSafety(false);
         var i: usize = 0;
         while (i < line.len) : (i += 1) {
             const c = line[i];
@@ -433,7 +432,6 @@ pub fn RequestPWithPattern(
 
                 var line_start: usize = 0;
                 var search_pos: usize = 0;
-                @setRuntimeSafety(false);
                 while (true) {
                     const nl = std.mem.indexOfScalarPos(u8, available, search_pos, '\n') orelse break;
                     total += (nl - line_start + 1);

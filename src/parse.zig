@@ -316,7 +316,7 @@ pub const PathString = String;
 pub const String = struct {
     value: []const u8 = undefined,
 
-    pub const empty: String = .{};
+    pub const empty: String = .{ .value = "" };
 
     pub fn parse(self: *String, _: Allocator, raw: []const u8) !void {
         self.value = raw;
@@ -331,7 +331,7 @@ pub const String = struct {
     }
 
     pub fn destroy(self: *String, _: Allocator) void {
-        self.* = .{};
+        self.* = .{ .value = "" };
     }
 };
 

@@ -239,6 +239,7 @@ pub fn RequestPWithPattern(
     comptime param_names: []const []const u8,
     comptime MwCtx: type,
     comptime route_pattern: []const u8,
+    comptime method_name: []const u8,
 ) type {
     const HeaderLookup = parse.Lookup(Headers, .header);
     const QueryLookup = parse.Lookup(Query, .query);
@@ -275,10 +276,10 @@ pub fn RequestPWithPattern(
     };
 
     return struct {
-        pub const path: []const u8 = route_pattern;
+        comptime path: []const u8 = route_pattern,
+        comptime method: []const u8 = method_name,
         arena: Allocator,
         io: Io,
-        method: []const u8,
         path_raw: []u8,
         base: Base,
         query_raw: []u8,
@@ -286,7 +287,7 @@ pub fn RequestPWithPattern(
         mw_ctx: MwCtx,
         headers: Headers = parse.emptyStruct(Headers),
         query: Query = parse.emptyStruct(Query),
-        params_parsed: ParamsEffective = parse.emptyStruct(ParamsEffective),
+        params: ParamsEffective = parse.emptyStruct(ParamsEffective),
 
         const Self = @This();
 
@@ -296,7 +297,6 @@ pub fn RequestPWithPattern(
             return .{
                 .arena = arena,
                 .io = io,
-                .method = line.method,
                 .path_raw = line.path,
                 .base = .{
                     .version = line.version,
@@ -313,7 +313,7 @@ pub fn RequestPWithPattern(
         pub fn deinit(self: *Self, a: Allocator) void {
             parse.destroyStruct(&self.headers, a);
             parse.destroyStruct(&self.query, a);
-            parse.destroyStruct(&self.params_parsed, a);
+            parse.destroyStruct(&self.params, a);
         }
 
         /// Get a captured header by field name, e.g. `req.header(.host)`.
@@ -330,8 +330,8 @@ pub fn RequestPWithPattern(
         /// If a route param is not declared, it defaults to a string.
         ///
         /// e.g. `req.paramValue(.id)`.
-        pub fn paramValue(self: *const Self, comptime field: @EnumLiteral()) @TypeOf(@field(self.params_parsed, @tagName(field)).get()) {
-            return @field(self.params_parsed, @tagName(field)).get();
+        pub fn paramValue(self: *const Self, comptime field: @EnumLiteral()) @TypeOf(@field(self.params, @tagName(field)).get()) {
+            return @field(self.params, @tagName(field)).get();
         }
 
         /// Get a pointer to middleware data by name, e.g. `req.middlewareData(.auth)`.
@@ -352,11 +352,11 @@ pub fn RequestPWithPattern(
             if (param_names.len == 0) return;
             std.debug.assert(params_in.len == param_names.len);
             // reset captures each request
-            self.params_parsed = parse.emptyStruct(ParamsEffective);
+            self.params = parse.emptyStruct(ParamsEffective);
             inline for (param_names, 0..) |pn, i| {
-                try @field(self.params_parsed, pn).parse(a, params_in[i]);
+                try @field(self.params, pn).parse(a, params_in[i]);
             }
-            try parse.doneParsingStruct(&self.params_parsed, &([_]bool{true} ** param_names.len));
+            try parse.doneParsingStruct(&self.params, &([_]bool{true} ** param_names.len));
         }
 
         pub fn parseQuery(self: *Self, a: Allocator) !void {
@@ -654,7 +654,7 @@ pub fn RequestPWithPattern(
 }
 
 pub fn Request(comptime Headers: type, comptime Query: type, comptime param_names: []const []const u8, comptime MwCtx: type) type {
-    return RequestPWithPattern(Headers, Query, struct {}, param_names, MwCtx, "");
+    return RequestPWithPattern(Headers, Query, struct {}, param_names, MwCtx, "", "GET");
 }
 
 pub fn RequestWithPattern(
@@ -664,7 +664,7 @@ pub fn RequestWithPattern(
     comptime MwCtx: type,
     comptime route_pattern: []const u8,
 ) type {
-    return RequestPWithPattern(Headers, Query, struct {}, param_names, MwCtx, route_pattern);
+    return RequestPWithPattern(Headers, Query, struct {}, param_names, MwCtx, route_pattern, "GET");
 }
 
 pub fn RequestP(
@@ -674,7 +674,7 @@ pub fn RequestP(
     comptime param_names: []const []const u8,
     comptime MwCtx: type,
 ) type {
-    return RequestPWithPattern(Headers, Query, Params, param_names, MwCtx, "");
+    return RequestPWithPattern(Headers, Query, Params, param_names, MwCtx, "", "GET");
 }
 
 const TestMwCtx = struct {};

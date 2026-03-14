@@ -270,10 +270,11 @@ test "Connection: close header closes socket" {
         "\r\n";
     const resp =
         "HTTP/1.1 200 OK\r\n" ++
+        "connection: close\r\n" ++
         "Server: F\r\n" ++
         "Content-Type: text/plain\r\n" ++
-        "Content-Length: 13\r\n" ++
         "Date: Wed, 24 Feb 2021 12:00:00 GMT\r\n" ++
+        "content-length: 13\r\n" ++
         "\r\n" ++
         "Hello, World!";
     const resp_len: usize = resp.len;
@@ -289,6 +290,184 @@ test "Connection: close header closes socket" {
     var got: [resp_len]u8 = undefined;
     try sr.interface.readSliceAll(got[0..]);
     try std.testing.expect(std.mem.eql(u8, got[0..], resp));
+
+    var one: [1]u8 = undefined;
+    try std.testing.expectError(error.EndOfStream, sr.interface.readSliceAll(one[0..]));
+
+    group.cancel(io);
+    group.await(io) catch {};
+}
+
+test "unknown path returns 404 and keeps connection" {
+    const Handlers = struct {
+        fn ok(_: void, _: anytype) !response.Res {
+            return response.Res.text(200, "ok");
+        }
+    };
+
+    var threaded = Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const SrvT = Server(.{
+        .routes = .{
+            router.get("/ok", Handlers.ok, .{}),
+        },
+    });
+
+    const addr0: Io.net.IpAddress = .{ .ip4 = Io.net.Ip4Address.loopback(0) };
+    var server = try SrvT.init(std.testing.allocator, io, addr0, {});
+    defer server.deinit();
+    const port: u16 = server.listener.socket.address.getPort();
+
+    var group: Io.Group = .init;
+    defer group.cancel(io);
+    try group.concurrent(io, SrvT.run, .{&server});
+
+    const addr: Io.net.IpAddress = .{ .ip4 = Io.net.Ip4Address.loopback(port) };
+    var stream = try Io.net.IpAddress.connect(addr, io, .{ .mode = .stream });
+    defer stream.close(io);
+
+    var rb: [4 * 1024]u8 = undefined;
+    var wb: [256]u8 = undefined;
+    var sr = stream.reader(io, &rb);
+    var sw = stream.writer(io, &wb);
+
+    try sw.interface.writeAll("GET /nope HTTP/1.1\r\nHost: x\r\n\r\n");
+    try sw.interface.flush();
+
+    const not_found_resp =
+        "HTTP/1.1 404 Not Found\r\n" ++
+        "connection: keep-alive\r\n" ++
+        "content-type: text/plain; charset=utf-8\r\n" ++
+        "content-length: 9\r\n" ++
+        "\r\n" ++
+        "not found";
+    var got_nf: [not_found_resp.len]u8 = undefined;
+    try sr.interface.readSliceAll(got_nf[0..]);
+    try std.testing.expectEqualStrings(not_found_resp, got_nf[0..]);
+
+    try sw.interface.writeAll("GET /ok HTTP/1.1\r\nHost: x\r\n\r\n");
+    try sw.interface.flush();
+
+    const ok_resp =
+        "HTTP/1.1 200 OK\r\n" ++
+        "connection: keep-alive\r\n" ++
+        "content-type: text/plain; charset=utf-8\r\n" ++
+        "content-length: 2\r\n" ++
+        "\r\n" ++
+        "ok";
+    var got_ok: [ok_resp.len]u8 = undefined;
+    try sr.interface.readSliceAll(got_ok[0..]);
+    try std.testing.expectEqualStrings(ok_resp, got_ok[0..]);
+
+    group.cancel(io);
+    group.await(io) catch {};
+}
+
+test "HEAD response omits body" {
+    const Handlers = struct {
+        fn ok(_: void, _: anytype) !response.Res {
+            return response.Res.text(200, "hello");
+        }
+    };
+
+    var threaded = Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const SrvT = Server(.{
+        .routes = .{
+            router.get("/ok", Handlers.ok, .{}),
+        },
+    });
+
+    const addr0: Io.net.IpAddress = .{ .ip4 = Io.net.Ip4Address.loopback(0) };
+    var server = try SrvT.init(std.testing.allocator, io, addr0, {});
+    defer server.deinit();
+    const port: u16 = server.listener.socket.address.getPort();
+
+    var group: Io.Group = .init;
+    defer group.cancel(io);
+    try group.concurrent(io, SrvT.run, .{&server});
+
+    const addr: Io.net.IpAddress = .{ .ip4 = Io.net.Ip4Address.loopback(port) };
+    var stream = try Io.net.IpAddress.connect(addr, io, .{ .mode = .stream });
+    defer stream.close(io);
+
+    var rb: [4 * 1024]u8 = undefined;
+    var wb: [256]u8 = undefined;
+    var sr = stream.reader(io, &rb);
+    var sw = stream.writer(io, &wb);
+
+    try sw.interface.writeAll("HEAD /ok HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n");
+    try sw.interface.flush();
+
+    const head_resp =
+        "HTTP/1.1 200 OK\r\n" ++
+        "connection: close\r\n" ++
+        "content-type: text/plain; charset=utf-8\r\n" ++
+        "content-length: 5\r\n" ++
+        "\r\n";
+    var got: [head_resp.len]u8 = undefined;
+    try sr.interface.readSliceAll(got[0..]);
+    try std.testing.expectEqualStrings(head_resp, got[0..]);
+
+    var one: [1]u8 = undefined;
+    try std.testing.expectError(error.EndOfStream, sr.interface.readSliceAll(one[0..]));
+
+    group.cancel(io);
+    group.await(io) catch {};
+}
+
+test "bad request line returns 400" {
+    const Handlers = struct {
+        fn ok(_: void, _: anytype) !response.Res {
+            return response.Res.text(200, "ok");
+        }
+    };
+
+    var threaded = Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const SrvT = Server(.{
+        .routes = .{
+            router.get("/ok", Handlers.ok, .{}),
+        },
+    });
+
+    const addr0: Io.net.IpAddress = .{ .ip4 = Io.net.Ip4Address.loopback(0) };
+    var server = try SrvT.init(std.testing.allocator, io, addr0, {});
+    defer server.deinit();
+    const port: u16 = server.listener.socket.address.getPort();
+
+    var group: Io.Group = .init;
+    defer group.cancel(io);
+    try group.concurrent(io, SrvT.run, .{&server});
+
+    const addr: Io.net.IpAddress = .{ .ip4 = Io.net.Ip4Address.loopback(port) };
+    var stream = try Io.net.IpAddress.connect(addr, io, .{ .mode = .stream });
+    defer stream.close(io);
+
+    var rb: [4 * 1024]u8 = undefined;
+    var wb: [256]u8 = undefined;
+    var sr = stream.reader(io, &rb);
+    var sw = stream.writer(io, &wb);
+
+    try sw.interface.writeAll("GARBAGE\r\n\r\n");
+    try sw.interface.flush();
+
+    const bad_resp =
+        "HTTP/1.1 400 Bad Request\r\n" ++
+        "connection: close\r\n" ++
+        "content-type: text/plain; charset=utf-8\r\n" ++
+        "content-length: 11\r\n" ++
+        "\r\n" ++
+        "bad request";
+    var got: [bad_resp.len]u8 = undefined;
+    try sr.interface.readSliceAll(got[0..]);
+    try std.testing.expectEqualStrings(bad_resp, got[0..]);
 
     var one: [1]u8 = undefined;
     try std.testing.expectError(error.EndOfStream, sr.interface.readSliceAll(one[0..]));

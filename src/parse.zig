@@ -648,58 +648,70 @@ test "SliceOf(String): collects and owns entries" {
 }
 
 test "fuzz: String/Optional/SliceOf/Int/Bool/Float" {
-    var prng = std.Random.DefaultPrng.init(std.testing.random_seed);
-    const rnd = prng.random();
-    const gpa = std.testing.allocator;
-    var buf: [128]u8 = undefined;
+    const corpus = &.{
+        "hello",
+        "123",
+        "-1",
+        "true",
+        "1",
+        "0",
+        "3.14",
+        "NaN",
+    };
+    try std.testing.fuzz({}, struct {
+        fn testOne(_: void, smith: *std.testing.Smith) !void {
+            const gpa = std.testing.allocator;
+            var buf: [128]u8 = undefined;
+            const max: u16 = @intCast(buf.len);
+            const len_u16 = smith.valueRangeAtMost(u16, 0, max);
+            const len: usize = @intCast(len_u16);
+            smith.bytes(buf[0..len]);
+            const raw = buf[0..len];
 
-    for (0..300) |_| {
-        const len = rnd.uintLessThan(usize, buf.len);
-        rnd.bytes(buf[0..len]);
-        const raw = buf[0..len];
+            var s: String = .{};
+            try s.parse(gpa, raw);
+            try s.doneParsing(true);
+            try std.testing.expectEqualSlices(u8, raw, s.get());
+            s.destroy(gpa);
 
-        var s: String = .{};
-        try s.parse(gpa, raw);
-        try s.doneParsing(true);
-        try std.testing.expectEqualSlices(u8, raw, s.get());
-        s.destroy(gpa);
+            const Opt = Optional(String);
+            var o: Opt = .{};
+            if (smith.value(bool)) {
+                try o.parse(gpa, raw);
+                try o.doneParsing(true);
+            } else {
+                _ = o.doneParsing(false) catch {};
+            }
+            o.destroy(gpa);
 
-        const Opt = Optional(String);
-        var o: Opt = .{};
-        if (rnd.boolean()) {
-            try o.parse(gpa, raw);
-            try o.doneParsing(true);
-        } else {
-            _ = o.doneParsing(false) catch {};
+            const L = SliceOf(String);
+            var l: L = .{};
+            defer l.destroy(gpa);
+            const items = smith.valueRangeAtMost(u8, 0, 3);
+            var i: u8 = 0;
+            while (i < items) : (i += 1) {
+                try l.parse(gpa, raw);
+            }
+            try l.doneParsing(items != 0);
+            _ = l.get();
+
+            const I = Int(u32);
+            var iv: I = .{};
+            _ = iv.parse(gpa, raw) catch {};
+            _ = iv.doneParsing(true) catch {};
+            iv.destroy(gpa);
+
+            const B = Bool;
+            var bv: B = .{};
+            _ = bv.parse(gpa, raw) catch {};
+            _ = bv.doneParsing(true) catch {};
+            bv.destroy(gpa);
+
+            const F = Float(f64);
+            var fv: F = .{};
+            _ = fv.parse(gpa, raw) catch {};
+            _ = fv.doneParsing(true) catch {};
+            fv.destroy(gpa);
         }
-        o.destroy(gpa);
-
-        const L = SliceOf(String);
-        var l: L = .{};
-        defer l.destroy(gpa);
-        const items = rnd.uintLessThan(usize, 3);
-        for (0..items) |_| {
-            try l.parse(gpa, raw);
-        }
-        try l.doneParsing(items != 0);
-        _ = l.get();
-
-        const I = Int(u32);
-        var iv: I = .{};
-        _ = iv.parse(gpa, raw) catch {};
-        _ = iv.doneParsing(true) catch {};
-        iv.destroy(gpa);
-
-        const B = Bool;
-        var bv: B = .{};
-        _ = bv.parse(gpa, raw) catch {};
-        _ = bv.doneParsing(true) catch {};
-        bv.destroy(gpa);
-
-        const F = Float(f64);
-        var fv: F = .{};
-        _ = fv.parse(gpa, raw) catch {};
-        _ = fv.doneParsing(true) catch {};
-        fv.destroy(gpa);
-    }
+    }.testOne, .{ .corpus = corpus });
 }

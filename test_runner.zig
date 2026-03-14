@@ -5,6 +5,70 @@ pub const panic = std.debug.FullPanic(panicHandler);
 
 var is_child_mode: bool = false;
 
+pub fn fuzz(
+    context: anytype,
+    comptime testOne: fn (context: @TypeOf(context), smith: *std.testing.Smith) anyerror!void,
+    fuzz_opts: std.testing.FuzzInputOptions,
+) anyerror!void {
+    if (comptime builtin.fuzz) {
+        return fuzzBuiltin(context, testOne, fuzz_opts);
+    }
+
+    if (fuzz_opts.corpus.len == 0) {
+        var smith: std.testing.Smith = .{ .in = "" };
+        return testOne(context, &smith);
+    }
+
+    for (fuzz_opts.corpus) |input| {
+        var smith: std.testing.Smith = .{ .in = input };
+        try testOne(context, &smith);
+    }
+}
+
+fn fuzzBuiltin(
+    context: anytype,
+    comptime testOne: fn (context: @TypeOf(context), smith: *std.testing.Smith) anyerror!void,
+    fuzz_opts: std.testing.FuzzInputOptions,
+) anyerror!void {
+    const fuzz_abi = std.Build.abi.fuzz;
+    const Smith = std.testing.Smith;
+    const Ctx = @TypeOf(context);
+
+    const Wrapper = struct {
+        var ctx: Ctx = undefined;
+        pub fn testOneC() callconv(.c) void {
+            var smith: Smith = .{ .in = null };
+            testOne(ctx, &smith) catch {};
+        }
+    };
+
+    Wrapper.ctx = context;
+
+    var cache_dir: []const u8 = ".";
+    var map_opt: ?std.process.Environ.Map = null;
+    if (std.testing.environ.createMap(std.testing.allocator)) |map| {
+        map_opt = map;
+        if (map.get("ZIG_CACHE_DIR")) |v| {
+            cache_dir = v;
+        } else if (map.get("ZIG_GLOBAL_CACHE_DIR")) |v| {
+            cache_dir = v;
+        }
+    } else |_| {}
+
+    fuzz_abi.fuzzer_init(.fromSlice(cache_dir));
+
+    const test_name = @typeName(@TypeOf(testOne));
+    fuzz_abi.fuzzer_set_test(Wrapper.testOneC, .fromSlice(test_name));
+
+    for (fuzz_opts.corpus) |input| {
+        fuzz_abi.fuzzer_new_input(.fromSlice(input));
+    }
+
+    fuzz_abi.fuzzer_main(.forever, 0);
+
+    if (map_opt) |*m| m.deinit();
+}
+
 pub fn main(init: std.process.Init) !void {
     const threaded = std.Io.Threaded.init(init.gpa, .{
         .argv0 = .init(init.minimal.args),

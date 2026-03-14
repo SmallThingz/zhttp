@@ -1046,103 +1046,135 @@ test "parseQuery: key without '=' treated as empty value" {
 }
 
 test "fuzz: parseRequestLineBorrowed" {
-    var prng = std.Random.DefaultPrng.init(std.testing.random_seed);
-    const rnd = prng.random();
-    var buf: [256]u8 = undefined;
-    for (0..400) |_| {
-        var len = rnd.uintLessThan(usize, buf.len);
-        if (len == 0) len = 1;
-        rnd.bytes(buf[0..len]);
-        buf[len - 1] = '\n';
-        var r = Io.Reader.fixed(buf[0..len]);
-        _ = parseRequestLineBorrowed(&r, 8 * 1024) catch {};
-    }
+    const corpus = &.{
+        "GET / HTTP/1.1\r\n",
+        "POST /x?y=z HTTP/1.0\r\n",
+        "BAD / HTTP/1.1\r\n",
+    };
+    try std.testing.fuzz({}, struct {
+        fn testOne(_: void, smith: *std.testing.Smith) !void {
+            var buf: [256]u8 = undefined;
+            const max: u16 = @intCast(buf.len);
+            const len_u16 = smith.valueRangeAtMost(u16, 1, max);
+            const len: usize = @intCast(len_u16);
+            smith.bytes(buf[0..len]);
+            buf[len - 1] = '\n';
+            var r = Io.Reader.fixed(buf[0..len]);
+            _ = parseRequestLineBorrowed(&r, 8 * 1024) catch {};
+        }
+    }.testOne, .{ .corpus = corpus });
 }
 
 test "fuzz: parseRequestLine owned alloc/free" {
-    var prng = std.Random.DefaultPrng.init(std.testing.random_seed);
-    const rnd = prng.random();
-    var buf: [256]u8 = undefined;
-    const gpa = std.testing.allocator;
-    for (0..200) |_| {
-        var len = rnd.uintLessThan(usize, buf.len);
-        if (len == 0) len = 1;
-        rnd.bytes(buf[0..len]);
-        buf[len - 1] = '\n';
-        var r = Io.Reader.fixed(buf[0..len]);
-        if (parseRequestLine(&r, gpa, 8 * 1024)) |line| {
-            defer gpa.free(line.method);
-            defer gpa.free(line.path);
-            defer gpa.free(line.query);
-        } else |_| {}
-    }
+    const corpus = &.{
+        "GET / HTTP/1.1\r\n",
+        "PUT /hello HTTP/1.1\r\n",
+        "X / HTTP/1.1\r\n",
+    };
+    try std.testing.fuzz({}, struct {
+        fn testOne(_: void, smith: *std.testing.Smith) !void {
+            var buf: [256]u8 = undefined;
+            const max: u16 = @intCast(buf.len);
+            const len_u16 = smith.valueRangeAtMost(u16, 1, max);
+            const len: usize = @intCast(len_u16);
+            smith.bytes(buf[0..len]);
+            buf[len - 1] = '\n';
+            var r = Io.Reader.fixed(buf[0..len]);
+            const gpa = std.testing.allocator;
+            if (parseRequestLine(&r, gpa, 8 * 1024)) |line| {
+                defer gpa.free(line.method);
+                defer gpa.free(line.path);
+                defer gpa.free(line.query);
+            } else |_| {}
+        }
+    }.testOne, .{ .corpus = corpus });
 }
 
 test "fuzz: parseHeaders and discardHeadersOnly" {
-    const ReqT = Request(
-        struct {
-            host: parse.Optional(parse.String),
-            content_length: parse.Optional(parse.Int(usize)),
-        },
-        struct {},
-        &.{},
-        TestMwCtx,
-    );
+    const corpus = &.{
+        "Host: example\r\n\r\n",
+        "Content-Length: 5\r\n\r\nhello",
+        "X:\r\n\r\n",
+    };
 
-    var prng = std.Random.DefaultPrng.init(std.testing.random_seed);
-    const rnd = prng.random();
-    var buf: [256]u8 = undefined;
+    try std.testing.fuzz({}, struct {
+        fn testOne(_: void, smith: *std.testing.Smith) !void {
+            const ReqT = Request(
+                struct {
+                    host: parse.Optional(parse.String),
+                    content_length: parse.Optional(parse.Int(usize)),
+                },
+                struct {},
+                &.{},
+                TestMwCtx,
+            );
+            const path_buf = "/".*;
+            const query_buf: [0]u8 = .{};
+            const line: RequestLine = .{
+                .method = "GET",
+                .version = .http11,
+                .path = @constCast(path_buf[0..]),
+                .query = @constCast(query_buf[0..]),
+            };
+            var buf: [256]u8 = undefined;
+            const max: u16 = @intCast(buf.len);
+            const len_u16 = smith.valueRangeAtMost(u16, 4, max);
+            const len: usize = @intCast(len_u16);
+            smith.bytes(buf[0..len]);
+            buf[len - 4] = '\r';
+            buf[len - 3] = '\n';
+            buf[len - 2] = '\r';
+            buf[len - 1] = '\n';
 
-    var path_buf = "/".*;
-    var query_buf: [0]u8 = .{};
-    const line: RequestLine = .{ .method = "GET", .version = .http11, .path = path_buf[0..], .query = query_buf[0..] };
-    const gpa = std.testing.allocator;
+            const gpa = std.testing.allocator;
+            var r1 = Io.Reader.fixed(buf[0..len]);
+            var mw_ctx: TestMwCtx = .{};
+            var reqv = ReqT.init(gpa, line, &mw_ctx);
+            defer reqv.deinit(gpa);
+            _ = reqv.parseHeaders(gpa, &r1, 512) catch {};
 
-    for (0..200) |_| {
-        const len = 4 + rnd.uintLessThan(usize, buf.len - 4);
-        rnd.bytes(buf[0..len]);
-        buf[len - 4] = '\r';
-        buf[len - 3] = '\n';
-        buf[len - 2] = '\r';
-        buf[len - 1] = '\n';
-
-        var r1 = Io.Reader.fixed(buf[0..len]);
-        var mw_ctx: TestMwCtx = .{};
-        var reqv = ReqT.init(gpa, line, &mw_ctx);
-        defer reqv.deinit(gpa);
-        _ = reqv.parseHeaders(gpa, &r1, 512) catch {};
-
-        var r2 = Io.Reader.fixed(buf[0..len]);
-        _ = discardHeadersOnly(&r2, 512) catch {};
-    }
+            var r2 = Io.Reader.fixed(buf[0..len]);
+            _ = discardHeadersOnly(&r2, 512) catch {};
+        }
+    }.testOne, .{ .corpus = corpus });
 }
 
 test "fuzz: parseQuery" {
-    const ReqT = Request(
-        struct {},
-        struct {
-            q: parse.Optional(parse.String),
-            n: parse.Optional(parse.Int(u32)),
-            k: parse.SliceOf(parse.String),
-        },
-        &.{},
-        TestMwCtx,
-    );
+    const corpus = &.{
+        "q=hello&n=1",
+        "k=a&k=b&k=c",
+        "q=%ZZ",
+    };
 
-    var prng = std.Random.DefaultPrng.init(std.testing.random_seed);
-    const rnd = prng.random();
-    const gpa = std.testing.allocator;
-
-    var path_buf = "/".*;
-    for (0..200) |_| {
-        const len = rnd.uintLessThan(usize, 128);
-        const query = try gpa.alloc(u8, len);
-        defer gpa.free(query);
-        rnd.bytes(query);
-        const line: RequestLine = .{ .method = "GET", .version = .http11, .path = path_buf[0..], .query = query };
-        var mw_ctx: TestMwCtx = .{};
-        var reqv = ReqT.init(gpa, line, &mw_ctx);
-        defer reqv.deinit(gpa);
-        _ = reqv.parseQuery(gpa) catch {};
-    }
+    try std.testing.fuzz({}, struct {
+        fn testOne(_: void, smith: *std.testing.Smith) !void {
+            const ReqT = Request(
+                struct {},
+                struct {
+                    q: parse.Optional(parse.String),
+                    n: parse.Optional(parse.Int(u32)),
+                    k: parse.SliceOf(parse.String),
+                },
+                &.{},
+                TestMwCtx,
+            );
+            const path_buf = "/".*;
+            var query_buf: [128]u8 = undefined;
+            const max: u16 = @intCast(query_buf.len);
+            const len_u16 = smith.valueRangeAtMost(u16, 0, max);
+            const len: usize = @intCast(len_u16);
+            smith.bytes(query_buf[0..len]);
+            const line: RequestLine = .{
+                .method = "GET",
+                .version = .http11,
+                .path = @constCast(path_buf[0..]),
+                .query = query_buf[0..len],
+            };
+            const gpa = std.testing.allocator;
+            var mw_ctx: TestMwCtx = .{};
+            var reqv = ReqT.init(gpa, line, &mw_ctx);
+            defer reqv.deinit(gpa);
+            _ = reqv.parseQuery(gpa) catch {};
+        }
+    }.testOne, .{ .corpus = corpus });
 }

@@ -1549,24 +1549,28 @@ test "fuzz: router match does not crash" {
         }.h, .{}),
     }, .{}, null);
 
-    var params: [S.MaxParams][]u8 = undefined;
-    var prng = std.Random.DefaultPrng.init(std.testing.random_seed);
-    const rnd = prng.random();
-    var method_buf: [8]u8 = undefined;
-    var path_buf: [64]u8 = undefined;
+    const corpus = &.{ "GET", "POST", "HEAD", "BAD" };
+    try std.testing.fuzz({}, struct {
+        fn testOne(_: void, smith: *std.testing.Smith) !void {
+            var params: [S.MaxParams][]u8 = undefined;
+            if (params.len != 0) params[0] = @constCast(""[0..0]);
+            var method_buf: [8]u8 = undefined;
+            var path_buf: [64]u8 = undefined;
 
-    for (0..400) |_| {
-        var mlen = rnd.uintLessThan(usize, method_buf.len);
-        if (mlen == 0) mlen = 1;
-        rnd.bytes(method_buf[0..mlen]);
+            const max_m: u16 = @intCast(method_buf.len);
+            const max_p: u16 = @intCast(path_buf.len);
+            const mlen_u16 = smith.valueRangeAtMost(u16, 1, max_m);
+            const plen_u16 = smith.valueRangeAtMost(u16, 1, max_p);
+            const mlen: usize = @intCast(mlen_u16);
+            const plen: usize = @intCast(plen_u16);
 
-        var plen = rnd.uintLessThan(usize, path_buf.len);
-        if (plen == 0) plen = 1;
-        rnd.bytes(path_buf[0..plen]);
-        path_buf[0] = '/';
+            smith.bytes(method_buf[0..mlen]);
+            smith.bytes(path_buf[0..plen]);
+            path_buf[0] = '/';
 
-        _ = S.match(method_buf[0..mlen], path_buf[0..plen], params[0..S.MaxParams]);
-    }
+            _ = S.match(method_buf[0..mlen], path_buf[0..plen], params[0..S.MaxParams]);
+        }
+    }.testOne, .{ .corpus = corpus });
 }
 
 test "handler: zero-arg handler supported" {

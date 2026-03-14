@@ -5,6 +5,7 @@ const Io = std.Io;
 
 const parse = @import("parse.zig");
 const urldecode = @import("urldecode.zig");
+const util = @import("util.zig");
 
 pub const Version = enum { http10, http11 };
 
@@ -63,17 +64,8 @@ fn trimSpaces(s: []u8) []u8 {
     return s[a..b];
 }
 
-fn middlewareLookupName(comptime name: anytype) []const u8 {
-    return switch (@typeInfo(@TypeOf(name))) {
-        .enum_literal => @tagName(name),
-        .pointer => |pointer| if (pointer.child == u8) name else @compileError("middleware name must be an enum literal or string"),
-        .array => |array| if (array.child == u8) name[0..] else @compileError("middleware name must be an enum literal or string"),
-        else => @compileError("middleware name must be an enum literal or string"),
-    };
-}
-
 fn middlewareContextFieldName(comptime Ctx: type, comptime name: anytype) []const u8 {
-    const wanted = comptime middlewareLookupName(name);
+    const wanted = comptime util.middlewareLookupName(name);
     inline for (@typeInfo(Ctx).@"struct".fields) |field| {
         if (comptime std.mem.eql(u8, field.name, wanted)) {
             return field.name;
@@ -85,12 +77,6 @@ fn middlewareContextFieldName(comptime Ctx: type, comptime name: anytype) []cons
 fn middlewareContextFieldType(comptime Ctx: type, comptime name: anytype) type {
     const field_name = middlewareContextFieldName(Ctx, name);
     return @FieldType(Ctx, field_name);
-}
-
-fn parseVersion(v: []const u8) ?Version {
-    if (std.mem.eql(u8, v, "HTTP/1.1")) return .http11;
-    if (std.mem.eql(u8, v, "HTTP/1.0")) return .http10;
-    return null;
 }
 
 pub const RequestLine = struct {
@@ -117,7 +103,12 @@ pub fn parseRequestLineBorrowed(r: *Io.Reader, max_line_len: usize) ParseLineErr
     const target = line[sp1 + 1 .. sp2];
     const version_str = line[sp2 + 1 ..];
 
-    const version = parseVersion(version_str) orelse return error.BadRequest;
+    const version: Version = if (std.mem.eql(u8, version_str, "HTTP/1.1"))
+        .http11
+    else if (std.mem.eql(u8, version_str, "HTTP/1.0"))
+        .http10
+    else
+        return error.BadRequest;
 
     if (target.len == 0 or target[0] != '/') return error.BadRequest;
 
@@ -145,10 +136,6 @@ pub fn parseRequestLine(r: *Io.Reader, allocator: Allocator, max_line_len: usize
         .path = path,
         .query = query,
     };
-}
-
-fn parseContentLength(v: []const u8) ?usize {
-    return std.fmt.parseInt(usize, v, 10) catch null;
 }
 
 fn headerIs(name: []const u8, comptime wanted: []const u8) bool {
@@ -355,7 +342,7 @@ pub fn RequestPWithPattern(
                 if (headerIs(name, "connection")) {
                     if (containsTokenIgnoreCase(value, "close")) self.base.connection_close = true;
                 } else if (headerIs(name, "content-length")) {
-                    const parsed = parseContentLength(value) orelse return error.BadRequest;
+                    const parsed = std.fmt.parseInt(usize, value, 10) catch return error.BadRequest;
                     if (content_length) |prev| {
                         if (prev != parsed) return error.BadRequest;
                     } else {

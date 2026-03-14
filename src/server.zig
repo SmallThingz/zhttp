@@ -7,6 +7,7 @@ const response = @import("response.zig");
 const request = @import("request.zig");
 const router = @import("router.zig");
 const parse = @import("parse.zig");
+const util = @import("util.zig");
 
 pub const Config = struct {
     /// Per-connection read buffer size.
@@ -28,38 +29,6 @@ pub const Config = struct {
 fn configField(comptime cfg: anytype, comptime name: []const u8, default: anytype) @TypeOf(default) {
     if (@hasField(@TypeOf(cfg), name)) return @field(cfg, name);
     return default;
-}
-
-fn tupleLen(comptime t: anytype) usize {
-    const info = @typeInfo(@TypeOf(t));
-    if (info != .@"struct" or !info.@"struct".is_tuple) @compileError("expected tuple");
-    return info.@"struct".fields.len;
-}
-
-fn isExactPattern(comptime pattern: []const u8) bool {
-    if (std.mem.indexOfScalar(u8, pattern, '{') != null) return false;
-    if (std.mem.indexOfScalar(u8, pattern, '*') != null) return false;
-    return true;
-}
-
-fn optsHasNeeds(comptime opts: anytype) bool {
-    if (@hasField(@TypeOf(opts), "headers")) {
-        if (parse.structFields(@field(opts, "headers")).len != 0) return true;
-    }
-    if (@hasField(@TypeOf(opts), "query")) {
-        if (parse.structFields(@field(opts, "query")).len != 0) return true;
-    }
-    if (@hasField(@TypeOf(opts), "params")) {
-        if (parse.structFields(@field(opts, "params")).len != 0) return true;
-    }
-    if (@hasField(@TypeOf(opts), "middlewares")) {
-        if (tupleLen(@field(opts, "middlewares")) != 0) return true;
-    }
-    return false;
-}
-
-fn isHeadMethodToken(m: []const u8) bool {
-    return m.len == 4 and m[0] == 'H' and m[1] == 'E' and m[2] == 'A' and m[3] == 'D';
 }
 
 /// Server definition options (`def`) are provided at comptime.
@@ -98,10 +67,23 @@ pub fn Server(comptime def: anytype) type {
     const fast_single_route = comptime blk: {
         if (!Conf.fast_benchmark) break :blk false;
         if (route_fields.len != 1) break :blk false;
-        if (tupleLen(Middlewares) != 0) break :blk false;
+        if (util.tupleLen(Middlewares) != 0) break :blk false;
         const rd0 = @field(Routes, route_fields[0].name);
-        if (!isExactPattern(rd0.pattern)) break :blk false;
-        if (optsHasNeeds(rd0.options)) break :blk false;
+        if (std.mem.indexOfScalar(u8, rd0.pattern, '{') != null) break :blk false;
+        if (std.mem.indexOfScalar(u8, rd0.pattern, '*') != null) break :blk false;
+        const opts = rd0.options;
+        if (@hasField(@TypeOf(opts), "headers")) {
+            if (parse.structFields(@field(opts, "headers")).len != 0) break :blk false;
+        }
+        if (@hasField(@TypeOf(opts), "query")) {
+            if (parse.structFields(@field(opts, "query")).len != 0) break :blk false;
+        }
+        if (@hasField(@TypeOf(opts), "params")) {
+            if (parse.structFields(@field(opts, "params")).len != 0) break :blk false;
+        }
+        if (@hasField(@TypeOf(opts), "middlewares")) {
+            if (util.tupleLen(@field(opts, "middlewares")) != 0) break :blk false;
+        }
         break :blk true;
     };
 
@@ -187,7 +169,7 @@ pub fn Server(comptime def: anytype) type {
                 };
 
                 // Route on method + path first (no header parsing yet).
-                const send_body = !isHeadMethodToken(line.method);
+                const send_body = !(line.method.len == 4 and line.method[0] == 'H' and line.method[1] == 'E' and line.method[2] == 'A' and line.method[3] == 'D');
                 const rid = Compiled.match(line.method, line.path, params_buf[0..Compiled.MaxParams]);
 
                 var res: response.Res = undefined;

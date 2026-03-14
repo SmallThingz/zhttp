@@ -7,6 +7,7 @@ const Res = @import("response.zig").Res;
 const parse = @import("parse.zig");
 const request = @import("request.zig");
 const urldecode = @import("urldecode.zig");
+const util = @import("util.zig");
 
 comptime {
     @setEvalBranchQuota(30000);
@@ -94,18 +95,12 @@ pub fn options(comptime pattern: []const u8, comptime handler: anytype, comptime
     return route(.OPTIONS, pattern, handler, opts);
 }
 
-fn tupleLen(comptime t: anytype) usize {
-    const info = @typeInfo(@TypeOf(t));
-    if (info != .@"struct" or !info.@"struct".is_tuple) @compileError("expected tuple");
-    return info.@"struct".fields.len;
-}
-
 fn tupleConcat(
     comptime a: anytype,
     comptime b: anytype,
-) std.meta.Tuple(&([_]type{type} ** (tupleLen(a) + tupleLen(b)))) {
-    const la: usize = comptime tupleLen(a);
-    const lb: usize = comptime tupleLen(b);
+) std.meta.Tuple(&([_]type{type} ** (util.tupleLen(a) + util.tupleLen(b)))) {
+    const la: usize = comptime util.tupleLen(a);
+    const lb: usize = comptime util.tupleLen(b);
     const OutFieldTypes = [_]type{type} ** (la + lb);
     const OutT = std.meta.Tuple(&OutFieldTypes);
     return comptime blk: {
@@ -121,8 +116,8 @@ fn tupleConcat(
 }
 
 fn tupleConcatValuesType(comptime a: anytype, comptime b: anytype) type {
-    const la: usize = comptime tupleLen(a);
-    const lb: usize = comptime tupleLen(b);
+    const la: usize = comptime util.tupleLen(a);
+    const lb: usize = comptime util.tupleLen(b);
     if (la == 0) return @TypeOf(b);
     if (lb == 0) return @TypeOf(a);
     const OutFieldTypes = comptime blk: {
@@ -139,8 +134,8 @@ fn tupleConcatValuesType(comptime a: anytype, comptime b: anytype) type {
 }
 
 fn tupleConcatValues(comptime a: anytype, comptime b: anytype) tupleConcatValuesType(a, b) {
-    const la: usize = comptime tupleLen(a);
-    const lb: usize = comptime tupleLen(b);
+    const la: usize = comptime util.tupleLen(a);
+    const lb: usize = comptime util.tupleLen(b);
     if (la == 0) return b;
     if (lb == 0) return a;
 
@@ -252,14 +247,14 @@ fn assertNoRouteCollisions(comptime a: anytype, comptime b: anytype) void {
 }
 
 fn mergeRoutesType(comptime user_routes: anytype, comptime extra_routes: anytype) type {
-    if (tupleLen(extra_routes) == 0) return @TypeOf(user_routes);
+    if (util.tupleLen(extra_routes) == 0) return @TypeOf(user_routes);
     const a: @TypeOf(user_routes) = undefined;
     const b: @TypeOf(extra_routes) = undefined;
     return tupleConcatValuesType(a, b);
 }
 
 pub fn mergeRoutes(comptime user_routes: anytype, comptime extra_routes: anytype) mergeRoutesType(user_routes, extra_routes) {
-    if (tupleLen(extra_routes) == 0) return user_routes;
+    if (util.tupleLen(extra_routes) == 0) return user_routes;
     assertNoDuplicateRoutes(extra_routes);
     assertNoRouteCollisions(user_routes, extra_routes);
     return tupleConcatValues(user_routes, extra_routes);
@@ -335,15 +330,6 @@ fn middlewareDataType(comptime Mw: type) type {
     return EmptyMiddlewareData;
 }
 
-fn middlewareLookupName(comptime name: anytype) []const u8 {
-    return switch (@typeInfo(@TypeOf(name))) {
-        .enum_literal => @tagName(name),
-        .pointer => |pointer| if (pointer.child == u8) name else @compileError("middleware name must be an enum literal or string"),
-        .array => |array| if (array.child == u8) name[0..] else @compileError("middleware name must be an enum literal or string"),
-        else => @compileError("middleware name must be an enum literal or string"),
-    };
-}
-
 fn middlewareName(comptime Mw: type) ?[]const u8 {
     if (!@hasDecl(Mw, "Data")) return null;
     const Data = Mw.Data;
@@ -351,7 +337,7 @@ fn middlewareName(comptime Mw: type) ?[]const u8 {
     if (!@hasDecl(Mw, "name")) {
         @compileError("middleware " ++ @typeName(Mw) ++ " must declare pub const name when it exposes non-empty Data");
     }
-    return middlewareLookupName(Mw.name);
+    return util.middlewareLookupName(Mw.name);
 }
 
 fn middlewareHasStoredData(comptime Mw: type) bool {
@@ -477,16 +463,6 @@ const Pattern = struct {
     param_names: []const []const u8,
     glob: bool,
 };
-
-fn countSegments(comptime pattern: []const u8) usize {
-    if (std.mem.eql(u8, pattern, "/")) return 0;
-    var c: usize = 0;
-    var i: usize = 0;
-    while (i < pattern.len) : (i += 1) {
-        if (pattern[i] == '/') c += 1;
-    }
-    return c; // number of '/' in non-root includes leading '/', so segments = slashes
-}
 
 fn compilePattern(comptime pattern: []const u8) Pattern {
     if (pattern.len == 0 or pattern[0] != '/') @compileError("route pattern must start with '/'");
@@ -960,7 +936,7 @@ pub fn Compiled(
 
             // Only exact routes without params/glob and without any capture needs.
             const exact = p.param_names.len == 0 and !p.glob and std.mem.indexOfScalar(u8, rd.pattern, '{') == null and std.mem.indexOfScalar(u8, rd.pattern, '*') == null;
-            out[i] = exact and h_fields.len == 0 and q_fields.len == 0 and p_fields.len == 0 and tupleLen(MwTuple) == 0;
+            out[i] = exact and h_fields.len == 0 and q_fields.len == 0 and p_fields.len == 0 and util.tupleLen(MwTuple) == 0;
         }
         break :blk out;
     };

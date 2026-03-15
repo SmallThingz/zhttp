@@ -20,6 +20,20 @@ pub const Res = struct {
     }
 };
 
+const StatusDigits = blk: {
+    var t: [600][3]u8 = undefined;
+    var i: usize = 0;
+    while (i < t.len) : (i += 1) {
+        var v: usize = i;
+        t[i][2] = @as(u8, @intCast(v % 10)) + '0';
+        v /= 10;
+        t[i][1] = @as(u8, @intCast(v % 10)) + '0';
+        v /= 10;
+        t[i][0] = @as(u8, @intCast(v % 10)) + '0';
+    }
+    break :blk t;
+};
+
 fn reasonPhrase(status: u16) []const u8 {
     return switch (status) {
         200 => "OK",
@@ -50,12 +64,16 @@ pub fn write(
     send_body: bool,
 ) !void {
     var status_buf: [3]u8 = undefined;
-    var v: u16 = res.status;
-    status_buf[2] = @as(u8, @intCast(v % 10)) + '0';
-    v /= 10;
-    status_buf[1] = @as(u8, @intCast(v % 10)) + '0';
-    v /= 10;
-    status_buf[0] = @as(u8, @intCast(v % 10)) + '0';
+    if (res.status < StatusDigits.len) {
+        status_buf = StatusDigits[@as(usize, res.status)];
+    } else {
+        var v: u16 = res.status;
+        status_buf[2] = @as(u8, @intCast(v % 10)) + '0';
+        v /= 10;
+        status_buf[1] = @as(u8, @intCast(v % 10)) + '0';
+        v /= 10;
+        status_buf[0] = @as(u8, @intCast(v % 10)) + '0';
+    }
     const status_str: []const u8 = status_buf[0..];
 
     try w.writeAll("HTTP/1.1 ");

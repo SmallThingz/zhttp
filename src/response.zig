@@ -50,7 +50,13 @@ pub fn write(
     send_body: bool,
 ) !void {
     var status_buf: [3]u8 = undefined;
-    const status_str = try std.fmt.bufPrint(&status_buf, "{d:0>3}", .{res.status});
+    var v: u16 = res.status;
+    status_buf[2] = @as(u8, @intCast(v % 10)) + '0';
+    v /= 10;
+    status_buf[1] = @as(u8, @intCast(v % 10)) + '0';
+    v /= 10;
+    status_buf[0] = @as(u8, @intCast(v % 10)) + '0';
+    const status_str: []const u8 = status_buf[0..];
 
     try w.writeAll("HTTP/1.1 ");
     try w.writeAll(status_str);

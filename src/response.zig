@@ -58,10 +58,11 @@ pub fn write(
     try w.writeAll(reasonPhrase(res.status));
     try w.writeAll("\r\n");
 
-    const connection_value: []const u8 = if (keep_alive and !res.close) "keep-alive" else "close";
-    try w.writeAll("connection: ");
-    try w.writeAll(connection_value);
-    try w.writeAll("\r\n");
+    const connection_line: []const u8 = if (keep_alive and !res.close)
+        "connection: keep-alive\r\n"
+    else
+        "connection: close\r\n";
+    try w.writeAll(connection_line);
 
     // Application-provided headers.
     for (res.headers) |h| {

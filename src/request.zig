@@ -35,9 +35,26 @@ pub fn discardHeadersOnly(
     r: *Io.Reader,
     max_header_bytes: usize,
 ) (error{ BadRequest, HeadersTooLarge } || Io.Reader.Error)!void {
+    const Match = struct { idx: usize, len: usize };
+    const findEnd = struct {
+        fn run(buf: []const u8) ?Match {
+            var best: ?Match = null;
+            if (std.mem.indexOf(u8, buf, "\r\n\r\n")) |i| {
+                best = .{ .idx = i, .len = 4 };
+            }
+            if (std.mem.indexOf(u8, buf, "\n\n")) |j| {
+                if (best == null or j < best.?.idx) {
+                    best = .{ .idx = j, .len = 2 };
+                }
+            }
+            return best;
+        }
+    }.run;
+
     var total: usize = 0;
-    var line_len: usize = 0;
-    var prev_cr = false;
+    var prev: [3]u8 = undefined;
+    var prev_len: usize = 0;
+
     while (true) {
         const available = r.peekGreedy(1) catch |err| switch (err) {
             error.EndOfStream => return error.EndOfStream,
@@ -45,40 +62,36 @@ pub fn discardHeadersOnly(
         };
         if (available.len == 0) return error.EndOfStream;
 
-        var i: usize = 0;
-        while (i < available.len) : (i += 1) {
-            const b = available[i];
-            total += 1;
+        if (prev_len != 0) {
+            var tmp: [6]u8 = undefined;
+            const copy_len = @min(@as(usize, 3), available.len);
+            @memcpy(tmp[0..prev_len], prev[0..prev_len]);
+            @memcpy(tmp[prev_len .. prev_len + copy_len], available[0..copy_len]);
+            if (findEnd(tmp[0 .. prev_len + copy_len])) |m| {
+                const needed = m.idx + m.len - prev_len;
+                total += needed;
+                if (total > max_header_bytes) return error.HeadersTooLarge;
+                r.toss(needed);
+                return;
+            }
+        }
+
+        if (findEnd(available)) |m| {
+            total += m.idx + m.len;
             if (total > max_header_bytes) return error.HeadersTooLarge;
+            r.toss(m.idx + m.len);
+            return;
+        }
 
-            if (prev_cr) {
-                if (b == '\n') {
-                    if (line_len == 0) {
-                        r.toss(i + 1);
-                        return;
-                    }
-                    line_len = 0;
-                    prev_cr = false;
-                    continue;
-                } else {
-                    line_len += 1;
-                    prev_cr = false;
-                }
-            }
+        total += available.len;
+        if (total > max_header_bytes) return error.HeadersTooLarge;
 
-            if (b == '\r') {
-                prev_cr = true;
-                continue;
-            }
-            if (b == '\n') {
-                if (line_len == 0) {
-                    r.toss(i + 1);
-                    return;
-                }
-                line_len = 0;
-                continue;
-            }
-            line_len += 1;
+        if (available.len >= 3) {
+            @memcpy(prev[0..3], available[available.len - 3 ..]);
+            prev_len = 3;
+        } else {
+            @memcpy(prev[0..available.len], available);
+            prev_len = available.len;
         }
 
         r.toss(available.len);

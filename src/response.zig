@@ -76,9 +76,16 @@ pub fn write(
     var len_buf: [32]u8 = undefined;
     const body_len: usize = res.body.len;
     const len_str = std.fmt.bufPrint(&len_buf, "{d}", .{body_len}) catch unreachable;
-    try w.writeAll("content-length: ");
-    try w.writeAll(len_str);
-    try w.writeAll("\r\n\r\n");
+    var line_buf: [64]u8 = undefined;
+    var line_len: usize = 0;
+    const prefix = "content-length: ";
+    @memcpy(line_buf[line_len .. line_len + prefix.len], prefix);
+    line_len += prefix.len;
+    @memcpy(line_buf[line_len .. line_len + len_str.len], len_str);
+    line_len += len_str.len;
+    @memcpy(line_buf[line_len .. line_len + 4], "\r\n\r\n");
+    line_len += 4;
+    try w.writeAll(line_buf[0..line_len]);
 
     if (send_body and res.body.len != 0) {
         try w.writeAll(res.body);

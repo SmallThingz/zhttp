@@ -1,84 +1,111 @@
 # zhttp
+Low-latency HTTP/1.1 server primitives for Zig with comptime routing, typed captures, and composable middleware.
 
-Low-latency HTTP/1.1 server primitives for Zig (comptime router + typed captures).
+![Zig](https://img.shields.io/badge/Zig-0.16.0--dev-f7a41d?logo=zig&logoColor=111) ![Protocol](https://img.shields.io/badge/Protocol-HTTP%2F1.1-0f766e) ![Routing](https://img.shields.io/badge/Routing-comptime-1d4ed8) ![Focus](https://img.shields.io/badge/Focus-low--latency-111827)
 
-## Quick start
+## Features
+- Comptime route registration via `zhttp.Server(.{ .routes = .{ ... } })`.
+- Typed captures for headers, query strings, and path params using `zhttp.parse.*`.
+- Flexible handler signatures: no-arg, request-only, context-only, or context + request.
+- Global and per-route middleware composition with compile-time capture requirements.
+- Built-in middleware for static files, CORS, logging, compression, timeouts, ETag, request IDs, and security headers.
+- Request parsing and response writing tuned for a small, direct HTTP/1.1 hot path.
+- Runnable examples plus a benchmark harness for in-process and external comparisons.
 
-This is a library. For a minimal runnable server example, see `benchmark/zhttp_server.zig`.
-
-## Examples
-
-- Build all examples: `zig build examples`
-- Smoke-check examples (runs each with `--smoke`): `zig build examples-check`
-
-## `Server(.{ ... })` definition fields
-
-- `.Context: type` (optional) user context passed to handlers/middlewares. Defaults to `void`.
-- `.middlewares: tuple` (optional) global middleware types. Defaults to `.{}`.
-- `.routes: struct` (required) route registrations, e.g. `.{ zhttp.get(...), ... }`.
-- `.config: struct` (optional) config overrides (fields match `zhttp.server.Config`).
-- `.error_handler: fn(...) !Res` (optional) global error handler. Defaults to server 500s on handler/middleware errors.
-  - Supported signatures: `fn(err)`, `fn(req, err)`, `fn(ctx, err)`, `fn(ctx, req, err)`
-
-## Route registration
-
-Routes are registered at comptime via helpers like:
-
-- `zhttp.get("/path", handler, .{ ...opts... })`
-- `zhttp.get("/path", handler, .{})` (no options)
-
-`zhttp.route(.GET, "/path", handler, .{ ...opts... })` is available if you want to specify the method explicitly.
-
-### Route options (`opts`)
-
-`opts` is a comptime struct literal. Supported fields (all optional):
-
-- `.headers: type` request header captures
-  - header keys are matched case-insensitively
-  - `_` in field names matches `-` in incoming header names
-- `.query: type` query string captures (keys match exactly)
-- `.params: type` path param captures (for `{name}` segments)
-  - if omitted, path params default to strings
-- `.middlewares: tuple` per-route middleware types
-
-Each capture schema is a `struct` where field values are parsers from `zhttp.parse`:
-
+## Quick Start
 ```zig
-.{
-  .headers = struct { host: zhttp.parse.Optional(zhttp.parse.String) },
-  .query = struct { page: zhttp.parse.Optional(zhttp.parse.Int(u32)) },
-  .params = struct { id: zhttp.parse.Int(u64) },
+const std = @import("std");
+const zhttp = @import("zhttp");
+
+fn hello(req: anytype) !zhttp.Res {
+    const name = req.queryParam(.name) orelse "world";
+    const body = try std.fmt.allocPrint(req.allocator(), "hello {s}\n", .{name});
+    return zhttp.Res.text(200, body);
+}
+
+pub fn main(init: std.process.Init) !void {
+    const App = zhttp.Server(.{
+        .routes = .{
+            zhttp.get("/hello", hello, .{
+                .query = struct {
+                    name: zhttp.parse.Optional(zhttp.parse.String),
+                },
+            }),
+        },
+    });
+
+    const addr: std.Io.net.IpAddress = .{ .ip4 = std.Io.net.Ip4Address.loopback(8080) };
+    var server = try App.init(init.gpa, init.io, addr, {});
+    defer server.deinit();
+
+    try server.run();
 }
 ```
 
-## Handler signatures
+Run the shipped examples:
 
-Handlers can be any of:
+```bash
+zig build examples
+./zig-out/bin/zhttp-example-basic_server --port=8080
+zig build examples-check
+```
 
-- `fn() !zhttp.Res`
-- `fn(req: anytype) !zhttp.Res`
-- `fn(ctx: *Context) !zhttp.Res`
-- `fn(ctx: *Context, req: anytype) !zhttp.Res`
+## API Notes
+- `Server(.{ ... })` accepts `.Context`, `.middlewares`, `.routes`, `.config`, and `.error_handler`.
+- Route helpers: `zhttp.get`, `post`, `put`, `delete`, `patch`, `head`, `options`, or `zhttp.route(...)`.
+- Route options: `.headers`, `.query`, `.params`, `.middlewares`.
+- Header capture fields match case-insensitively, and `_` in field names matches `-` in incoming headers.
+- If `.params` is omitted, path params default to strings.
+- Request accessors are typed: `req.header(.host)`, `req.queryParam(.page)`, `req.paramValue(.id)`, `req.middlewareData(.name)`.
+- Middleware `Needs` are merged into the route capture schema at comptime.
 
-## Request API (in handlers/middlewares)
+## Built-In Middleware
+- `zhttp.middleware.Static`
+- `zhttp.middleware.Cors`
+- `zhttp.middleware.Logger`
+- `zhttp.middleware.Compression`
+- `zhttp.middleware.Timeout`
+- `zhttp.middleware.Etag`
+- `zhttp.middleware.RequestId`
+- `zhttp.middleware.SecurityHeaders`
 
-Capture accessors take enum literals (`@EnumLiteral()`), e.g. `.host`, `.page`, `.id`:
+See [`examples/builtin_middlewares.zig`](./examples/builtin_middlewares.zig) for a complete stack using static file serving, request IDs, CORS, ETag, compression, timeout, and security headers together.
 
-- `req.header(.host)` -> typed header capture value
-- `req.queryParam(.page)` -> typed query capture value
-- `req.paramValue(.id)` -> typed path param capture value (defaults to string if not declared)
-- `req.middlewareData(.auth)` -> pointer to middleware data by name
+## Examples
+- `examples/basic_server.zig`: typed query, header, and path param captures.
+- `examples/middleware.zig`: route-scoped auth middleware with `Needs`.
+- `examples/builtin_middlewares.zig`: built-in middleware stack.
+- `examples/echo_body.zig`: request body reading with `req.bodyAll(...)`.
+- `examples/fast_plaintext.zig`: stripped-down plaintext benchmark target.
 
-## Middleware API
+## Benchmarking
+Benchmark support lives under [`benchmark/`](./benchmark/).
 
-Middlewares are types with:
+```bash
+zig build bench -Doptimize=ReleaseFast -- --mode=zhttp --conns=1 --iters=200000 --warmup=10000
+zig run benchmark/run_zhttp_external.zig
+BENCH_BIN=./zig-out/bin/zhttp-bench zig run benchmark/run_faf.zig
+zig run benchmark/run_compare.zig
+```
 
-- `pub fn call(comptime Next: type, next: Next, ctx: *Context, req: anytype) !zhttp.Res`
-- optional `pub const Needs = struct { headers: type = ..., query: type = ..., params: type = ... }`
-- optional stored data:
-  - `pub const Data = struct { ... }`
-  - `pub const name = .your_middleware` (required if `Data` is non-empty)
-  - `pub fn initData() Data` (optional; defaults to zero init)
-  - with data: `pub fn call(comptime Next: type, next: Next, ctx: *Context, req: anytype, data: *Data) !zhttp.Res`
+Additional benchmark notes and modes are documented in [`benchmark/README.md`](./benchmark/README.md).
 
-`Needs.*` captures are merged into the route’s capture schema at comptime.
+## Architecture
+- `src/router.zig`: comptime route definition, route merging, and middleware route injection.
+- `src/request.zig`: request-line parsing, header parsing, capture decoding, and body helpers.
+- `src/response.zig`: response serialization with `Content-Length`.
+- `src/server.zig`: accept loop, keep-alive handling, dispatch, and error mapping.
+- `src/middleware/`: built-in middleware implementations.
+
+## Build / Validation
+```bash
+zig build test
+zig build examples
+zig build examples-check
+zig build bench-server
+```
+
+## Current Scope
+- HTTP/1.0 and HTTP/1.1 request parsing, with HTTP/1.1 response writing.
+- Keep-alive connection handling and correct HEAD response body suppression.
+- Responses currently always emit `Content-Length`; chunked responses are not implemented.

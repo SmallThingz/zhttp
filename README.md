@@ -1,18 +1,32 @@
-# zhttp
+# 🚀 zhttp
+
 Low-latency HTTP/1.1 server primitives for Zig with comptime routing, typed captures, and composable middleware.
 
-![Zig](https://img.shields.io/badge/Zig-0.16.0--dev-f7a41d?logo=zig&logoColor=111) ![Protocol](https://img.shields.io/badge/Protocol-HTTP%2F1.1-0f766e) ![Routing](https://img.shields.io/badge/Routing-comptime-1d4ed8) ![Focus](https://img.shields.io/badge/Focus-low--latency-111827)
+![zig](https://img.shields.io/badge/zig-0.16.0--dev-f7a41d?logo=zig&logoColor=111)
+![protocol](https://img.shields.io/badge/protocol-http%2F1.1-0f766e)
+![routing](https://img.shields.io/badge/routing-comptime-1d4ed8)
+![core](https://img.shields.io/badge/core-pure%20zig-111827)
 
-## Features
-- Comptime route registration via `zhttp.Server(.{ .routes = .{ ... } })`.
-- Typed captures for headers, query strings, and path params using `zhttp.parse.*`.
-- Flexible handler signatures: no-arg, request-only, context-only, or context + request.
-- Global and per-route middleware composition with compile-time capture requirements.
-- Built-in middleware for static files, CORS, logging, compression, timeouts, ETag, request IDs, and security headers.
-- Request parsing and response writing tuned for a small, direct HTTP/1.1 hot path.
-- Runnable examples plus a benchmark harness for in-process and external comparisons.
+## ⚡ Features
 
-## Quick Start
+- 🧭 **Comptime route table**: define routes once with `zhttp.Server(.{ .routes = .{ ... } })`.
+- 🧠 **Typed request captures**: decode headers, query params, and path params with `zhttp.parse.*`.
+- 🪝 **Flexible handlers**: support no-arg, request-only, context-only, or context + request handlers.
+- 🧱 **Composable middleware**: mix global and per-route middleware with compile-time `Needs` merging.
+- 📦 **Built-in middleware**: static files, CORS, logging, compression, timeout, ETag, request IDs, and security headers.
+- 🏎 **Tight hot path**: direct request parsing and response writing for low-overhead HTTP/1.1 servers.
+- 🧪 **Runnable examples + benchmarks**: example servers and a small benchmark harness live in-tree.
+
+## 🚀 Quick Start
+
+```bash
+zig build examples
+./zig-out/bin/zhttp-example-basic_server --port=8080
+zig build examples-check
+```
+
+Minimal server:
+
 ```zig
 const std = @import("std");
 const zhttp = @import("zhttp");
@@ -42,24 +56,35 @@ pub fn main(init: std.process.Init) !void {
 }
 ```
 
-Run the shipped examples:
+## 📦 Installation
+
+Add as a dependency:
 
 ```bash
-zig build examples
-./zig-out/bin/zhttp-example-basic_server --port=8080
-zig build examples-check
+zig fetch --save <git-or-tarball-url>
 ```
 
-## API Notes
-- `Server(.{ ... })` accepts `.Context`, `.middlewares`, `.routes`, `.config`, and `.error_handler`.
-- Route helpers: `zhttp.get`, `post`, `put`, `delete`, `patch`, `head`, `options`, or `zhttp.route(...)`.
-- Route options: `.headers`, `.query`, `.params`, `.middlewares`.
-- Header capture fields match case-insensitively, and `_` in field names matches `-` in incoming headers.
-- If `.params` is omitted, path params default to strings.
-- Request accessors are typed: `req.header(.host)`, `req.queryParam(.page)`, `req.paramValue(.id)`, `req.middlewareData(.name)`.
-- Middleware `Needs` are merged into the route capture schema at comptime.
+`build.zig`:
 
-## Built-In Middleware
+```zig
+const zhttp_dep = b.dependency("zhttp", .{
+    .target = target,
+    .optimize = optimize,
+});
+exe.root_module.addImport("zhttp", zhttp_dep.module("zhttp"));
+```
+
+## 🧩 Library API (At a Glance)
+
+- `zhttp.Server(.{ ... })` accepts `.Context`, `.middlewares`, `.routes`, `.config`, and `.error_handler`.
+- Route helpers: `zhttp.get`, `post`, `put`, `delete`, `patch`, `head`, `options`, and `zhttp.route(...)`.
+- Route options: `.headers`, `.query`, `.params`, `.middlewares`.
+- Header capture keys match case-insensitively, and `_` in field names matches `-` in incoming headers.
+- If `.params` is omitted, path params default to strings.
+- Typed request accessors include `req.header(...)`, `req.queryParam(...)`, `req.paramValue(...)`, and `req.middlewareData(...)`.
+
+## 🧱 Built-In Middleware
+
 - `zhttp.middleware.Static`
 - `zhttp.middleware.Cors`
 - `zhttp.middleware.Logger`
@@ -69,16 +94,18 @@ zig build examples-check
 - `zhttp.middleware.RequestId`
 - `zhttp.middleware.SecurityHeaders`
 
-See [`examples/builtin_middlewares.zig`](./examples/builtin_middlewares.zig) for a complete stack using static file serving, request IDs, CORS, ETag, compression, timeout, and security headers together.
+See [`examples/builtin_middlewares.zig`](./examples/builtin_middlewares.zig) for the full built-in stack in one server.
 
-## Examples
-- `examples/basic_server.zig`: typed query, header, and path param captures.
-- `examples/middleware.zig`: route-scoped auth middleware with `Needs`.
-- `examples/builtin_middlewares.zig`: built-in middleware stack.
-- `examples/echo_body.zig`: request body reading with `req.bodyAll(...)`.
-- `examples/fast_plaintext.zig`: stripped-down plaintext benchmark target.
+## 📎 Examples
 
-## Benchmarking
+- `examples/basic_server.zig`
+- `examples/middleware.zig`
+- `examples/builtin_middlewares.zig`
+- `examples/echo_body.zig`
+- `examples/fast_plaintext.zig`
+
+## 🏁 Benchmarking
+
 Benchmark support lives under [`benchmark/`](./benchmark/).
 
 ```bash
@@ -88,16 +115,10 @@ BENCH_BIN=./zig-out/bin/zhttp-bench zig run benchmark/run_faf.zig
 zig run benchmark/run_compare.zig
 ```
 
-Additional benchmark notes and modes are documented in [`benchmark/README.md`](./benchmark/README.md).
+For the full benchmark modes and notes, see [`benchmark/README.md`](./benchmark/README.md).
 
-## Architecture
-- `src/router.zig`: comptime route definition, route merging, and middleware route injection.
-- `src/request.zig`: request-line parsing, header parsing, capture decoding, and body helpers.
-- `src/response.zig`: response serialization with `Content-Length`.
-- `src/server.zig`: accept loop, keep-alive handling, dispatch, and error mapping.
-- `src/middleware/`: built-in middleware implementations.
+## 🧪 Build and Validation
 
-## Build / Validation
 ```bash
 zig build test
 zig build examples
@@ -105,7 +126,11 @@ zig build examples-check
 zig build bench-server
 ```
 
-## Current Scope
-- HTTP/1.0 and HTTP/1.1 request parsing, with HTTP/1.1 response writing.
-- Keep-alive connection handling and correct HEAD response body suppression.
-- Responses currently always emit `Content-Length`; chunked responses are not implemented.
+## ⚠️ Current Scope
+
+`zhttp` is intentionally focused on a small HTTP/1.1 server core.
+
+- Request parsing covers HTTP/1.0 and HTTP/1.1.
+- Responses are written as HTTP/1.1 with `Content-Length`.
+- Keep-alive and HEAD response semantics are handled.
+- Chunked responses are not implemented yet.

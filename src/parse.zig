@@ -31,7 +31,8 @@ pub fn structFields(comptime T: type) []const std.builtin.Type.StructField {
 
 pub fn emptyStruct(comptime T: type) T {
     var out: T = undefined;
-    inline for (structFields(T)) |f| {
+    const fields = comptime structFields(T);
+    inline for (fields) |f| {
         const P = f.type;
         if (!@hasDecl(P, "empty")) @compileError(@typeName(P) ++ " missing `pub const empty`");
         @field(out, f.name) = P.empty;
@@ -41,7 +42,8 @@ pub fn emptyStruct(comptime T: type) T {
 
 pub fn destroyStruct(value: anytype, allocator: Allocator) void {
     const T = @TypeOf(value.*);
-    inline for (structFields(T)) |f| {
+    const fields = comptime structFields(T);
+    inline for (fields) |f| {
         const P = f.type;
         if (!@hasDecl(P, "destroy")) @compileError(@typeName(P) ++ " missing `destroy`");
         @field(value.*, f.name).destroy(allocator);
@@ -50,7 +52,7 @@ pub fn destroyStruct(value: anytype, allocator: Allocator) void {
 
 pub fn doneParsingStruct(value: anytype, present: []const bool) !void {
     const T = @TypeOf(value.*);
-    const fields = structFields(T);
+    const fields = comptime structFields(T);
     std.debug.assert(present.len == fields.len);
     inline for (fields, 0..) |f, i| {
         const P = f.type;

@@ -337,7 +337,13 @@ fn middlewareName(comptime Mw: type) ?[]const u8 {
     if (!@hasDecl(Mw, "name")) {
         @compileError("middleware " ++ @typeName(Mw) ++ " must declare pub const name when it exposes non-empty Data");
     }
-    return util.middlewareLookupName(Mw.name);
+
+    return switch (@typeInfo(@TypeOf(Mw.name))) {
+        .enum_literal => @tagName(Mw.name),
+        .pointer => |pointer| if (pointer.child == u8) Mw.name else @compileError("middleware name must be an enum literal or string"),
+        .array => |array| if (array.child == u8) Mw.name[0..] else @compileError("middleware name must be an enum literal or string"),
+        else => @compileError("middleware name must be an enum literal or string"),
+    };
 }
 
 fn middlewareHasStoredData(comptime Mw: type) bool {

@@ -464,40 +464,15 @@ pub fn Enum(comptime E: type) type {
 }
 
 pub fn SliceOf(comptime P: type) type {
-    const Elem = ParserValueType(P);
-    const elem_info = @typeInfo(Elem);
-    const elem_is_u8_slice = elem_info == .pointer and elem_info.pointer.size == .slice and elem_info.pointer.child == u8;
-    const elem_is_opt_u8_slice = elem_info == .optional and
-        @typeInfo(elem_info.optional.child) == .pointer and
-        @typeInfo(elem_info.optional.child).pointer.size == .slice and
-        @typeInfo(elem_info.optional.child).pointer.child == u8;
     return struct {
-        list: std.ArrayListUnmanaged(Elem) = .empty,
+        list: std.ArrayListUnmanaged(P) = .empty,
         pub const empty: @This() = .{};
 
         pub fn parse(self: *@This(), allocator: Allocator, raw: []const u8) !void {
-            comptime {
-                if ((elem_is_u8_slice or elem_is_opt_u8_slice) and P != String and P != Optional(String)) {
-                    @compileError("SliceOf(" ++ @typeName(P) ++ ") returns a slice type; this is not supported (use SliceOf(String) or a custom parser)");
-                }
-            }
-
-            if (comptime elem_is_u8_slice) {
-                const dup = try allocator.dupe(u8, raw);
-                try self.list.append(allocator, dup);
-                return;
-            }
-            if (comptime elem_is_opt_u8_slice) {
-                const dup = try allocator.dupe(u8, raw);
-                try self.list.append(allocator, @as(Elem, dup));
-                return;
-            }
-
             var tmp: P = P.empty;
-            defer tmp.destroy(allocator);
             try tmp.parse(allocator, raw);
             try tmp.doneParsing(true);
-            try self.list.append(allocator, tmp.get());
+            try self.list.append(allocator, tmp);
         }
 
         pub fn doneParsing(self: *@This(), was_present: bool) !void {
@@ -505,18 +480,14 @@ pub fn SliceOf(comptime P: type) type {
             _ = was_present;
         }
 
-        pub fn get(self: *const @This()) []const Elem {
+        pub fn get(self: *const @This()) []const P {
             return self.list.items;
         }
 
         pub fn destroy(self: *@This(), allocator: Allocator) void {
-            if (comptime elem_is_u8_slice) {
-                for (self.list.items) |v| allocator.free(@constCast(v));
-            } else if (comptime elem_is_opt_u8_slice) {
-                for (self.list.items) |v| if (v) |s| allocator.free(@constCast(s));
-            }
+            for (self.list) |*v| v.destroy(allocator);
             self.list.deinit(allocator);
-            self.* = .{};
+            self.* = .empty;
         }
     };
 }

@@ -31,73 +31,6 @@ pub const ParseHeadersError = error{
     HeadersTooLarge,
 } || Io.Reader.Error || parse.CaptureError || urldecode.DecodeError || Allocator.Error;
 
-pub fn discardHeadersOnly(
-    r: *Io.Reader,
-    max_header_bytes: usize,
-) (error{ BadRequest, HeadersTooLarge } || Io.Reader.Error)!void {
-    const Match = struct { idx: usize, len: usize };
-    const findEnd = struct {
-        fn run(buf: []const u8) ?Match {
-            var best: ?Match = null;
-            if (std.mem.indexOf(u8, buf, "\r\n\r\n")) |i| {
-                best = .{ .idx = i, .len = 4 };
-            }
-            if (std.mem.indexOf(u8, buf, "\n\n")) |j| {
-                if (best == null or j < best.?.idx) {
-                    best = .{ .idx = j, .len = 2 };
-                }
-            }
-            return best;
-        }
-    }.run;
-
-    var total: usize = 0;
-    var prev: [3]u8 = undefined;
-    var prev_len: usize = 0;
-
-    while (true) {
-        const available = r.peekGreedy(1) catch |err| switch (err) {
-            error.EndOfStream => return error.EndOfStream,
-            error.ReadFailed => return error.ReadFailed,
-        };
-        if (available.len == 0) return error.EndOfStream;
-
-        if (prev_len != 0) {
-            var tmp: [6]u8 = undefined;
-            const copy_len = @min(@as(usize, 3), available.len);
-            @memcpy(tmp[0..prev_len], prev[0..prev_len]);
-            @memcpy(tmp[prev_len .. prev_len + copy_len], available[0..copy_len]);
-            if (findEnd(tmp[0 .. prev_len + copy_len])) |m| {
-                const needed = m.idx + m.len - prev_len;
-                total += needed;
-                if (total > max_header_bytes) return error.HeadersTooLarge;
-                r.toss(needed);
-                return;
-            }
-        }
-
-        if (findEnd(available)) |m| {
-            total += m.idx + m.len;
-            if (total > max_header_bytes) return error.HeadersTooLarge;
-            r.toss(m.idx + m.len);
-            return;
-        }
-
-        total += available.len;
-        if (total > max_header_bytes) return error.HeadersTooLarge;
-
-        if (available.len >= 3) {
-            @memcpy(prev[0..3], available[available.len - 3 ..]);
-            prev_len = 3;
-        } else {
-            @memcpy(prev[0..available.len], available);
-            prev_len = available.len;
-        }
-
-        r.toss(available.len);
-    }
-}
-
 fn trimCR(line: []u8) []u8 {
     if (line.len != 0 and line[line.len - 1] == '\r') return line[0 .. line.len - 1];
     return line;
@@ -111,19 +44,14 @@ fn trimSpaces(s: []const u8) []const u8 {
     return s[a..b];
 }
 
-fn middlewareContextFieldName(comptime Ctx: type, comptime name: anytype) []const u8 {
-    const wanted = comptime util.middlewareLookupName(name);
-    inline for (@typeInfo(Ctx).@"struct".fields) |field| {
-        if (comptime std.mem.eql(u8, field.name, wanted)) {
-            return field.name;
-        }
-    }
-    @compileError("unknown middleware name '" ++ wanted ++ "'");
+fn middlewareContextFieldName(comptime Ctx: type, comptime name: @EnumLiteral()) []const u8 {
+    const wanted = @tagName(name);
+    if (!@hasField(Ctx, wanted)) @compileError("unknown middleware name '" ++ wanted ++ "'");
+    return wanted;
 }
 
-fn middlewareContextFieldType(comptime Ctx: type, comptime name: anytype) type {
-    const field_name = middlewareContextFieldName(Ctx, name);
-    return @FieldType(Ctx, field_name);
+fn middlewareContextFieldType(comptime Ctx: type, comptime name: @EnumLiteral()) type {
+    return @FieldType(Ctx, middlewareContextFieldName(Ctx, name));
 }
 
 pub const RequestLine = struct {
@@ -824,19 +752,6 @@ test "request line: max length enforced" {
     try std.testing.expectError(error.UriTooLong, parseRequestLineBorrowed(&r, 4));
 }
 
-test "discardHeadersOnly: consumes until blank line" {
-    var r = Io.Reader.fixed("A: 1\r\nB: 2\r\n\r\nGET / HTTP/1.1\r\n");
-    try discardHeadersOnly(&r, 8 * 1024);
-    const line = try parseRequestLineBorrowed(&r, 8 * 1024);
-    try std.testing.expectEqualStrings("GET", line.method);
-    try std.testing.expectEqualStrings("/", line.path);
-}
-
-test "discardHeadersOnly: max bytes enforced" {
-    var r = Io.Reader.fixed("A: 1234567890\r\n\r\n");
-    try std.testing.expectError(error.HeadersTooLarge, discardHeadersOnly(&r, 8));
-}
-
 test "headers: underscore field matches dash header" {
     const ReqT = Request(
         struct {
@@ -1288,7 +1203,7 @@ test "fuzz: parseRequestLine owned alloc/free" {
     }.testOne, .{ .corpus = corpus });
 }
 
-test "fuzz: parseHeaders and discardHeadersOnly" {
+test "fuzz: parseHeaders" {
     const corpus = &.{
         "Host: example\r\n\r\n",
         "Content-Length: 5\r\n\r\nhello",
@@ -1330,9 +1245,6 @@ test "fuzz: parseHeaders and discardHeadersOnly" {
             var reqv = ReqT.init(gpa, std.testing.io, line, mw_ctx);
             defer reqv.deinit(gpa);
             _ = reqv.parseHeaders(gpa, &r1, 512) catch {};
-
-            var r2 = Io.Reader.fixed(buf[0..len]);
-            _ = discardHeadersOnly(&r2, 512) catch {};
         }
     }.testOne, .{ .corpus = corpus });
 }

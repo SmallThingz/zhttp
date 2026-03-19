@@ -48,10 +48,10 @@ pub fn Logger(comptime opts: anytype) type {
             }
 
             if (log_fn) |f| {
-                @call(.auto, f, .{ req.method, req.path_raw, res.status, elapsed });
+                @call(.auto, f, .{ req.method, req.base.path_raw, res.status, elapsed });
             } else {
                 const ms = elapsed.toMilliseconds();
-                std.debug.print("{s} {s} {d} {d}ms\n", .{ req.method, req.path_raw, res.status, ms });
+                std.debug.print("{s} {s} {d} {d}ms\n", .{ req.method, req.base.path_raw, res.status, ms });
             }
             return res;
         }

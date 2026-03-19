@@ -485,7 +485,7 @@ pub fn SliceOf(comptime P: type) type {
         }
 
         pub fn destroy(self: *@This(), allocator: Allocator) void {
-            for (self.list) |*v| v.destroy(allocator);
+            for (self.list.items) |*v| v.destroy(allocator);
             self.list.deinit(allocator);
             self.* = .empty;
         }
@@ -559,8 +559,8 @@ test "SliceOf(String): collects and owns entries" {
     try l.doneParsing(true);
     const items = l.get();
     try std.testing.expectEqual(@as(usize, 2), items.len);
-    try std.testing.expectEqualStrings("one", items[0]);
-    try std.testing.expectEqualStrings("two", items[1]);
+    try std.testing.expectEqualStrings("one", items[0].get());
+    try std.testing.expectEqualStrings("two", items[1].get());
 }
 
 test "fuzz: String/Optional/SliceOf/Int/Bool/Float" {

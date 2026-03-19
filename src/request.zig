@@ -13,6 +13,10 @@ pub const BodyKind = enum { none, content_length, chunked };
 
 pub const Base = struct {
     version: Version,
+    path_raw: []u8,
+    // Backing storage for query parsing. Values may be percent-decoded in place,
+    // so this is not guaranteed to remain identical to the original wire bytes.
+    query_raw: []u8,
 
     connection_close: bool = false,
 
@@ -223,8 +227,6 @@ pub fn RequestPWithPattern(
         reader: ?*Io.Reader = null,
         io: Io,
         arena: Allocator,
-        path_raw: []u8,
-        query_raw: []u8,
         mw_ctx: MwCtx,
         headers: Headers = parse.emptyStruct(Headers),
         query: Query = parse.emptyStruct(Query),
@@ -238,11 +240,11 @@ pub fn RequestPWithPattern(
             return .{
                 .arena = arena,
                 .io = io,
-                .path_raw = line.path,
                 .base = .{
                     .version = line.version,
+                    .path_raw = line.path,
+                    .query_raw = line.query,
                 },
-                .query_raw = line.query,
                 .mw_ctx = mw_ctx,
             };
         }
@@ -305,7 +307,7 @@ pub fn RequestPWithPattern(
             var present: [QueryLookup.count]bool = .{false} ** QueryLookup.count;
 
             var i: usize = 0;
-            const q = self.query_raw;
+            const q = self.base.query_raw;
             while (i <= q.len) {
                 const amp = std.mem.indexOfScalarPos(u8, q, i, '&') orelse q.len;
                 const part = q[i..amp];
@@ -1046,8 +1048,8 @@ test "query: repeated keys last-wins, SliceOf collects" {
         try reqv.parseQuery(gpa);
         const items = reqv.queryParam(.k);
         try std.testing.expectEqual(@as(usize, 2), items.len);
-        try std.testing.expectEqualStrings("one", items[0]);
-        try std.testing.expectEqualStrings("two", items[1]);
+        try std.testing.expectEqualStrings("one", items[0].get());
+        try std.testing.expectEqualStrings("two", items[1].get());
     }
 }
 

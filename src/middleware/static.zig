@@ -108,7 +108,7 @@ pub fn Static(comptime opts: anytype) type {
         }
 
         fn serve(req: anytype) !Res {
-            var rel = req.path_raw;
+            var rel = req.base.path_raw;
             if (!std.mem.startsWith(u8, rel, mount)) return Res.text(404, "not found");
             rel = rel[mount.len..];
             if (rel.len != 0 and rel[0] == '/') rel = rel[1..];

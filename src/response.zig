@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 
 pub const Header = struct {
     name: []const u8,
@@ -6,7 +7,7 @@ pub const Header = struct {
 };
 
 pub const Res = struct {
-    status: u16 = 200,
+    status: std.http.Status = 200,
     headers: []const Header = &.{},
     body: []const u8 = "",
     close: bool = false,
@@ -20,41 +21,31 @@ pub const Res = struct {
     }
 };
 
-const StatusDigits = blk: {
-    var t: [600][3]u8 = undefined;
-    var i: usize = 0;
-    while (i < t.len) : (i += 1) {
-        var v: usize = i;
-        t[i][2] = @as(u8, @intCast(v % 10)) + '0';
-        v /= 10;
-        t[i][1] = @as(u8, @intCast(v % 10)) + '0';
-        v /= 10;
-        t[i][0] = @as(u8, @intCast(v % 10)) + '0';
+/// Converts values in the range [0, 100) to a base 10 string.
+pub fn digits2(value: u8) [2]u8 {
+    if (builtin.mode == .ReleaseSmall) {
+        return .{ @intCast('0' + value / 10), @intCast('0' + value % 10) };
+    } else {
+        return "00010203040506070809101112131415161718192021222324252627282930313233343536373839404142434445464748495051525354555657585960616263646566676869707172737475767778798081828384858687888990919293949596979899"[value * 2 ..][0..2].*;
     }
-    break :blk t;
-};
+}
 
-fn reasonPhrase(status: u16) []const u8 {
-    return switch (status) {
-        200 => "OK",
-        201 => "Created",
-        204 => "No Content",
-        301 => "Moved Permanently",
-        302 => "Found",
-        304 => "Not Modified",
-        400 => "Bad Request",
-        401 => "Unauthorized",
-        403 => "Forbidden",
-        404 => "Not Found",
-        405 => "Method Not Allowed",
-        413 => "Payload Too Large",
-        414 => "URI Too Long",
-        431 => "Request Header Fields Too Large",
-        500 => "Internal Server Error",
-        501 => "Not Implemented",
-        503 => "Service Unavailable",
-        else => "OK",
+fn writeAllSlices(
+    w: *std.Io.Writer.VTable,
+    slices: []const []const u8,
+) !void {
+    var writer = std.Io.Writer{
+        .buffer = slices[0],
+        .end = slices[0].len,
+        .vtable = w,
     };
+
+    slices_idx = 1;
+
+    std.Io.
+    while (w.flush(&writer)) {
+
+    }
 }
 
 pub fn write(
@@ -64,34 +55,20 @@ pub fn write(
     send_body: bool,
 ) !void {
     var status_buf: [3]u8 = undefined;
-    if (res.status < StatusDigits.len) {
-        status_buf = StatusDigits[@as(usize, res.status)];
-    } else {
-        var v: u16 = res.status;
-        status_buf[2] = @as(u8, @intCast(v % 10)) + '0';
-        v /= 10;
-        status_buf[1] = @as(u8, @intCast(v % 10)) + '0';
-        v /= 10;
-        status_buf[0] = @as(u8, @intCast(v % 10)) + '0';
-    }
-    const status_str: []const u8 = status_buf[0..];
+    status_buf[1..3].* = digits2(@intFromEnum(res.status) % 100);
+    status_buf[0] = digits2((@intFromEnum(res.status) / 100) % 10);
 
     try w.writeAll("HTTP/1.1 ");
-    try w.writeAll(status_str);
-    try w.writeByte(' ');
-    try w.writeAll(reasonPhrase(res.status));
+    try w.writeAll(&status_buf);
     try w.writeAll("\r\n");
 
-    const connection_line: []const u8 = if (keep_alive and !res.close)
-        "connection: keep-alive\r\n"
-    else
-        "connection: close\r\n";
+    const connection_line: []const u8 = if (keep_alive and !res.close) "connection:keep-alive\r\n" else "connection:close\r\n";
     try w.writeAll(connection_line);
 
     // Application-provided headers.
     for (res.headers) |h| {
         try w.writeAll(h.name);
-        try w.writeAll(": ");
+        try w.writeAll(":");
         try w.writeAll(h.value);
         try w.writeAll("\r\n");
     }
@@ -102,7 +79,7 @@ pub fn write(
     const len_str = std.fmt.bufPrint(&len_buf, "{d}", .{body_len}) catch unreachable;
     var line_buf: [64]u8 = undefined;
     var line_len: usize = 0;
-    const prefix = "content-length: ";
+    const prefix = "content-length:";
     @memcpy(line_buf[line_len .. line_len + prefix.len], prefix);
     line_len += prefix.len;
     @memcpy(line_buf[line_len .. line_len + len_str.len], len_str);

@@ -97,7 +97,7 @@ test "logger: invokes log function" {
     defer reqv.deinit(gpa);
 
     const res = try Mw.call(Next, Next{}, {}, &reqv);
-    try std.testing.expectEqual(@as(u16, 201), res.status);
+    try std.testing.expectEqual(@as(u16, 201), @intFromEnum(res.status));
     try std.testing.expect(log_state.called);
     try std.testing.expectEqualStrings("GET", log_state.method);
     try std.testing.expectEqualStrings("/x", log_state.path);

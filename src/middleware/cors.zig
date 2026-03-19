@@ -198,7 +198,7 @@ pub fn Cors(comptime opts: anytype) type {
                 }
 
                 const headers = try allocHeaders(req.allocator(), hdrs[0..n]);
-                return .{ .status = 204, .headers = headers, .body = "" };
+                return .{ .status = .no_content, .headers = headers, .body = "" };
             }
 
             if (!allowed) {
@@ -299,7 +299,7 @@ test "cors: preflight and simple request" {
         try reqv.parseHeaders(gpa, &r, 1024);
 
         const res = try Mw.call(Next, Next{}, {}, &reqv);
-        try std.testing.expectEqual(@as(u16, 204), res.status);
+        try std.testing.expectEqual(@as(u16, 204), @intFromEnum(res.status));
         try std.testing.expectEqualStrings("https://example.com", headerValue(res.headers, "access-control-allow-origin").?);
     }
 
@@ -319,7 +319,7 @@ test "cors: preflight and simple request" {
         try reqv.parseHeaders(gpa, &r, 1024);
 
         const res = try Mw.call(Next, Next{}, {}, &reqv);
-        try std.testing.expectEqual(@as(u16, 200), res.status);
+        try std.testing.expectEqual(@as(u16, 200), @intFromEnum(res.status));
         try std.testing.expectEqualStrings("https://example.com", headerValue(res.headers, "access-control-allow-origin").?);
     }
 }

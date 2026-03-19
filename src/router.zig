@@ -1276,14 +1276,14 @@ test "dispatch: pipelined request discards unread content-length body" {
     const line1 = try request.parseRequestLineBorrowed(&r, 8 * 1024);
     const rid1 = S.match(line1.method, line1.path, params[0..S.MaxParams]).?;
     const dr1 = try S.dispatch({}, std.testing.io, a, &r, line1, rid1, params[0..S.MaxParams], 8 * 1024);
-    try std.testing.expectEqual(@as(u16, 200), dr1.res.status);
+    try std.testing.expectEqual(@as(u16, 200), @intFromEnum(dr1.res.status));
     try std.testing.expectEqualStrings("p", dr1.res.body);
     try std.testing.expect(dr1.keep_alive);
 
     const line2 = try request.parseRequestLineBorrowed(&r, 8 * 1024);
     const rid2 = S.match(line2.method, line2.path, params[0..S.MaxParams]).?;
     const dr2 = try S.dispatch({}, std.testing.io, a, &r, line2, rid2, params[0..S.MaxParams], 8 * 1024);
-    try std.testing.expectEqual(@as(u16, 200), dr2.res.status);
+    try std.testing.expectEqual(@as(u16, 200), @intFromEnum(dr2.res.status));
     try std.testing.expectEqualStrings("g", dr2.res.body);
 }
 
@@ -1318,14 +1318,14 @@ test "dispatch: pipelined request discards unread chunked body" {
     const line1 = try request.parseRequestLineBorrowed(&r, 8 * 1024);
     const rid1 = S.match(line1.method, line1.path, params[0..S.MaxParams]).?;
     const dr1 = try S.dispatch({}, std.testing.io, a, &r, line1, rid1, params[0..S.MaxParams], 8 * 1024);
-    try std.testing.expectEqual(@as(u16, 200), dr1.res.status);
+    try std.testing.expectEqual(@as(u16, 200), @intFromEnum(dr1.res.status));
     try std.testing.expectEqualStrings("p", dr1.res.body);
     try std.testing.expect(dr1.keep_alive);
 
     const line2 = try request.parseRequestLineBorrowed(&r, 8 * 1024);
     const rid2 = S.match(line2.method, line2.path, params[0..S.MaxParams]).?;
     const dr2 = try S.dispatch({}, std.testing.io, a, &r, line2, rid2, params[0..S.MaxParams], 8 * 1024);
-    try std.testing.expectEqual(@as(u16, 200), dr2.res.status);
+    try std.testing.expectEqual(@as(u16, 200), @intFromEnum(dr2.res.status));
     try std.testing.expectEqualStrings("g", dr2.res.body);
 }
 
@@ -1575,7 +1575,7 @@ test "error handler: handler error returns response" {
     const line = try request.parseRequestLineBorrowed(&r, 8 * 1024);
     const rid = S.match(line.method, line.path, params[0..S.MaxParams]).?;
     const dr = try S.dispatch({}, std.testing.io, a, &r, line, rid, params[0..S.MaxParams], 8 * 1024);
-    try std.testing.expectEqual(@as(u16, 555), dr.res.status);
+    try std.testing.expectEqual(@as(u16, 555), @intFromEnum(dr.res.status));
     try std.testing.expectEqualStrings("handled", dr.res.body);
 }
 

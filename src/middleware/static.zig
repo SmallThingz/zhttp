@@ -176,13 +176,13 @@ pub fn Static(comptime opts: anytype) type {
                 if (req.header(.if_none_match)) |hdr| {
                     if (etagMatches(hdr, tag)) {
                         const headers = try allocHeaders(a, headers_buf[0..hcount]);
-                        return .{ .status = 304, .headers = headers, .body = "" };
+                        return .{ .status = .not_modified, .headers = headers, .body = "" };
                     }
                 }
             }
 
             const headers = try allocHeaders(a, headers_buf[0..hcount]);
-            return .{ .status = 200, .headers = headers, .body = body };
+            return .{ .status = .ok, .headers = headers, .body = body };
         }
     };
 }
@@ -224,7 +224,7 @@ test "static: serves file and index, blocks traversal" {
         var reqv = ReqT.init(gpa, std.testing.io, line, mw_ctx);
         defer reqv.deinit(gpa);
         const res = try S.Routes[0].handler(&reqv);
-        try std.testing.expectEqual(@as(u16, 200), res.status);
+        try std.testing.expectEqual(@as(u16, 200), @intFromEnum(res.status));
         try std.testing.expectEqualStrings("hello\n", res.body);
         try std.testing.expect(headerValue(res.headers, "content-type") != null);
     }
@@ -242,7 +242,7 @@ test "static: serves file and index, blocks traversal" {
         var reqv = ReqT.init(gpa, std.testing.io, line, mw_ctx);
         defer reqv.deinit(gpa);
         const res = try S.Routes[0].handler(&reqv);
-        try std.testing.expectEqual(@as(u16, 200), res.status);
+        try std.testing.expectEqual(@as(u16, 200), @intFromEnum(res.status));
         try std.testing.expectEqualStrings("index\n", res.body);
     }
 
@@ -259,7 +259,7 @@ test "static: serves file and index, blocks traversal" {
         var reqv = ReqT.init(gpa, std.testing.io, line, mw_ctx);
         defer reqv.deinit(gpa);
         const res = try S.Routes[0].handler(&reqv);
-        try std.testing.expectEqual(@as(u16, 404), res.status);
+        try std.testing.expectEqual(@as(u16, 404), @intFromEnum(res.status));
     }
 }
 
@@ -305,7 +305,7 @@ test "static: etag returns 304 on match" {
         var r = std.Io.Reader.fixed(header_line);
         try reqv2.parseHeaders(gpa, &r, 1024);
         const res2 = try S.Routes[0].handler(&reqv2);
-        try std.testing.expectEqual(@as(u16, 304), res2.status);
+        try std.testing.expectEqual(@as(u16, 304), @intFromEnum(res2.status));
         try std.testing.expectEqualStrings("", res2.body);
     }
 }

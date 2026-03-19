@@ -54,7 +54,7 @@ pub fn Etag(comptime opts: anytype) type {
             const tag = try makeEtag(req.allocator(), res.body, weak);
             if (req.header(.if_none_match)) |hdr| {
                 if (matchesIfNoneMatch(hdr, tag)) {
-                    return .{ .status = 304, .headers = &.{.{ .name = "etag", .value = tag }}, .body = "" };
+                    return .{ .status = .not_modified, .headers = &.{.{ .name = "etag", .value = tag }}, .body = "" };
                 }
             }
 

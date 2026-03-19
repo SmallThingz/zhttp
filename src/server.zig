@@ -48,9 +48,6 @@ fn configField(comptime cfg: anytype, comptime name: []const u8, default: anytyp
 pub fn Server(comptime def: anytype) type {
     if (!@hasField(@TypeOf(def), "routes")) @compileError("Server definition must include `.routes = .{ ... }`");
     const Context = if (@hasField(@TypeOf(def), "Context")) def.Context else void;
-    const Middlewares = if (@hasField(@TypeOf(def), "middlewares")) def.middlewares else .{};
-    const MiddlewareRoutes = router.middlewareRoutes(Middlewares);
-    const Routes = router.mergeRoutes(def.routes, MiddlewareRoutes);
     const cfg = if (@hasField(@TypeOf(def), "config")) def.config else .{};
 
     const defaults: Config = .{};
@@ -62,6 +59,10 @@ pub fn Server(comptime def: anytype) type {
         .max_header_bytes = configField(cfg, "max_header_bytes", defaults.max_header_bytes),
     };
 
+    const DefT = @TypeOf(def);
+    const Middlewares = if (@hasField(DefT, "middlewares")) def.middlewares else .{};
+    const MiddlewareRoutes = router.middlewareRoutes(Middlewares);
+    const Routes = router.mergeRoutes(def.routes, MiddlewareRoutes);
     const ErrorHandler = if (@hasField(@TypeOf(def), "error_handler")) def.error_handler else null;
     const Compiled = router.Compiled(Context, Routes, Middlewares, ErrorHandler);
     const EmptyMwCtx = struct {};
@@ -219,11 +220,23 @@ pub fn Server(comptime def: anytype) type {
     };
 }
 
+fn primeSocketBackend() void {
+    if (builtin.os.tag == .windows) return;
+
+    // Work around a std.Io test-process quirk where the first high-level
+    // loopback listen can fail unless the socket backend has been touched once.
+    const posix = std.posix;
+    const rc = posix.system.socket(posix.AF.INET, posix.SOCK.STREAM | posix.SOCK.CLOEXEC, posix.IPPROTO.TCP);
+    if (posix.errno(rc) == .SUCCESS) {
+        _ = posix.system.close(@intCast(rc));
+    }
+}
+
 test "Connection: close header closes socket" {
     const Bench = struct {
         fn plaintext(_: void, _: anytype) !response.Res {
             return .{
-                .status = 200,
+                .status = .ok,
                 .headers = &.{
                     .{ .name = "Server", .value = "F" },
                     .{ .name = "Content-Type", .value = "text/plain" },
@@ -234,9 +247,8 @@ test "Connection: close header closes socket" {
         }
     };
 
-    var threaded = Io.Threaded.init(std.testing.allocator, .{});
-    defer threaded.deinit();
-    const io = threaded.io();
+    const io = std.testing.io;
+    primeSocketBackend();
 
     const SrvT = Server(.{
         .routes = .{
@@ -305,9 +317,8 @@ test "unknown path returns 404 and keeps connection" {
         }
     };
 
-    var threaded = Io.Threaded.init(std.testing.allocator, .{});
-    defer threaded.deinit();
-    const io = threaded.io();
+    const io = std.testing.io;
+    primeSocketBackend();
 
     const SrvT = Server(.{
         .routes = .{
@@ -372,9 +383,8 @@ test "HEAD response omits body" {
         }
     };
 
-    var threaded = Io.Threaded.init(std.testing.allocator, .{});
-    defer threaded.deinit();
-    const io = threaded.io();
+    const io = std.testing.io;
+    primeSocketBackend();
 
     const SrvT = Server(.{
         .routes = .{
@@ -427,9 +437,8 @@ test "bad request line returns 400" {
         }
     };
 
-    var threaded = Io.Threaded.init(std.testing.allocator, .{});
-    defer threaded.deinit();
-    const io = threaded.io();
+    const io = std.testing.io;
+    primeSocketBackend();
 
     const SrvT = Server(.{
         .routes = .{
@@ -485,9 +494,8 @@ test "handler res.close closes socket" {
         }
     };
 
-    var threaded = Io.Threaded.init(std.testing.allocator, .{});
-    defer threaded.deinit();
-    const io = threaded.io();
+    const io = std.testing.io;
+    primeSocketBackend();
 
     const SrvT = Server(.{
         .routes = .{
@@ -541,9 +549,8 @@ test "HTTP/1.0 request does not keep-alive" {
         }
     };
 
-    var threaded = Io.Threaded.init(std.testing.allocator, .{});
-    defer threaded.deinit();
-    const io = threaded.io();
+    const io = std.testing.io;
+    primeSocketBackend();
 
     const SrvT = Server(.{
         .routes = .{

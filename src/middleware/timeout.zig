@@ -91,5 +91,5 @@ test "timeout: immediate timeout" {
     defer reqv.deinit(gpa);
 
     const res = try Mw.call(Next, Next{}, {}, &reqv);
-    try std.testing.expectEqual(@as(u16, 504), res.status);
+    try std.testing.expectEqual(@as(u16, 504), @intFromEnum(res.status));
 }

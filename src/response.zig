@@ -7,14 +7,14 @@ pub const Header = struct {
 };
 
 pub const Res = struct {
-    status: std.http.Status = 200,
+    status: std.http.Status = .ok,
     headers: []const Header = &.{},
     body: []const u8 = "",
     close: bool = false,
 
     pub fn text(status: u16, body: []const u8) Res {
         return .{
-            .status = status,
+            .status = @enumFromInt(status),
             .headers = &.{.{ .name = "content-type", .value = "text/plain; charset=utf-8" }},
             .body = body,
         };
@@ -30,45 +30,32 @@ pub fn digits2(value: u8) [2]u8 {
     }
 }
 
-fn writeAllSlices(
-    w: *std.Io.Writer.VTable,
-    slices: []const []const u8,
-) !void {
-    var writer = std.Io.Writer{
-        .buffer = slices[0],
-        .end = slices[0].len,
-        .vtable = w,
-    };
-
-    slices_idx = 1;
-
-    std.Io.
-    while (w.flush(&writer)) {
-
-    }
-}
-
 pub fn write(
     w: *std.Io.Writer,
     res: Res,
     keep_alive: bool,
     send_body: bool,
 ) !void {
+    const status_code: u16 = @intCast(@intFromEnum(res.status));
     var status_buf: [3]u8 = undefined;
-    status_buf[1..3].* = digits2(@intFromEnum(res.status) % 100);
-    status_buf[0] = digits2((@intFromEnum(res.status) / 100) % 10);
+    status_buf[1..3].* = digits2(@intCast(status_code % 100));
+    status_buf[0] = @intCast('0' + (status_code / 100) % 10);
 
     try w.writeAll("HTTP/1.1 ");
     try w.writeAll(&status_buf);
+    if (res.status.phrase()) |phrase| {
+        try w.writeAll(" ");
+        try w.writeAll(phrase);
+    }
     try w.writeAll("\r\n");
 
-    const connection_line: []const u8 = if (keep_alive and !res.close) "connection:keep-alive\r\n" else "connection:close\r\n";
+    const connection_line: []const u8 = if (keep_alive and !res.close) "connection: keep-alive\r\n" else "connection: close\r\n";
     try w.writeAll(connection_line);
 
     // Application-provided headers.
     for (res.headers) |h| {
         try w.writeAll(h.name);
-        try w.writeAll(":");
+        try w.writeAll(": ");
         try w.writeAll(h.value);
         try w.writeAll("\r\n");
     }
@@ -79,7 +66,7 @@ pub fn write(
     const len_str = std.fmt.bufPrint(&len_buf, "{d}", .{body_len}) catch unreachable;
     var line_buf: [64]u8 = undefined;
     var line_len: usize = 0;
-    const prefix = "content-length:";
+    const prefix = "content-length: ";
     @memcpy(line_buf[line_len .. line_len + prefix.len], prefix);
     line_len += prefix.len;
     @memcpy(line_buf[line_len .. line_len + len_str.len], len_str);

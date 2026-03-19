@@ -87,6 +87,11 @@ pub fn main(init: std.process.Init) !void {
 
     var child_test_name: ?[]const u8 = null;
     var filter: ?[]const u8 = null;
+    var exclude_filters: std.ArrayList([]u8) = .empty;
+    defer {
+        for (exclude_filters.items) |f| init.gpa.free(f);
+        exclude_filters.deinit(init.gpa);
+    }
     var jobs: ?usize = null;
     var seed: ?u32 = null;
 
@@ -98,6 +103,9 @@ pub fn main(init: std.process.Init) !void {
         } else if (std.mem.eql(u8, arg, "--test-filter")) {
             const f_z = arg_it.next() orelse return error.MissingFilter;
             filter = try init.gpa.dupe(u8, f_z[0..f_z.len]);
+        } else if (std.mem.eql(u8, arg, "--exclude-filter")) {
+            const f_z = arg_it.next() orelse return error.MissingFilter;
+            try exclude_filters.append(init.gpa, try init.gpa.dupe(u8, f_z[0..f_z.len]));
         } else if (std.mem.eql(u8, arg, "--jobs")) {
             const j_z = arg_it.next() orelse return error.MissingJobs;
             jobs = try parseUsize(j_z[0..j_z.len]);
@@ -122,7 +130,7 @@ pub fn main(init: std.process.Init) !void {
     if (filter) |f| {
         defer init.gpa.free(f);
     }
-    try runAllTests(init.gpa, init.io, argv0, filter, jobs, seed);
+    try runAllTests(init.gpa, init.io, argv0, filter, exclude_filters.items, jobs, seed);
 }
 
 fn panicHandler(msg: []const u8, first_trace_addr: ?usize) noreturn {
@@ -173,6 +181,7 @@ fn runAllTests(
     io: std.Io,
     argv0: []const u8,
     filter: ?[]const u8,
+    exclude_filters: []const []const u8,
     jobs: ?usize,
     seed: ?u32,
 ) !void {
@@ -183,6 +192,14 @@ fn runAllTests(
         if (filter) |f| {
             if (std.mem.indexOf(u8, t.name, f) == null) continue;
         }
+        var excluded = false;
+        for (exclude_filters) |f| {
+            if (std.mem.indexOf(u8, t.name, f) != null) {
+                excluded = true;
+                break;
+            }
+        }
+        if (excluded) continue;
         try tests.append(gpa, .{ .name = t.name });
     }
 
@@ -214,7 +231,22 @@ fn runAllTests(
     };
 
     if (builtin.single_threaded or job_count == 1) {
-        worker(&ctx);
+        for (tests.items) |t| {
+            const status = runInProcessTest(t.name, seed);
+            printTestOutput(t.name, .{ .status = status, .term = .{ .exited = switch (status) {
+                .pass => 0,
+                .skip => 2,
+                .leak => 3,
+                .fail, .crash => 1,
+            } } });
+            switch (status) {
+                .pass => summary.pass += 1,
+                .fail => summary.fail += 1,
+                .skip => summary.skip += 1,
+                .leak => summary.leak += 1,
+                .crash => summary.crash += 1,
+            }
+        }
     } else {
         const threads = try gpa.alloc(std.Thread, job_count);
         defer gpa.free(threads);
@@ -262,8 +294,6 @@ fn worker(ctx: *WorkerCtx) void {
             ctx.count_mutex.unlock(ctx.io);
             continue;
         };
-        defer ctx.gpa.free(result.stdout);
-        defer ctx.gpa.free(result.stderr);
 
         ctx.print_mutex.lockUncancelable(ctx.io);
         defer ctx.print_mutex.unlock(ctx.io);
@@ -284,8 +314,6 @@ fn worker(ctx: *WorkerCtx) void {
 const ChildResult = struct {
     status: Status,
     term: std.process.Child.Term,
-    stdout: []u8,
-    stderr: []u8,
 };
 
 fn runChildTest(ctx: *WorkerCtx, test_name: []const u8) !ChildResult {
@@ -305,18 +333,20 @@ fn runChildTest(ctx: *WorkerCtx, test_name: []const u8) !ChildResult {
     }
     defer if (seed_buf) |b| ctx.gpa.free(b);
 
-    const result = try std.process.run(ctx.gpa, ctx.io, .{
+    var child = try std.process.spawn(ctx.io, .{
         .argv = argv.items,
-        .stdout_limit = .limited(4 * 1024 * 1024),
-        .stderr_limit = .limited(4 * 1024 * 1024),
+        .stdin = .ignore,
+        .stdout = .inherit,
+        .stderr = .inherit,
     });
+    defer child.kill(ctx.io);
 
-    const status = classifyStatus(result.term);
+    const term = try child.wait(ctx.io);
+
+    const status = classifyStatus(term);
     return .{
         .status = status,
-        .term = result.term,
-        .stdout = result.stdout,
-        .stderr = result.stderr,
+        .term = term,
     };
 }
 
@@ -348,15 +378,6 @@ fn printTestOutput(name: []const u8, res: ChildResult) void {
 
     std.debug.print("{s}{s}\x1b[0m {s}", .{ color, label, name });
 
-    if (res.stdout.len > 0) {
-        std.debug.print(" | out: ", .{});
-        printSingleLine(res.stdout, 200);
-    }
-    if (res.stderr.len > 0) {
-        std.debug.print(" | err: ", .{});
-        printSingleLine(res.stderr, 200);
-    }
-
     switch (res.term) {
         .exited => |code| if (code != 0) std.debug.print(" | exit {d}", .{code}),
         .signal => |sig| std.debug.print(" | signal {d}", .{@intFromEnum(sig)}),
@@ -366,25 +387,6 @@ fn printTestOutput(name: []const u8, res: ChildResult) void {
 
     std.debug.print("\n", .{});
 }
-
-fn printSingleLine(bytes: []const u8, max_len: usize) void {
-    var written: usize = 0;
-    for (bytes) |c| {
-        if (written >= max_len) break;
-        switch (c) {
-            '\n', '\r', '\t' => {
-                std.debug.print(" ", .{});
-                written += 1;
-            },
-            else => {
-                std.debug.print("{c}", .{c});
-                written += 1;
-            },
-        }
-    }
-    if (bytes.len > max_len) std.debug.print("...", .{});
-}
-
 fn runSingleTest(name: []const u8, seed: ?u32) void {
     if (seed) |s| std.testing.random_seed = s;
 
@@ -420,4 +422,31 @@ fn findTest(name: []const u8) ?TestFn {
         if (std.mem.eql(u8, t.name, name)) return t;
     }
     return null;
+}
+
+fn runInProcessTest(name: []const u8, seed: ?u32) Status {
+    if (seed) |s| std.testing.random_seed = s;
+
+    const test_fn = findTest(name) orelse {
+        std.debug.print("unknown test: {s}\n", .{name});
+        return .fail;
+    };
+
+    std.testing.allocator_instance = .{};
+    const result = test_fn.func();
+    const leak_status = std.testing.allocator_instance.deinit();
+    if (leak_status == .leak) {
+        std.debug.print("memory leak\n", .{});
+        return .leak;
+    }
+
+    if (result) |_| {
+        return .pass;
+    } else |err| switch (err) {
+        error.SkipZigTest => return .skip,
+        else => {
+            std.debug.print("{s}\n", .{@errorName(err)});
+            return .fail;
+        },
+    }
 }

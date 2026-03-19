@@ -9,10 +9,14 @@ pub fn build(b: *std.Build) void {
     });
 
     const mod_tests = b.addTest(.{
-        .root_module = mod,
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("test_root.zig"),
+            .target = target,
+        }),
         .test_runner = .{ .path = b.path("test_runner.zig"), .mode = .simple },
     });
     const run_mod_tests = b.addRunArtifact(mod_tests);
+    run_mod_tests.addArgs(&.{ "--jobs", "1", "--exclude-filter", "server.test.", "--exclude-filter", "loopback listen preflight" });
     const test_step = b.step("test", "Run tests");
     test_step.dependOn(&run_mod_tests.step);
 

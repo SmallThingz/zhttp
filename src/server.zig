@@ -119,9 +119,34 @@ pub fn Server(comptime def: anytype) type {
         }
 
         fn handleConn(self: *Self, stream: std.Io.net.Stream) Io.Cancelable!void {
-            defer stream.close(self.io);
-            if (Conf.tcp_nodelay) setTcpNoDelay(&stream);
+            var owned_stream = stream;
+            var close_stream = true;
+            defer if (close_stream) owned_stream.close(self.io);
+            if (Conf.tcp_nodelay) setTcpNoDelay(&owned_stream);
 
+            if (comptime Compiled.HasUpgradeRoutes) {
+                if (try handleHttpPhase(self, &owned_stream)) |pending| {
+                    close_stream = false;
+                    Compiled.runUpgrade(
+                        if (Context == void) {} else self.ctx,
+                        self.io,
+                        self.gpa,
+                        owned_stream,
+                        pending,
+                    ) catch {
+                        return;
+                    };
+                }
+                return;
+            }
+
+            try handleHttpPhase(self, &owned_stream);
+        }
+
+        fn handleHttpPhase(
+            self: *Self,
+            stream: *std.Io.net.Stream,
+        ) Io.Cancelable!(if (Compiled.HasUpgradeRoutes) ?Compiled.UpgradePending else void) {
             var read_buf: [Conf.read_buffer]u8 = undefined;
             var write_buf: [Conf.write_buffer]u8 = undefined;
 
@@ -138,18 +163,22 @@ pub fn Server(comptime def: anytype) type {
                 const a = arena.allocator();
 
                 const line = request.parseRequestLineBorrowed(&sr.interface, Conf.max_request_line) catch |err| switch (err) {
-                    error.EndOfStream => return,
+                    error.EndOfStream => {
+                        if (comptime Compiled.HasUpgradeRoutes) return null;
+                        return;
+                    },
                     error.UriTooLong => {
                         writeSimple(self, &sw.interface, 414, "uri too long");
+                        if (comptime Compiled.HasUpgradeRoutes) return null;
                         return;
                     },
                     else => {
                         writeSimple(self, &sw.interface, 400, "bad request");
+                        if (comptime Compiled.HasUpgradeRoutes) return null;
                         return;
                     },
                 };
 
-                // Route on method + path first (no header parsing yet).
                 const send_body = !(line.method.len == 4 and line.method[0] == 'H' and line.method[1] == 'E' and line.method[2] == 'A' and line.method[3] == 'D');
                 const rid = Compiled.match(line.method, line.path, params_buf[0..Compiled.MaxParams]);
 
@@ -167,7 +196,10 @@ pub fn Server(comptime def: anytype) type {
                         params_buf[0..Compiled.MaxParams],
                         Conf.max_header_bytes,
                     ) catch |err| {
-                        if (err == error.EndOfStream or err == error.ReadFailed) return;
+                        if (err == error.EndOfStream or err == error.ReadFailed) {
+                            if (comptime Compiled.HasUpgradeRoutes) return null;
+                            return;
+                        }
                         const e: anyerror = err;
                         const status: u16 = switch (e) {
                             error.HeadersTooLarge => 431,
@@ -177,28 +209,58 @@ pub fn Server(comptime def: anytype) type {
                             error.BadValue,
                             error.InvalidPercentEncoding,
                             error.BadRequest,
+                            error.UnexpectedUpgradeBytes,
                             => 400,
                             else => 500,
                         };
                         writeSimple(self, &sw.interface, status, if (status == 500) "internal error" else "bad request");
+                        if (comptime Compiled.HasUpgradeRoutes) return null;
                         return;
                     };
-                    res = dr.res;
-                    keep_alive = dr.keep_alive;
+
+                    if (comptime Compiled.HasUpgradeRoutes) {
+                        switch (dr) {
+                            .http => |http| {
+                                res = http.res;
+                                keep_alive = http.keep_alive;
+                            },
+                            .upgrade => |pending| {
+                                errdefer Compiled.deinitPendingUpgrade(self.gpa, pending);
+                                _ = send_body;
+                                response.writeUpgrade(&sw.interface, pending.res) catch {
+                                    return null;
+                                };
+                                if (sw.interface.buffered().len != 0) {
+                                    sw.interface.flush() catch {
+                                        return null;
+                                    };
+                                }
+                                return pending;
+                            },
+                        }
+                    } else {
+                        res = dr.res;
+                        keep_alive = dr.keep_alive;
+                    }
                 } else {
                     const mw_ctx: EmptyMwCtx = .{};
                     var reqv = EmptyReq.init(a, self.io, line, mw_ctx);
                     defer reqv.deinit(a);
                     reqv.parseHeaders(a, &sr.interface, Conf.max_header_bytes) catch |err| {
-                        if (err == error.EndOfStream or err == error.ReadFailed) return;
+                        if (err == error.EndOfStream or err == error.ReadFailed) {
+                            if (comptime Compiled.HasUpgradeRoutes) return null;
+                            return;
+                        }
                         const status: u16 = switch (err) {
                             error.HeadersTooLarge => 431,
                             else => 400,
                         };
                         writeSimple(self, &sw.interface, status, "bad request");
+                        if (comptime Compiled.HasUpgradeRoutes) return null;
                         return;
                     };
                     reqv.discardUnreadBody() catch {
+                        if (comptime Compiled.HasUpgradeRoutes) return null;
                         return;
                     };
                     keep_alive = reqv.keepAlive();
@@ -206,15 +268,20 @@ pub fn Server(comptime def: anytype) type {
                 }
 
                 response.write(&sw.interface, res, keep_alive, send_body) catch {
+                    if (comptime Compiled.HasUpgradeRoutes) return null;
                     return;
                 };
                 if (sw.interface.buffered().len != 0) {
                     sw.interface.flush() catch {
+                        if (comptime Compiled.HasUpgradeRoutes) return null;
                         return;
                     };
                 }
 
-                if (!keep_alive or res.close) return;
+                if (!keep_alive or res.close) {
+                    if (comptime Compiled.HasUpgradeRoutes) return null;
+                    return;
+                }
             }
         }
     };

@@ -36,18 +36,7 @@ pub fn write(
     keep_alive: bool,
     send_body: bool,
 ) !void {
-    const status_code: u16 = @intCast(@intFromEnum(res.status));
-    var status_buf: [3]u8 = undefined;
-    status_buf[1..3].* = digits2(@intCast(status_code % 100));
-    status_buf[0] = @intCast('0' + (status_code / 100) % 10);
-
-    try w.writeAll("HTTP/1.1 ");
-    try w.writeAll(&status_buf);
-    if (res.status.phrase()) |phrase| {
-        try w.writeAll(" ");
-        try w.writeAll(phrase);
-    }
-    try w.writeAll("\r\n");
+    try writeStatusLine(w, res.status);
 
     const connection_line: []const u8 = if (keep_alive and !res.close) "connection: keep-alive\r\n" else "connection: close\r\n";
     try w.writeAll(connection_line);
@@ -80,6 +69,34 @@ pub fn write(
     }
 }
 
+pub fn writeUpgrade(w: *std.Io.Writer, res: Res) !void {
+    try writeStatusLine(w, res.status);
+
+    for (res.headers) |h| {
+        try w.writeAll(h.name);
+        try w.writeAll(": ");
+        try w.writeAll(h.value);
+        try w.writeAll("\r\n");
+    }
+
+    try w.writeAll("\r\n");
+}
+
+fn writeStatusLine(w: *std.Io.Writer, status: std.http.Status) !void {
+    const status_code: u16 = @intCast(@intFromEnum(status));
+    var status_buf: [3]u8 = undefined;
+    status_buf[1..3].* = digits2(@intCast(status_code % 100));
+    status_buf[0] = @intCast('0' + (status_code / 100) % 10);
+
+    try w.writeAll("HTTP/1.1 ");
+    try w.writeAll(&status_buf);
+    if (status.phrase()) |phrase| {
+        try w.writeAll(" ");
+        try w.writeAll(phrase);
+    }
+    try w.writeAll("\r\n");
+}
+
 test "write: HEAD omits body but keeps content-length" {
     const res = Res.text(200, "hello");
     var out: [256]u8 = undefined;
@@ -110,4 +127,24 @@ test "write: res.close forces close" {
     var w = std.Io.Writer.fixed(out[0..]);
     try write(&w, res, true, true);
     try std.testing.expect(std.mem.indexOf(u8, out[0..w.end], "connection: close\r\n") != null);
+}
+
+test "writeUpgrade: does not inject connection or content-length" {
+    const res: Res = .{
+        .status = .switching_protocols,
+        .headers = &.{
+            .{ .name = "connection", .value = "Upgrade" },
+            .{ .name = "upgrade", .value = "websocket" },
+        },
+    };
+    var out: [256]u8 = undefined;
+    var w = std.Io.Writer.fixed(out[0..]);
+    try writeUpgrade(&w, res);
+
+    const expected =
+        "HTTP/1.1 101 Switching Protocols\r\n" ++
+        "connection: Upgrade\r\n" ++
+        "upgrade: websocket\r\n" ++
+        "\r\n";
+    try std.testing.expectEqualStrings(expected, out[0..w.end]);
 }

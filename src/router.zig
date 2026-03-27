@@ -44,7 +44,8 @@ fn validateRouteOptions(comptime opts: anytype) void {
             const allowed = std.mem.eql(u8, name, "headers") or
                 std.mem.eql(u8, name, "query") or
                 std.mem.eql(u8, name, "params") or
-                std.mem.eql(u8, name, "middlewares");
+                std.mem.eql(u8, name, "middlewares") or
+                std.mem.eql(u8, name, "upgrade_handler");
             if (!allowed) @compileError("unknown route option: " ++ name);
 
             if (std.mem.eql(u8, name, "headers") or std.mem.eql(u8, name, "query") or std.mem.eql(u8, name, "params")) {
@@ -57,6 +58,14 @@ fn validateRouteOptions(comptime opts: anytype) void {
                 if (mw_info != .@"struct" or !mw_info.@"struct".is_tuple) {
                     @compileError("route option 'middlewares' must be a tuple (e.g. .{ .middlewares = .{Mw1, Mw2} })");
                 }
+            } else if (std.mem.eql(u8, name, "upgrade_handler")) {
+                const h = @field(opts, name0);
+                const ht = @TypeOf(h);
+                if (ht == @TypeOf(null)) continue;
+                const h_info = @typeInfo(ht);
+                if (h_info == .@"fn") continue;
+                if (h_info == .optional and @typeInfo(h_info.optional.child) == .@"fn") continue;
+                @compileError("route option 'upgrade_handler' must be fn(...) void, ?fn(...) void, or null");
             }
         }
     }
@@ -945,6 +954,18 @@ pub fn Compiled(
     return struct {
         pub const RouteCount: usize = route_count;
         pub const MaxParams: usize = compiled.max_params;
+        pub const DispatchError = error{
+            EndOfStream,
+            ReadFailed,
+            WriteFailed,
+            HeadersTooLarge,
+            MissingRequired,
+            BadValue,
+            InvalidPercentEncoding,
+            BadRequest,
+            StreamTooLong,
+            OutOfMemory,
+        };
         pub const RouteParamCounts: [route_count]usize = blk: {
             var out: [route_count]usize = undefined;
             for (route_fields, 0..) |_, i| {
@@ -1107,17 +1128,36 @@ pub fn Compiled(
             return if (!keep_alive or res.close) .close else .@"continue";
         }
 
+        fn callUpgradeHandler(
+            comptime handler: anytype,
+            server: anytype,
+            stream: *const std.Io.net.Stream,
+            r: *Io.Reader,
+            w: *Io.Writer,
+            line: request.RequestLine,
+            res: Res,
+        ) void {
+            const HandlerT = @TypeOf(handler);
+            const h_info = @typeInfo(HandlerT);
+            if (h_info != .@"fn") @compileError("upgrade_handler must be a function");
+            if (h_info.@"fn".return_type != void) @compileError("upgrade_handler must return void");
+            if (h_info.@"fn".params.len != 6) {
+                @compileError("upgrade_handler must be fn(server, stream, r, w, line, res) void");
+            }
+            @call(.auto, handler, .{ server, stream, r, w, line, res });
+        }
+
         pub fn dispatch(
-            ctx: if (Context == void) void else *Context,
-            io: Io,
+            server: anytype,
             allocator: Allocator,
             r: *Io.Reader,
             w: *Io.Writer,
+            stream: *const std.Io.net.Stream,
             line: request.RequestLine,
             route_index: u16,
             params_buf: [][]u8,
             max_header_bytes: usize,
-        ) !Action {
+        ) DispatchError!Action {
             inline for (route_fields, 0..) |f, i| {
                 if (route_index == i) {
                     const rd = @field(routes, f.name);
@@ -1134,7 +1174,7 @@ pub fn Compiled(
                     const ReqT = request.RequestPWithPattern(H, Q, P, p.param_names, MwCtx, rd.pattern, rd.method);
 
                     var params_local: [p.param_names.len][]u8 = undefined;
-                    var reqv = ReqT.init(allocator, io, line, mw_ctx);
+                    var reqv = ReqT.init(allocator, server.io, line, mw_ctx);
                     reqv.reader = r;
                     defer reqv.deinit(allocator);
                     errdefer reqv.discardUnreadBody() catch {};
@@ -1166,13 +1206,36 @@ pub fn Compiled(
                     const CtxPtr = if (Context == void) void else *Context;
                     const ChainT = Dispatch.Chain(MwTuple, rd.handler, CtxPtr, ReqT, MwCtx);
                     const chain = ChainT{ .mw_ctx = &reqv.mw_ctx };
-                    const res = if (Context == void)
-                        try chain.call({}, &reqv)
-                    else
-                        try chain.call(ctx, &reqv);
+                    const res = chain.call(if (Context == void) {} else server.ctx, &reqv) catch |err| {
+                        reqv.discardUnreadBody() catch return .close;
+                        const ServerT = @TypeOf(server.*);
+                        return ServerT.handleHandlerError(server, w, @TypeOf(err), err);
+                    };
 
                     // Ensure unread body is discarded before next request.
                     try reqv.discardUnreadBody();
+                    if (@hasField(@TypeOf(rd.options), "upgrade_handler")) {
+                        const maybe_upgrade = @field(rd.options, "upgrade_handler");
+                        if (@TypeOf(maybe_upgrade) != @TypeOf(null)) {
+                            if (@typeInfo(@TypeOf(maybe_upgrade)) == .optional) {
+                                if (maybe_upgrade) |upgrade_handler| {
+                                    if (res.status == .switching_protocols) {
+                                        try response.writeUpgrade(w, res);
+                                        if (w.buffered().len != 0) try w.flush();
+                                        callUpgradeHandler(upgrade_handler, server, stream, r, w, line, res);
+                                        return .upgraded;
+                                    }
+                                }
+                            } else {
+                                if (res.status == .switching_protocols) {
+                                    try response.writeUpgrade(w, res);
+                                    if (w.buffered().len != 0) try w.flush();
+                                    callUpgradeHandler(maybe_upgrade, server, stream, r, w, line, res);
+                                    return .upgraded;
+                                }
+                            }
+                        }
+                    }
                     const send_body = !(line.method.len == 4 and line.method[0] == 'H' and line.method[1] == 'E' and line.method[2] == 'A' and line.method[3] == 'D');
                     return finishResponse(w, res, reqv.keepAlive(), send_body);
                 }
@@ -1194,10 +1257,23 @@ fn dispatchForTest(
     line: request.RequestLine,
     out: []u8,
 ) !struct { action: Action, len: usize } {
+    const ServerT = struct {
+        io: Io,
+        ctx: @TypeOf(ctx),
+
+        pub fn handleHandlerError(_: *@This(), _: *Io.Writer, comptime _: type, _: anytype) Action {
+            unreachable;
+        }
+    };
+    var server: ServerT = .{
+        .io = std.testing.io,
+        .ctx = ctx,
+    };
     var params: [S.MaxParams][]u8 = undefined;
     var w = Io.Writer.fixed(out);
+    var stream: std.Io.net.Stream = undefined;
     const rid = S.match(line.method, line.path).?;
-    const action = try S.dispatch(ctx, std.testing.io, allocator, r, &w, line, rid, params[0..S.MaxParams], 8 * 1024);
+    const action = try S.dispatch(&server, allocator, r, &w, &stream, line, rid, params[0..S.MaxParams], 8 * 1024);
     return .{ .action = action, .len = w.end };
 }
 
@@ -1435,8 +1511,18 @@ test "dispatch: typed path params bad value errors" {
     _ = &out;
     var params: [S.MaxParams][]u8 = undefined;
     var w = Io.Writer.fixed(out[0..]);
+    var stream: std.Io.net.Stream = undefined;
+    const ServerT = struct {
+        io: Io,
+        ctx: void,
+
+        pub fn handleHandlerError(_: *@This(), _: *Io.Writer, comptime _: type, _: anytype) Action {
+            unreachable;
+        }
+    };
+    var server: ServerT = .{ .io = std.testing.io, .ctx = {} };
     const rid = S.match(line.method, line.path).?;
-    try std.testing.expectError(error.BadValue, S.dispatch({}, std.testing.io, a, &r, &w, line, rid, params[0..S.MaxParams], 8 * 1024));
+    try std.testing.expectError(error.BadValue, S.dispatch(&server, a, &r, &w, &stream, line, rid, params[0..S.MaxParams], 8 * 1024));
 }
 
 test "dispatch: path params allocate once" {
@@ -1582,7 +1668,7 @@ test "middleware data: set in middleware and handler access" {
     try std.testing.expect(std.mem.endsWith(u8, out[0..res.len], "\r\n\r\nok"));
 }
 
-test "dispatch: handler error propagates" {
+test "dispatch: handler error uses callback" {
     const S = Compiled(void, .{
         get("/x", struct {
             fn h(_: void, _: anytype) !Res {
@@ -1598,10 +1684,30 @@ test "dispatch: handler error propagates" {
     var r = Io.Reader.fixed("GET /x HTTP/1.1\r\n\r\n");
     const line = try request.parseRequestLineBorrowed(&r, 8 * 1024);
     var out: [256]u8 = undefined;
+    var called = false;
     var params: [S.MaxParams][]u8 = undefined;
     var w = Io.Writer.fixed(out[0..]);
+    var stream: std.Io.net.Stream = undefined;
+    const ServerT = struct {
+        io: Io,
+        ctx: void,
+        called: *bool,
+
+        pub fn handleHandlerError(self: *@This(), _: *Io.Writer, comptime _: type, _: anytype) Action {
+            self.called.* = true;
+            return .close;
+        }
+    };
+    var server: ServerT = .{
+        .io = std.testing.io,
+        .ctx = {},
+        .called = &called,
+    };
     const rid = S.match(line.method, line.path).?;
-    try std.testing.expectError(error.Boom, S.dispatch({}, std.testing.io, a, &r, &w, line, rid, params[0..S.MaxParams], 8 * 1024));
+    const action = try S.dispatch(&server, a, &r, &w, &stream, line, rid, params[0..S.MaxParams], 8 * 1024);
+    try std.testing.expect(called);
+    try std.testing.expectEqual(.close, action);
+    try std.testing.expectEqual(@as(usize, 0), w.end);
 }
 
 test "fuzz: router match does not crash" {
@@ -1707,6 +1813,117 @@ test "dispatch: invalid path percent-encoding rejected" {
     var out: [256]u8 = undefined;
     var params: [S.MaxParams][]u8 = undefined;
     var w = Io.Writer.fixed(out[0..]);
+    var stream: std.Io.net.Stream = undefined;
+    const ServerT = struct {
+        io: Io,
+        ctx: void,
+
+        pub fn handleHandlerError(_: *@This(), _: *Io.Writer, comptime _: type, _: anytype) Action {
+            unreachable;
+        }
+    };
+    var server: ServerT = .{ .io = std.testing.io, .ctx = {} };
     const rid = S.match(line.method, line.path).?;
-    try std.testing.expectError(error.InvalidPercentEncoding, S.dispatch({}, std.testing.io, a, &r, &w, line, rid, params[0..S.MaxParams], 8 * 1024));
+    try std.testing.expectError(error.InvalidPercentEncoding, S.dispatch(&server, a, &r, &w, &stream, line, rid, params[0..S.MaxParams], 8 * 1024));
+}
+
+test "dispatch: route upgrade_handler handles 101 and returns upgraded action" {
+    const ServerT = struct {
+        io: Io,
+        ctx: void,
+        upgraded: bool,
+
+        pub fn handleHandlerError(_: *@This(), _: *Io.Writer, comptime _: type, _: anytype) Action {
+            unreachable;
+        }
+    };
+
+    const Routes = struct {
+        fn h(_: void, _: anytype) !Res {
+            return .{
+                .status = .switching_protocols,
+                .headers = &.{
+                    .{ .name = "connection", .value = "Upgrade" },
+                    .{ .name = "upgrade", .value = "websocket" },
+                },
+            };
+        }
+
+        fn on_upgrade(server: *ServerT, _: *const std.Io.net.Stream, _: *Io.Reader, _: *Io.Writer, _: request.RequestLine, _: Res) void {
+            server.upgraded = true;
+        }
+    };
+
+    const S = Compiled(void, .{
+        get("/ws", Routes.h, .{ .upgrade_handler = Routes.on_upgrade }),
+    }, .{});
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    var server: ServerT = .{
+        .io = std.testing.io,
+        .ctx = {},
+        .upgraded = false,
+    };
+    var r = Io.Reader.fixed("GET /ws HTTP/1.1\r\nHost: x\r\n\r\n");
+    const line = try request.parseRequestLineBorrowed(&r, 8 * 1024);
+    var out: [256]u8 = undefined;
+    var params: [S.MaxParams][]u8 = undefined;
+    var w = Io.Writer.fixed(out[0..]);
+    var stream: std.Io.net.Stream = undefined;
+    const rid = S.match(line.method, line.path).?;
+    const action = try S.dispatch(&server, a, &r, &w, &stream, line, rid, params[0..S.MaxParams], 8 * 1024);
+
+    try std.testing.expectEqual(Action.upgraded, action);
+    try std.testing.expect(server.upgraded);
+    const expected =
+        "HTTP/1.1 101 Switching Protocols\r\n" ++
+        "connection: Upgrade\r\n" ++
+        "upgrade: websocket\r\n" ++
+        "\r\n";
+    try std.testing.expectEqualStrings(expected, out[0..w.end]);
+}
+
+test "dispatch: null upgrade_handler does not check status" {
+    const S = Compiled(void, .{
+        get("/ws", struct {
+            fn h(_: void, _: anytype) !Res {
+                return .{
+                    .status = .switching_protocols,
+                    .headers = &.{
+                        .{ .name = "connection", .value = "Upgrade" },
+                        .{ .name = "upgrade", .value = "websocket" },
+                    },
+                };
+            }
+        }.h, .{ .upgrade_handler = null }),
+    }, .{});
+
+    const ServerT = struct {
+        io: Io,
+        ctx: void,
+
+        pub fn handleHandlerError(_: *@This(), _: *Io.Writer, comptime _: type, _: anytype) Action {
+            unreachable;
+        }
+    };
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    var server: ServerT = .{ .io = std.testing.io, .ctx = {} };
+    var r = Io.Reader.fixed("GET /ws HTTP/1.1\r\nHost: x\r\n\r\n");
+    const line = try request.parseRequestLineBorrowed(&r, 8 * 1024);
+    var out: [256]u8 = undefined;
+    var params: [S.MaxParams][]u8 = undefined;
+    var w = Io.Writer.fixed(out[0..]);
+    var stream: std.Io.net.Stream = undefined;
+    const rid = S.match(line.method, line.path).?;
+    const action = try S.dispatch(&server, a, &r, &w, &stream, line, rid, params[0..S.MaxParams], 8 * 1024);
+
+    try std.testing.expectEqual(Action.@"continue", action);
+    try std.testing.expect(std.mem.indexOf(u8, out[0..w.end], "content-length: 0\r\n") != null);
 }

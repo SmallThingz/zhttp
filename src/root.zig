@@ -13,6 +13,9 @@
 //! - `.query: type`      Query capture schema (keys match exactly)
 //! - `.params: type`     Path param capture schema (for `{name}` segments; defaults to strings)
 //! - `.middlewares: tuple` Per-route middleware types
+//! - `.upgrade_handler: fn(server, stream, r, w, line, res) void` (or `null`)
+//!   If set and the handler returns `101 Switching Protocols`, zhttp writes an upgrade response,
+//!   calls this function, and returns `.upgraded` (the upgrade handler owns connection lifecycle).
 //!
 //! Server definition fields (for `Server(.{ ... })`):
 //! - `.Context: type` (optional) user context passed to handlers/middlewares
@@ -20,7 +23,7 @@
 //! - `.routes: struct` (required) route registrations
 //! - `.config: struct` (optional) server config overrides
 //! - `.error_handler: fn(*Server, *std.Io.Writer, comptime ErrorSet: type, err: ErrorSet) router.Action` (optional)
-//!   fallback error handler for parse/dispatch errors; if omitted, a built-in default writes `400`/`414`/`431`/`500`
+//!   fallback error handler for user handler/middleware errors; server parse/validation errors stay on the built-in `400`/`414`/`431` path
 //! - `.not_found_handler: fn(...) !Res` (optional) fallback-handler override for route misses
 //! - `.not_found_options: struct` (optional) request options for the fallback handler
 //!

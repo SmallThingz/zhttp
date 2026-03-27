@@ -76,9 +76,10 @@ exe.root_module.addImport("zhttp", zhttp_dep.module("zhttp"));
 
 ## 🧩 Library API (At a Glance)
 
-- `zhttp.Server(.{ ... })` accepts `.Context`, `.middlewares`, `.routes`, `.config`, `.error_handler`, `.not_found_handler`, and `.not_found_options`. `.error_handler` is a writer-based fallback hook with signature `fn(*Server, *std.Io.Writer, comptime ErrorSet: type, err: ErrorSet) zhttp.router.Action`. If no not-found handler is provided, a built-in `404 not found` handler is used.
+- `zhttp.Server(.{ ... })` accepts `.Context`, `.middlewares`, `.routes`, `.config`, `.error_handler`, `.not_found_handler`, and `.not_found_options`. `.error_handler` is a writer-based hook for user handler/middleware errors with signature `fn(*Server, *std.Io.Writer, comptime ErrorSet: type, err: ErrorSet) zhttp.router.Action`. Server parse/validation errors stay on the built-in bad-request path. If no not-found handler is provided, a built-in `404 not found` handler is used.
 - Route helpers: `zhttp.get`, `post`, `put`, `delete`, `patch`, `head`, `options`, and `zhttp.route(...)`.
-- Route options: `.headers`, `.query`, `.params`, `.middlewares`.
+- Route options: `.headers`, `.query`, `.params`, `.middlewares`, `.upgrade_handler`.
+- `.upgrade_handler` is route-local and optional (`null` by default). If present and the route returns `101 Switching Protocols`, zhttp writes the upgrade response and calls `fn(server, stream, r, w, line, res) void`; that path returns `zhttp.router.Action.upgraded` and the upgrade handler owns connection close/lifecycle.
 - Header capture keys match case-insensitively, and `_` in field names matches `-` in incoming headers.
 - If `.params` is omitted, path params default to strings.
 - Typed request accessors include `req.header(...)`, `req.queryParam(...)`, `req.paramValue(...)`, and `req.middlewareData(...)`.

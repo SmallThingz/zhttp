@@ -34,9 +34,8 @@ pub const Config = struct {
     max_header_bytes: usize = 32 * 1024,
 };
 
-fn configField(comptime cfg: anytype, comptime name: []const u8, default: anytype) @TypeOf(default) {
-    if (@hasField(@TypeOf(cfg), name)) return @field(cfg, name);
-    return default;
+fn configField(comptime cfg: anytype, comptime name: []const u8) @FieldType(Config, name) {
+    return @field(if (@hasField(@TypeOf(cfg), name)) cfg else Config{}, name);
 }
 
 /// Server definition options (`def`) are provided at comptime.
@@ -55,13 +54,12 @@ pub fn Server(comptime def: anytype) type {
     const Context = if (@hasField(@TypeOf(def), "Context")) def.Context else void;
     const cfg = if (@hasField(@TypeOf(def), "config")) def.config else .{};
 
-    const defaults: Config = .{};
     const Conf: Config = .{
-        .read_buffer = configField(cfg, "read_buffer", defaults.read_buffer),
-        .write_buffer = configField(cfg, "write_buffer", defaults.write_buffer),
-        .tcp_nodelay = configField(cfg, "tcp_nodelay", defaults.tcp_nodelay),
-        .max_request_line = configField(cfg, "max_request_line", defaults.max_request_line),
-        .max_header_bytes = configField(cfg, "max_header_bytes", defaults.max_header_bytes),
+        .read_buffer = configField(cfg, "read_buffer"),
+        .write_buffer = configField(cfg, "write_buffer"),
+        .tcp_nodelay = configField(cfg, "tcp_nodelay"),
+        .max_request_line = configField(cfg, "max_request_line"),
+        .max_header_bytes = configField(cfg, "max_header_bytes"),
     };
 
     const DefT = @TypeOf(def);
@@ -88,25 +86,25 @@ pub fn Server(comptime def: anytype) type {
         const Self = @This();
         pub const config = Conf;
         const Action = router.Action;
-        const RouteFn = *const fn (server: *Self, r: *Io.Reader, w: *Io.Writer, line: request.RequestLine, a: Allocator) Action;
+        const RouteFn = *const fn (
+            server: *Self,
+            r: *Io.Reader,
+            w: *Io.Writer,
+            stream: *const std.Io.net.Stream,
+            line: request.RequestLine,
+            a: Allocator,
+        ) Compiled.DispatchError!Action;
+        const NotFoundFn = *const fn (
+            server: *Self,
+            r: *Io.Reader,
+            w: *Io.Writer,
+            stream: *const std.Io.net.Stream,
+            line: request.RequestLine,
+            a: Allocator,
+        ) NotFoundCompiled.DispatchError!Action;
         const DefaultErrorHandler = struct {
-            fn call(server: *Self, w: *Io.Writer, comptime ErrorSet: type, err: ErrorSet) Action {
-                const name = @errorName(err);
-                if (std.mem.eql(u8, name, "EndOfStream") or std.mem.eql(u8, name, "ReadFailed")) return .close;
-                const status: u16 = if (std.mem.eql(u8, name, "HeadersTooLarge"))
-                    431
-                else if (std.mem.eql(u8, name, "UriTooLong"))
-                    414
-                else if (std.mem.eql(u8, name, "PayloadTooLarge"))
-                    413
-                else if (std.mem.eql(u8, name, "MissingRequired") or
-                    std.mem.eql(u8, name, "BadValue") or
-                    std.mem.eql(u8, name, "InvalidPercentEncoding") or
-                    std.mem.eql(u8, name, "BadRequest"))
-                    400
-                else
-                    500;
-                server.writeSimple(w, status, if (status == 500) "internal error" else "bad request");
+            fn call(server: *Self, w: *Io.Writer, comptime ErrorSet: type, _: ErrorSet) Action {
+                server.writeSimple(w, 500, "internal error");
                 return .close;
             }
         };
@@ -172,6 +170,33 @@ pub fn Server(comptime def: anytype) type {
             return @call(.auto, ErrorHandler, .{ self, w, ErrorSet, err });
         }
 
+        pub fn handleHandlerError(self: *Self, w: *Io.Writer, comptime ErrorSet: type, err: ErrorSet) Action {
+            return self.callErrorHandler(w, ErrorSet, err);
+        }
+
+        inline fn handleDispatchServerError(self: *Self, w: *Io.Writer, err: anytype) Action {
+            return switch (err) {
+                error.EndOfStream, error.ReadFailed, error.WriteFailed => .close,
+                error.HeadersTooLarge => blk2: {
+                    self.writeSimple(w, 431, "bad request");
+                    break :blk2 .close;
+                },
+                error.MissingRequired,
+                error.BadValue,
+                error.InvalidPercentEncoding,
+                error.BadRequest,
+                error.StreamTooLong,
+                => blk2: {
+                    self.writeSimple(w, 400, "bad request");
+                    break :blk2 .close;
+                },
+                error.OutOfMemory => blk2: {
+                    self.writeSimple(w, 500, "internal error");
+                    break :blk2 .close;
+                },
+            };
+        }
+
         fn handleConn(self: *Self, stream: std.Io.net.Stream) Io.Cancelable!void {
             if (Conf.tcp_nodelay) setTcpNoDelay(&stream);
 
@@ -188,13 +213,24 @@ pub fn Server(comptime def: anytype) type {
                     const a = arena.allocator();
 
                     const line = request.parseRequestLineBorrowed(&sr.interface, Conf.max_request_line) catch |err| {
-                        continue :blk self.callErrorHandler(&sw.interface, @TypeOf(err), err);
+                        continue :blk switch (err) {
+                            error.EndOfStream, error.ReadFailed => .close,
+                            error.UriTooLong => blk2: {
+                                self.writeSimple(&sw.interface, 414, "bad request");
+                                break :blk2 .close;
+                            },
+                            else => blk2: {
+                                self.writeSimple(&sw.interface, 400, "bad request");
+                                break :blk2 .close;
+                            },
+                        };
                     };
 
-                    continue :blk if (Compiled.match(line.method, line.path)) |idx| switch (idx) {
-                        inline 0...(Compiled.RouteCount - 1) => |c_idx| routeAction(c_idx)(self, &sr.interface, &sw.interface, line, a),
+                    continue :blk (if (Compiled.match(line.method, line.path)) |idx| switch (idx) {
+                        inline 0...(Compiled.RouteCount - 1) => |c_idx|
+                            routeAction(c_idx)(self, &sr.interface, &sw.interface, &stream, line, a) catch |err| self.handleDispatchServerError(&sw.interface, err),
                         else => unreachable,
-                    } else notFoundAction()(self, &sr.interface, &sw.interface, line, a);
+                    } else notFoundAction()(self, &sr.interface, &sw.interface, &stream, line, a) catch |err| self.handleDispatchServerError(&sw.interface, err));
                 },
                 .close => stream.close(self.io),
                 .upgraded => {},
@@ -203,38 +239,52 @@ pub fn Server(comptime def: anytype) type {
 
         fn routeAction(comptime route_index: u16) RouteFn {
             return struct {
-                fn call(server: *Self, r: *Io.Reader, w: *Io.Writer, line: request.RequestLine, a: Allocator) Action {
+                fn call(
+                    server: *Self,
+                    r: *Io.Reader,
+                    w: *Io.Writer,
+                    stream: *const std.Io.net.Stream,
+                    line: request.RequestLine,
+                    a: Allocator,
+                ) Compiled.DispatchError!Action {
                     var params_buf: [Compiled.RouteParamCounts[route_index]][]u8 = undefined;
                     return Compiled.dispatch(
-                        if (Context == void) {} else server.ctx,
-                        server.io,
+                        server,
                         a,
                         r,
                         w,
+                        stream,
                         line,
                         route_index,
                         params_buf[0..Compiled.RouteParamCounts[route_index]],
                         Conf.max_header_bytes,
-                    ) catch |err| return server.callErrorHandler(w, @TypeOf(err), err);
+                    );
                 }
             }.call;
         }
 
-        fn notFoundAction() RouteFn {
+        fn notFoundAction() NotFoundFn {
             return struct {
-                fn call(server: *Self, r: *Io.Reader, w: *Io.Writer, line: request.RequestLine, a: Allocator) Action {
+                fn call(
+                    server: *Self,
+                    r: *Io.Reader,
+                    w: *Io.Writer,
+                    stream: *const std.Io.net.Stream,
+                    line: request.RequestLine,
+                    a: Allocator,
+                ) NotFoundCompiled.DispatchError!Action {
                     var params_buf: [NotFoundCompiled.RouteParamCounts[0]][]u8 = undefined;
                     return NotFoundCompiled.dispatch(
-                        if (Context == void) {} else server.ctx,
-                        server.io,
+                        server,
                         a,
                         r,
                         w,
+                        stream,
                         line,
                         0,
                         params_buf[0..NotFoundCompiled.RouteParamCounts[0]],
                         Conf.max_header_bytes,
-                    ) catch |err| return server.callErrorHandler(w, @TypeOf(err), err);
+                    );
                 }
             }.call;
         }
@@ -595,7 +645,7 @@ test "bad request line returns 400" {
     group.await(io) catch {};
 }
 
-test "custom error_handler handles parse and route errors" {
+test "custom error_handler handles handler errors only" {
     const Handlers = struct {
         fn boom(_: void, _: anytype) !response.Res {
             return error.Boom;
@@ -643,12 +693,12 @@ test "custom error_handler handles parse and route errors" {
         try sw.interface.flush();
 
         const resp =
-            "HTTP/1.1 499\r\n" ++
+            "HTTP/1.1 400 Bad Request\r\n" ++
             "connection: close\r\n" ++
             "content-type: text/plain; charset=utf-8\r\n" ++
-            "content-length: 12\r\n" ++
+            "content-length: 11\r\n" ++
             "\r\n" ++
-            "custom parse";
+            "bad request";
         var got: [resp.len]u8 = undefined;
         try sr.interface.readSliceAll(got[0..]);
         try std.testing.expectEqualStrings(resp, got[0..]);
@@ -789,6 +839,83 @@ test "HTTP/1.0 request does not keep-alive" {
 
     var one: [1]u8 = undefined;
     try std.testing.expectError(error.EndOfStream, sr.interface.readSliceAll(one[0..]));
+
+    group.cancel(io);
+    group.await(io) catch {};
+}
+
+test "upgrade_handler: 101 triggers upgrade callback and stream ownership" {
+    const State = struct {
+        upgraded: bool = false,
+    };
+
+    const Handlers = struct {
+        fn ws(_: *State, _: anytype) !response.Res {
+            return .{
+                .status = .switching_protocols,
+                .headers = &.{
+                    .{ .name = "connection", .value = "Upgrade" },
+                    .{ .name = "upgrade", .value = "websocket" },
+                },
+            };
+        }
+
+        fn onUpgrade(server: anytype, stream: *const std.Io.net.Stream, _: *Io.Reader, _: *Io.Writer, _: request.RequestLine, _: response.Res) void {
+            server.ctx.upgraded = true;
+            stream.close(server.io);
+        }
+    };
+
+    const io = std.testing.io;
+    primeSocketBackend();
+
+    var state: State = .{};
+    const SrvT = Server(.{
+        .Context = State,
+        .routes = .{
+            router.get("/ws", Handlers.ws, .{
+                .upgrade_handler = Handlers.onUpgrade,
+            }),
+        },
+    });
+
+    const addr0: Io.net.IpAddress = .{ .ip4 = Io.net.Ip4Address.loopback(0) };
+    var server = try SrvT.init(std.testing.allocator, io, addr0, &state);
+    defer server.deinit();
+    const port: u16 = server.listener.socket.address.getPort();
+
+    var group: Io.Group = .init;
+    defer group.cancel(io);
+    try group.concurrent(io, SrvT.run, .{&server});
+
+    const addr: Io.net.IpAddress = .{ .ip4 = Io.net.Ip4Address.loopback(port) };
+    var stream = try Io.net.IpAddress.connect(&addr, io, .{ .mode = .stream });
+    defer stream.close(io);
+
+    var rb: [4 * 1024]u8 = undefined;
+    var wb: [256]u8 = undefined;
+    var sr = stream.reader(io, &rb);
+    var sw = stream.writer(io, &wb);
+
+    try sw.interface.writeAll(
+        "GET /ws HTTP/1.1\r\n" ++
+            "Host: x\r\n" ++
+            "\r\n",
+    );
+    try sw.interface.flush();
+
+    const expected =
+        "HTTP/1.1 101 Switching Protocols\r\n" ++
+        "connection: Upgrade\r\n" ++
+        "upgrade: websocket\r\n" ++
+        "\r\n";
+    var got: [expected.len]u8 = undefined;
+    try sr.interface.readSliceAll(got[0..]);
+    try std.testing.expectEqualStrings(expected, got[0..]);
+
+    var one: [1]u8 = undefined;
+    try std.testing.expectError(error.EndOfStream, sr.interface.readSliceAll(one[0..]));
+    try std.testing.expect(state.upgraded);
 
     group.cancel(io);
     group.await(io) catch {};

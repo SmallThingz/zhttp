@@ -19,7 +19,10 @@
 //! - `.middlewares: tuple` (optional) global middleware types
 //! - `.routes: struct` (required) route registrations
 //! - `.config: struct` (optional) server config overrides
-//! - `.error_handler: fn(...) !Res` (optional) global error handler for handler/middleware errors
+//! - `.error_handler: fn(*Server, *std.Io.Writer, comptime ErrorSet: type, err: ErrorSet) router.Action` (optional)
+//!   fallback error handler for parse/dispatch errors; if omitted, a built-in default writes `400`/`414`/`431`/`500`
+//! - `.not_found_handler: fn(...) !Res` (optional) fallback-handler override for route misses
+//! - `.not_found_options: struct` (optional) request options for the fallback handler
 //!
 //! ## Handler signatures
 //!

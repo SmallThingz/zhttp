@@ -7,6 +7,7 @@ const Io = std.Io;
 const response = @import("response.zig");
 const request = @import("request.zig");
 const router = @import("router.zig");
+const parse = @import("parse.zig");
 
 fn setTcpNoDelay(stream: *const std.Io.net.Stream) void {
     if (builtin.os.tag != .linux) return;
@@ -45,6 +46,10 @@ fn configField(comptime cfg: anytype, comptime name: []const u8, default: anytyp
 /// - `middlewares: tuple` Optional global middleware types. Defaults to `.{}`.
 /// - `routes: struct`     Required routes tuple/struct: `.{ zhttp.get(...), ... }`.
 /// - `config: struct`     Optional config overrides (fields match `zhttp.server.Config`).
+/// - `error_handler`      Optional fallback transport/dispatch error handler:
+///                        `fn(*Server, *Io.Writer, comptime ErrorSet: type, err: ErrorSet) router.Action`.
+/// - `not_found_handler`  Optional fallback handler override for route misses.
+/// - `not_found_options`  Optional request options for the fallback handler (`headers`, `query`, `middlewares`).
 pub fn Server(comptime def: anytype) type {
     if (!@hasField(@TypeOf(def), "routes")) @compileError("Server definition must include `.routes = .{ ... }`");
     const Context = if (@hasField(@TypeOf(def), "Context")) def.Context else void;
@@ -63,10 +68,15 @@ pub fn Server(comptime def: anytype) type {
     const Middlewares = if (@hasField(DefT, "middlewares")) def.middlewares else .{};
     const MiddlewareRoutes = router.middlewareRoutes(Middlewares);
     const Routes = router.mergeRoutes(def.routes, MiddlewareRoutes);
-    const ErrorHandler = if (@hasField(@TypeOf(def), "error_handler")) def.error_handler else null;
-    const Compiled = router.Compiled(Context, Routes, Middlewares, ErrorHandler);
-    const EmptyMwCtx = struct {};
-    const EmptyReq = request.Request(struct {}, struct {}, &.{}, EmptyMwCtx);
+    const Compiled = router.Compiled(Context, Routes, Middlewares);
+    const DefaultNotFound = struct {
+        fn handler(_: anytype) !response.Res {
+            return response.Res.text(404, "not found");
+        }
+    };
+    const NotFoundHandler = if (@hasField(DefT, "not_found_handler")) def.not_found_handler else DefaultNotFound.handler;
+    const NotFoundOptions = if (@hasField(DefT, "not_found_options")) def.not_found_options else .{};
+    const NotFoundCompiled = router.Compiled(Context, .{router.get("/", NotFoundHandler, NotFoundOptions)}, Middlewares);
 
     return struct {
         io: Io,
@@ -76,6 +86,31 @@ pub fn Server(comptime def: anytype) type {
         ctx: if (Context == void) void else *Context,
 
         const Self = @This();
+        pub const config = Conf;
+        const Action = router.Action;
+        const RouteFn = *const fn (server: *Self, r: *Io.Reader, w: *Io.Writer, line: request.RequestLine, a: Allocator) Action;
+        const DefaultErrorHandler = struct {
+            fn call(server: *Self, w: *Io.Writer, comptime ErrorSet: type, err: ErrorSet) Action {
+                const name = @errorName(err);
+                if (std.mem.eql(u8, name, "EndOfStream") or std.mem.eql(u8, name, "ReadFailed")) return .close;
+                const status: u16 = if (std.mem.eql(u8, name, "HeadersTooLarge"))
+                    431
+                else if (std.mem.eql(u8, name, "UriTooLong"))
+                    414
+                else if (std.mem.eql(u8, name, "PayloadTooLarge"))
+                    413
+                else if (std.mem.eql(u8, name, "MissingRequired") or
+                    std.mem.eql(u8, name, "BadValue") or
+                    std.mem.eql(u8, name, "InvalidPercentEncoding") or
+                    std.mem.eql(u8, name, "BadRequest"))
+                    400
+                else
+                    500;
+                server.writeSimple(w, status, if (status == 500) "internal error" else "bad request");
+                return .close;
+            }
+        };
+        const ErrorHandler = if (@hasField(DefT, "error_handler")) def.error_handler else DefaultErrorHandler.call;
 
         pub fn init(
             gpa: Allocator,
@@ -121,111 +156,87 @@ pub fn Server(comptime def: anytype) type {
             _ = self;
         }
 
-        fn handleConn(self: *Self, stream: std.Io.net.Stream) Io.Cancelable!void {
-            var owned_stream = stream;
-            defer owned_stream.close(self.io);
-            if (Conf.tcp_nodelay) setTcpNoDelay(&owned_stream);
-            try handleHttpPhase(self, &owned_stream);
+        fn validateErrorHandler() void {
+            const info = @typeInfo(@TypeOf(ErrorHandler));
+            if (info != .@"fn") @compileError("error_handler must be a function");
+            const params = info.@"fn".params;
+            if (params.len != 4) @compileError("error_handler must be fn(*Server, *Io.Writer, comptime ErrorSet: type, err: ErrorSet) router.Action");
+            if (params[0].type != *Self and params[0].type != null) @compileError("error_handler first param must be *Server");
+            if (params[1].type != *Io.Writer and params[1].type != null) @compileError("error_handler second param must be *Io.Writer");
+            if (params[2].type != type and params[2].type != null) @compileError("error_handler third param must be comptime ErrorSet: type");
+            if (info.@"fn".return_type != Action) @compileError("error_handler must return router.Action");
         }
 
-        fn handleHttpPhase(
-            self: *Self,
-            stream: *std.Io.net.Stream,
-        ) Io.Cancelable!void {
+        fn callErrorHandler(self: *Self, w: *Io.Writer, comptime ErrorSet: type, err: ErrorSet) Action {
+            comptime validateErrorHandler();
+            return @call(.auto, ErrorHandler, .{ self, w, ErrorSet, err });
+        }
+
+        fn handleConn(self: *Self, stream: std.Io.net.Stream) Io.Cancelable!void {
+            if (Conf.tcp_nodelay) setTcpNoDelay(&stream);
+
             var read_buf: [Conf.read_buffer]u8 = undefined;
             var write_buf: [Conf.write_buffer]u8 = undefined;
 
             var sr = stream.reader(self.io, &read_buf);
             var sw = stream.writer(self.io, &write_buf);
 
-            var arena = std.heap.ArenaAllocator.init(self.gpa);
-            defer arena.deinit();
+            blk: switch (Action.@"continue") {
+                .@"continue" => {
+                    var arena = std.heap.ArenaAllocator.init(self.gpa);
+                    defer arena.deinit();
+                    const a = arena.allocator();
 
-            var params_buf: [Compiled.MaxParams][]u8 = undefined;
+                    const line = request.parseRequestLineBorrowed(&sr.interface, Conf.max_request_line) catch |err| {
+                        continue :blk self.callErrorHandler(&sw.interface, @TypeOf(err), err);
+                    };
 
-            while (true) {
-                _ = arena.reset(.retain_capacity);
-                const a = arena.allocator();
+                    continue :blk if (Compiled.match(line.method, line.path)) |idx| switch (idx) {
+                        inline 0...Compiled.RouteCount => |c_idx| routeAction(c_idx)(self, &sr.interface, &sw.interface, line, a),
+                        else => unreachable,
+                    } else notFoundAction()(self, &sr.interface, &sw.interface, line, a);
+                },
+                .close => stream.close(self.io),
+                .upgraded => {},
+            }
+        }
 
-                const line = request.parseRequestLineBorrowed(&sr.interface, Conf.max_request_line) catch |err| switch (err) {
-                    error.EndOfStream => return,
-                    error.UriTooLong => {
-                        writeSimple(self, &sw.interface, 414, "uri too long");
-                        return;
-                    },
-                    else => {
-                        writeSimple(self, &sw.interface, 400, "bad request");
-                        return;
-                    },
-                };
-
-                const send_body = !(line.method.len == 4 and line.method[0] == 'H' and line.method[1] == 'E' and line.method[2] == 'A' and line.method[3] == 'D');
-                const rid = Compiled.match(line.method, line.path, params_buf[0..Compiled.MaxParams]);
-
-                var res: response.Res = undefined;
-                var keep_alive: bool = false;
-
-                if (rid) |route_index| {
-                    const dr = Compiled.dispatch(
-                        if (Context == void) {} else self.ctx,
-                        self.io,
+        fn routeAction(comptime route_index: u16) RouteFn {
+            return struct {
+                fn call(server: *Self, r: *Io.Reader, w: *Io.Writer, line: request.RequestLine, a: Allocator) Action {
+                    var params_buf: [Compiled.RouteParamCounts[route_index]][]u8 = undefined;
+                    return Compiled.dispatch(
+                        if (Context == void) {} else server.ctx,
+                        server.io,
                         a,
-                        &sr.interface,
+                        r,
+                        w,
                         line,
                         route_index,
-                        params_buf[0..Compiled.MaxParams],
+                        params_buf[0..Compiled.RouteParamCounts[route_index]],
                         Conf.max_header_bytes,
-                    ) catch |err| {
-                        if (err == error.EndOfStream or err == error.ReadFailed) return;
-                        const e: anyerror = err;
-                        const status: u16 = switch (e) {
-                            error.HeadersTooLarge => 431,
-                            error.UriTooLong => 414,
-                            error.PayloadTooLarge => 413,
-                            error.MissingRequired,
-                            error.BadValue,
-                            error.InvalidPercentEncoding,
-                            error.BadRequest,
-                            => 400,
-                            else => 500,
-                        };
-                        writeSimple(self, &sw.interface, status, if (status == 500) "internal error" else "bad request");
-                        return;
-                    };
-
-                    res = dr.res;
-                    keep_alive = dr.keep_alive;
-                } else {
-                    const mw_ctx: EmptyMwCtx = .{};
-                    var reqv = EmptyReq.init(a, self.io, line, mw_ctx);
-                    defer reqv.deinit(a);
-                    reqv.parseHeaders(a, &sr.interface, Conf.max_header_bytes) catch |err| {
-                        if (err == error.EndOfStream or err == error.ReadFailed) return;
-                        const status: u16 = switch (err) {
-                            error.HeadersTooLarge => 431,
-                            else => 400,
-                        };
-                        writeSimple(self, &sw.interface, status, "bad request");
-                        return;
-                    };
-                    reqv.discardUnreadBody() catch {
-                        return;
-                    };
-                    keep_alive = reqv.keepAlive();
-                    res = response.Res.text(404, "not found");
+                    ) catch |err| return server.callErrorHandler(w, @TypeOf(err), err);
                 }
+            }.call;
+        }
 
-                response.write(&sw.interface, res, keep_alive, send_body) catch {
-                    return;
-                };
-                if (sw.interface.buffered().len != 0) {
-                    sw.interface.flush() catch {
-                        return;
-                    };
+        fn notFoundAction() RouteFn {
+            return struct {
+                fn call(server: *Self, r: *Io.Reader, w: *Io.Writer, line: request.RequestLine, a: Allocator) Action {
+                    var params_buf: [NotFoundCompiled.RouteParamCounts[0]][]u8 = undefined;
+                    return NotFoundCompiled.dispatch(
+                        if (Context == void) {} else server.ctx,
+                        server.io,
+                        a,
+                        r,
+                        w,
+                        line,
+                        0,
+                        params_buf[0..NotFoundCompiled.RouteParamCounts[0]],
+                        Conf.max_header_bytes,
+                    ) catch |err| return server.callErrorHandler(w, @TypeOf(err), err);
                 }
-
-                if (!keep_alive or res.close) return;
-            }
+            }.call;
         }
     };
 }
@@ -386,6 +397,95 @@ test "unknown path returns 404 and keeps connection" {
     group.await(io) catch {};
 }
 
+test "not_found_handler can parse query headers and body" {
+    const Handlers = struct {
+        fn ok(_: void, _: anytype) !response.Res {
+            return response.Res.text(200, "ok");
+        }
+
+        fn missing(req: anytype) !response.Res {
+            const name = req.queryParam(.name) orelse "world";
+            const host = req.header(.host) orelse "(no host)";
+            const body = try req.bodyAll(1024);
+            const out = try std.fmt.allocPrint(req.allocator(), "miss {s} {s} {s}", .{ name, host, body });
+            return response.Res.text(200, out);
+        }
+    };
+
+    const io = std.testing.io;
+    primeSocketBackend();
+
+    const SrvT = Server(.{
+        .routes = .{
+            router.get("/ok", Handlers.ok, .{}),
+        },
+        .not_found_handler = Handlers.missing,
+        .not_found_options = .{
+            .query = struct {
+                name: parse.Optional(parse.String),
+            },
+            .headers = struct {
+                host: parse.Optional(parse.String),
+            },
+        },
+    });
+
+    const addr0: Io.net.IpAddress = .{ .ip4 = Io.net.Ip4Address.loopback(0) };
+    var server = try SrvT.init(std.testing.allocator, io, addr0, {});
+    defer server.deinit();
+    const port: u16 = server.listener.socket.address.getPort();
+
+    var group: Io.Group = .init;
+    defer group.cancel(io);
+    try group.concurrent(io, SrvT.run, .{&server});
+
+    const addr: Io.net.IpAddress = .{ .ip4 = Io.net.Ip4Address.loopback(port) };
+    var stream = try Io.net.IpAddress.connect(&addr, io, .{ .mode = .stream });
+    defer stream.close(io);
+
+    var rb: [4 * 1024]u8 = undefined;
+    var wb: [512]u8 = undefined;
+    var sr = stream.reader(io, &rb);
+    var sw = stream.writer(io, &wb);
+
+    const req =
+        "POST /missing?name=zig HTTP/1.1\r\n" ++
+        "Host: example\r\n" ++
+        "Content-Length: 5\r\n" ++
+        "\r\n" ++
+        "hello";
+    try sw.interface.writeAll(req);
+    try sw.interface.flush();
+
+    const resp =
+        "HTTP/1.1 200 OK\r\n" ++
+        "connection: keep-alive\r\n" ++
+        "content-type: text/plain; charset=utf-8\r\n" ++
+        "content-length: 22\r\n" ++
+        "\r\n" ++
+        "miss zig example hello";
+    var got: [resp.len]u8 = undefined;
+    try sr.interface.readSliceAll(got[0..]);
+    try std.testing.expectEqualStrings(resp, got[0..]);
+
+    try sw.interface.writeAll("GET /ok HTTP/1.1\r\nHost: x\r\n\r\n");
+    try sw.interface.flush();
+
+    const ok_resp =
+        "HTTP/1.1 200 OK\r\n" ++
+        "connection: keep-alive\r\n" ++
+        "content-type: text/plain; charset=utf-8\r\n" ++
+        "content-length: 2\r\n" ++
+        "\r\n" ++
+        "ok";
+    var got_ok: [ok_resp.len]u8 = undefined;
+    try sr.interface.readSliceAll(got_ok[0..]);
+    try std.testing.expectEqualStrings(ok_resp, got_ok[0..]);
+
+    group.cancel(io);
+    group.await(io) catch {};
+}
+
 test "HEAD response omits body" {
     const Handlers = struct {
         fn ok(_: void, _: anytype) !response.Res {
@@ -490,6 +590,93 @@ test "bad request line returns 400" {
 
     var one: [1]u8 = undefined;
     try std.testing.expectError(error.EndOfStream, sr.interface.readSliceAll(one[0..]));
+
+    group.cancel(io);
+    group.await(io) catch {};
+}
+
+test "custom error_handler handles parse and route errors" {
+    const Handlers = struct {
+        fn boom(_: void, _: anytype) !response.Res {
+            return error.Boom;
+        }
+
+        fn onError(_: anytype, w: *Io.Writer, comptime ErrorSet: type, err: ErrorSet) router.Action {
+            const body = if (std.mem.eql(u8, @errorName(err), "Boom")) "custom boom" else "custom parse";
+            response.write(w, response.Res.text(499, body), false, true) catch unreachable;
+            w.flush() catch unreachable;
+            return .close;
+        }
+    };
+
+    const io = std.testing.io;
+    primeSocketBackend();
+
+    const SrvT = Server(.{
+        .routes = .{
+            router.get("/boom", Handlers.boom, .{}),
+        },
+        .error_handler = Handlers.onError,
+    });
+
+    const addr0: Io.net.IpAddress = .{ .ip4 = Io.net.Ip4Address.loopback(0) };
+    var server = try SrvT.init(std.testing.allocator, io, addr0, {});
+    defer server.deinit();
+    const port: u16 = server.listener.socket.address.getPort();
+
+    var group: Io.Group = .init;
+    defer group.cancel(io);
+    try group.concurrent(io, SrvT.run, .{&server});
+
+    const addr: Io.net.IpAddress = .{ .ip4 = Io.net.Ip4Address.loopback(port) };
+
+    {
+        var stream = try Io.net.IpAddress.connect(&addr, io, .{ .mode = .stream });
+        defer stream.close(io);
+
+        var rb: [4 * 1024]u8 = undefined;
+        var wb: [256]u8 = undefined;
+        var sr = stream.reader(io, &rb);
+        var sw = stream.writer(io, &wb);
+
+        try sw.interface.writeAll("GARBAGE\r\n\r\n");
+        try sw.interface.flush();
+
+        const resp =
+            "HTTP/1.1 499\r\n" ++
+            "connection: close\r\n" ++
+            "content-type: text/plain; charset=utf-8\r\n" ++
+            "content-length: 12\r\n" ++
+            "\r\n" ++
+            "custom parse";
+        var got: [resp.len]u8 = undefined;
+        try sr.interface.readSliceAll(got[0..]);
+        try std.testing.expectEqualStrings(resp, got[0..]);
+    }
+
+    {
+        var stream = try Io.net.IpAddress.connect(&addr, io, .{ .mode = .stream });
+        defer stream.close(io);
+
+        var rb: [4 * 1024]u8 = undefined;
+        var wb: [256]u8 = undefined;
+        var sr = stream.reader(io, &rb);
+        var sw = stream.writer(io, &wb);
+
+        try sw.interface.writeAll("GET /boom HTTP/1.1\r\nHost: x\r\n\r\n");
+        try sw.interface.flush();
+
+        const resp =
+            "HTTP/1.1 499\r\n" ++
+            "connection: close\r\n" ++
+            "content-type: text/plain; charset=utf-8\r\n" ++
+            "content-length: 11\r\n" ++
+            "\r\n" ++
+            "custom boom";
+        var got: [resp.len]u8 = undefined;
+        try sr.interface.readSliceAll(got[0..]);
+        try std.testing.expectEqualStrings(resp, got[0..]);
+    }
 
     group.cancel(io);
     group.await(io) catch {};

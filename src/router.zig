@@ -6,12 +6,19 @@ const Io = std.Io;
 const Res = @import("response.zig").Res;
 const parse = @import("parse.zig");
 const request = @import("request.zig");
+const response = @import("response.zig");
 const urldecode = @import("urldecode.zig");
 const util = @import("util.zig");
 
 comptime {
     @setEvalBranchQuota(30000);
 }
+
+pub const Action = enum {
+    @"continue",
+    close,
+    upgraded,
+};
 
 /// Route options passed at comptime to `route`, `get`, `post`, etc.
 ///
@@ -593,6 +600,38 @@ fn matchPattern(p: Pattern, path: []u8, params_out: [][]u8) bool {
     return path_i >= path.len + 1;
 }
 
+fn matchPatternNoCapture(p: Pattern, path: []u8) bool {
+    if (p.segments.len == 0) return path.len == 1 and path[0] == '/';
+    var path_i: usize = 0;
+    if (path.len == 0 or path[0] != '/') return false;
+    path_i = 1;
+
+    var seg_index: usize = 0;
+    while (seg_index < p.segments.len) : (seg_index += 1) {
+        const seg = p.segments[seg_index];
+        if (seg.kind == .glob) {
+            return true;
+        }
+
+        if (path_i > path.len) return false;
+        const next_slash = std.mem.indexOfScalarPos(u8, path, path_i, '/') orelse path.len;
+        const part = path[path_i..next_slash];
+        if (part.len == 0) return false;
+
+        switch (seg.kind) {
+            .lit => {
+                if (!std.mem.eql(u8, part, seg.lit)) return false;
+            },
+            .param => {},
+            .glob => unreachable,
+        }
+
+        path_i = next_slash + 1;
+    }
+
+    return path_i > path.len;
+}
+
 fn fnv1a64(bytes: []const u8) u64 {
     var h: u64 = 0xcbf29ce484222325;
     for (bytes) |b| {
@@ -672,7 +711,6 @@ pub fn Compiled(
     comptime Context: type,
     comptime routes: anytype,
     comptime global_middlewares: anytype,
-    comptime error_handler: anytype,
 ) type {
     const RoutesType = @TypeOf(routes);
     const routes_info = @typeInfo(RoutesType);
@@ -860,30 +898,6 @@ pub fn Compiled(
             return &@field(mw_ctx.*, name);
         }
 
-        fn errorHandlerCall(comptime handler: anytype, ctx: anytype, reqp: anytype, err: anyerror) !Res {
-            const Ht = @TypeOf(handler);
-            const info = @typeInfo(Ht);
-            if (info != .@"fn") @compileError("error_handler must be a function");
-            const params = info.@"fn".params;
-            if (params.len == 1) return @call(.auto, handler, .{err});
-            if (params.len == 2) {
-                if (@TypeOf(ctx) != void) {
-                    if (params[0].type) |pt| {
-                        if (pt == @TypeOf(ctx)) return @call(.auto, handler, .{ ctx, err });
-                    }
-                }
-                return @call(.auto, handler, .{ reqp, err });
-            }
-            if (params.len == 3) {
-                if (@TypeOf(ctx) == void) @compileError("error_handler with 3 params requires Context");
-                if (params[0].type) |pt| {
-                    if (pt != @TypeOf(ctx)) @compileError("error_handler first param must be *Context");
-                }
-                return @call(.auto, handler, .{ ctx, reqp, err });
-            }
-            @compileError("error_handler must be fn(err), fn(req, err), fn(ctx, err), or fn(ctx, req, err)");
-        }
-
         fn Chain(comptime MwTuple: anytype, comptime handler: anytype, comptime CtxPtr: type, comptime ReqT: type, comptime MwCtx: type) type {
             comptime {
                 @setEvalBranchQuota(50000);
@@ -928,15 +942,16 @@ pub fn Compiled(
         }
     };
 
-    const DispatchResult = struct {
-        res: Res,
-        keep_alive: bool,
-    };
-    const has_error_handler: bool = @TypeOf(error_handler) != @TypeOf(null);
-
     return struct {
         pub const RouteCount: usize = route_count;
         pub const MaxParams: usize = compiled.max_params;
+        pub const RouteParamCounts: [route_count]usize = comptime blk: {
+            var out: [route_count]usize = undefined;
+            inline for (route_fields, 0..) |_, i| {
+                out[i] = compiled.patterns[i].param_names.len;
+            }
+            break :blk out;
+        };
 
         fn pack4(s: []const u8, offset: usize) u32 {
             var v: u32 = 0;
@@ -991,7 +1006,7 @@ pub fn Compiled(
             return .{ .ids = out, .len = n };
         }
 
-        fn matchMethod(comptime mid: u8, path: []u8, params_out: [][]u8) ?u16 {
+        fn matchMethod(comptime mid: u8, path: []u8) ?u16 {
             const mid_usize: usize = mid;
             const Exact = ExactMap(exact_storage[mid_usize], exact_counts[mid_usize]);
             if (Exact.find(path)) |rid| return rid;
@@ -1001,7 +1016,7 @@ pub fn Compiled(
             while (j < n) : (j += 1) {
                 const rid = pattern_storage[mid_usize][j];
                 const p = compiled.patterns[rid];
-                if (matchPattern(p, path, params_out)) return rid;
+                if (matchPatternNoCapture(p, path)) return rid;
             }
             return null;
         }
@@ -1019,21 +1034,20 @@ pub fn Compiled(
             comptime offset: usize,
             method_token: []const u8,
             path: []u8,
-            params_out: [][]u8,
         ) ?u16 {
             if (ids.len == 0) return null;
             if (ids.len == 1) {
                 const mid: u8 = ids[0];
                 const name: []const u8 = method_names.arr[@as(usize, mid)];
                 if (!std.mem.eql(u8, method_token, name)) return null;
-                return matchMethod(mid, path, params_out);
+                return matchMethod(mid, path);
             }
 
             if (offset >= comptime maxLenForIds(ids)) {
                 inline for (ids) |mid| {
                     const name: []const u8 = method_names.arr[@as(usize, mid)];
                     if (std.mem.eql(u8, method_token, name)) {
-                        return matchMethod(mid, path, params_out);
+                        return matchMethod(mid, path);
                     }
                 }
                 return null;
@@ -1044,13 +1058,13 @@ pub fn Compiled(
             inline for (keys.keys[0..keys.len]) |kcase| {
                 if (key == kcase) {
                     const sub = comptime filterIds(ids, offset, kcase);
-                    return dispatchByMethod(sub.ids[0..sub.len], offset + 4, method_token, path, params_out);
+                    return dispatchByMethod(sub.ids[0..sub.len], offset + 4, method_token, path);
                 }
             }
             return null;
         }
 
-        pub fn match(method_token: []const u8, path: []u8, params_out: [][]u8) ?u16 {
+        pub fn match(method_token: []const u8, path: []u8) ?u16 {
             if (single_exact) {
                 if (eqLiteral(method_token, "HEAD")) {
                     if (eqLiteral(single_method, "HEAD") or eqLiteral(single_method, "GET")) {
@@ -1065,15 +1079,32 @@ pub fn Compiled(
             // HEAD fallback to GET.
             if (std.mem.eql(u8, method_token, "HEAD")) {
                 if (head_id) |hid| {
-                    if (matchMethod(hid, path, params_out)) |rid| return rid;
+                    if (matchMethod(hid, path)) |rid| return rid;
                 }
                 if (get_id) |gid| {
-                    return matchMethod(gid, path, params_out);
+                    return matchMethod(gid, path);
                 }
                 return null;
             }
 
-            return dispatchByMethod(all_method_ids[0..], 0, method_token, path, params_out);
+            return dispatchByMethod(all_method_ids[0..], 0, method_token, path);
+        }
+
+        fn captureParams(route_index: u16, path: []u8, params_out: [][]u8) bool {
+            inline for (route_fields, 0..) |_, i| {
+                if (route_index == i) {
+                    return matchPattern(compiled.patterns[i], path, params_out);
+                }
+            }
+            return false;
+        }
+
+        fn finishResponse(w: *Io.Writer, res: Res, keep_alive: bool, send_body: bool) !Action {
+            try response.write(w, res, keep_alive, send_body);
+            if (w.buffered().len != 0) {
+                try w.flush();
+            }
+            return if (!keep_alive or res.close) .close else .@"continue";
         }
 
         pub fn dispatch(
@@ -1081,11 +1112,12 @@ pub fn Compiled(
             io: Io,
             allocator: Allocator,
             r: *Io.Reader,
+            w: *Io.Writer,
             line: request.RequestLine,
             route_index: u16,
-            params_buf: []const []u8,
+            params_buf: [][]u8,
             max_header_bytes: usize,
-        ) !DispatchResult {
+        ) !Action {
             inline for (route_fields, 0..) |f, i| {
                 if (route_index == i) {
                     const rd = @field(routes, f.name);
@@ -1101,19 +1133,23 @@ pub fn Compiled(
                     const mw_ctx = initMiddlewareContext(MwTuple, MwCtx);
                     const ReqT = request.RequestPWithPattern(H, Q, P, p.param_names, MwCtx, rd.pattern, rd.method);
 
-                    // Copy all path params into a single arena allocation, then percent-decode in place.
-                    // We must not keep slices into the Reader's internal buffer, since subsequent reads
-                    // (headers/body) may overwrite earlier bytes. Doing this in one allocation avoids
-                    // per-param `dupe()` allocations.
                     var params_local: [p.param_names.len][]u8 = undefined;
+                    var reqv = ReqT.init(allocator, io, line, mw_ctx);
+                    reqv.reader = r;
+                    defer reqv.deinit(allocator);
+                    errdefer reqv.discardUnreadBody() catch {};
+                    if (p.param_names.len != 0) {
+                        std.debug.assert(captureParams(route_index, line.path, params_buf));
+                    }
+                    const params_local_slice: []const []u8 = if (p.param_names.len != 0) params_buf[0..p.param_names.len] else &.{};
                     if (p.param_names.len != 0) {
                         var total: usize = 0;
-                        inline for (p.param_names, 0..) |_, pidx| total += params_buf[pidx].len;
+                        inline for (p.param_names, 0..) |_, pidx| total += params_local_slice[pidx].len;
 
                         var backing = try allocator.alloc(u8, total);
                         var off: usize = 0;
                         inline for (p.param_names, 0..) |_, pidx| {
-                            const raw = params_buf[pidx];
+                            const raw = params_local_slice[pidx];
                             @memcpy(backing[off .. off + raw.len], raw);
                             var s = backing[off .. off + raw.len];
                             s = try urldecode.decodeInPlace(s, .path_param);
@@ -1121,13 +1157,8 @@ pub fn Compiled(
                             off += raw.len;
                         }
                     }
-
-                    var reqv = ReqT.init(allocator, io, line, mw_ctx);
-                    reqv.reader = r;
-                    defer reqv.deinit(allocator);
-                    errdefer reqv.discardUnreadBody() catch {};
-                    const params_local_slice: []const []u8 = if (p.param_names.len != 0) params_local[0..] else &.{};
-                    try reqv.parseParams(allocator, params_local_slice);
+                    const decoded_params: []const []u8 = if (p.param_names.len != 0) params_local[0..] else &.{};
+                    try reqv.parseParams(allocator, decoded_params);
                     try reqv.parseQuery(allocator);
 
                     try reqv.parseHeaders(allocator, r, max_header_bytes);
@@ -1135,26 +1166,15 @@ pub fn Compiled(
                     const CtxPtr = if (Context == void) void else *Context;
                     const ChainT = Dispatch.Chain(MwTuple, rd.handler, CtxPtr, ReqT, MwCtx);
                     const chain = ChainT{ .mw_ctx = &reqv.mw_ctx };
-                    const res = (if (Context == void)
-                        chain.call({}, &reqv)
+                    const res = if (Context == void)
+                        try chain.call({}, &reqv)
                     else
-                        chain.call(ctx, &reqv)) catch |err| {
-                        if (has_error_handler) {
-                            const eh = error_handler;
-                            const handled = if (Context == void)
-                                try Dispatch.errorHandlerCall(eh, {}, &reqv, err)
-                            else
-                                try Dispatch.errorHandlerCall(eh, ctx, &reqv, err);
-                            try reqv.discardUnreadBody();
-                            return .{ .res = handled, .keep_alive = reqv.keepAlive() };
-                        }
-                        return err;
-                    };
+                        try chain.call(ctx, &reqv);
 
                     // Ensure unread body is discarded before next request.
                     try reqv.discardUnreadBody();
-
-                    return .{ .res = res, .keep_alive = reqv.keepAlive() };
+                    const send_body = !(line.method.len == 4 and line.method[0] == 'H' and line.method[1] == 'E' and line.method[2] == 'A' and line.method[3] == 'D');
+                    return finishResponse(w, res, reqv.keepAlive(), send_body);
                 }
             }
             return error.BadRequest;
@@ -1164,6 +1184,21 @@ pub fn Compiled(
 
 test "compilePattern glob only at end" {
     _ = compilePattern("/a/*");
+}
+
+fn dispatchForTest(
+    comptime S: type,
+    ctx: anytype,
+    allocator: Allocator,
+    r: *Io.Reader,
+    line: request.RequestLine,
+    out: []u8,
+) !struct { action: Action, len: usize } {
+    var params: [S.MaxParams][]u8 = undefined;
+    var w = Io.Writer.fixed(out);
+    const rid = S.match(line.method, line.path).?;
+    const action = try S.dispatch(ctx, std.testing.io, allocator, r, &w, line, rid, params[0..S.MaxParams], 8 * 1024);
+    return .{ .action = action, .len = w.end };
 }
 
 test "router: exact + param + glob" {
@@ -1184,18 +1219,16 @@ test "router: exact + param + glob" {
                 return Res.text(200, "g");
             }
         }.h, .{}),
-    }, .{}, null);
-
-    var params: [S.MaxParams][]u8 = undefined;
+    }, .{});
 
     var p0 = "/a".*;
-    try std.testing.expectEqual(@as(?u16, 0), S.match("GET", p0[0..], params[0..S.MaxParams]));
+    try std.testing.expectEqual(@as(?u16, 0), S.match("GET", p0[0..]));
 
     var p1 = "/u/123".*;
-    try std.testing.expectEqual(@as(?u16, 1), S.match("GET", p1[0..], params[0..S.MaxParams]));
+    try std.testing.expectEqual(@as(?u16, 1), S.match("GET", p1[0..]));
 
     var p2 = "/g/anything/here".*;
-    try std.testing.expectEqual(@as(?u16, 2), S.match("GET", p2[0..], params[0..S.MaxParams]));
+    try std.testing.expectEqual(@as(?u16, 2), S.match("GET", p2[0..]));
 }
 
 test "router: trailing slash does not match exact literal" {
@@ -1205,11 +1238,10 @@ test "router: trailing slash does not match exact literal" {
                 return Res.text(200, "a");
             }
         }.h, .{}),
-    }, .{}, null);
+    }, .{});
 
-    var params: [S.MaxParams][]u8 = undefined;
     var p1 = "/a/".*;
-    try std.testing.expectEqual(@as(?u16, null), S.match("GET", p1[0..], params[0..S.MaxParams]));
+    try std.testing.expectEqual(@as(?u16, null), S.match("GET", p1[0..]));
 }
 
 test "router: HEAD falls back to GET handler" {
@@ -1219,11 +1251,10 @@ test "router: HEAD falls back to GET handler" {
                 return Res.text(200, "ok");
             }
         }.h, .{}),
-    }, .{}, null);
+    }, .{});
 
-    var params: [S.MaxParams][]u8 = undefined;
     var p = "/x".*;
-    try std.testing.expectEqual(@as(?u16, 0), S.match("HEAD", p[0..], params[0..S.MaxParams]));
+    try std.testing.expectEqual(@as(?u16, 0), S.match("HEAD", p[0..]));
 }
 
 test "middleware Needs: supports 'headers: type = ...' form" {
@@ -1246,7 +1277,7 @@ test "middleware Needs: supports 'headers: type = ...' form" {
                 return Res.text(200, "x");
             }
         }.h, .{}),
-    }, .{Mw}, null);
+    }, .{Mw});
 }
 
 test "dispatch: pipelined request discards unread content-length body" {
@@ -1261,13 +1292,12 @@ test "dispatch: pipelined request discards unread content-length body" {
                 return Res.text(200, "g");
             }
         }.h, .{}),
-    }, .{}, null);
+    }, .{});
 
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
 
-    var params: [S.MaxParams][]u8 = undefined;
     var r = Io.Reader.fixed(
         "POST /x HTTP/1.1\r\n" ++
             "Content-Length: 5\r\n" ++
@@ -1278,17 +1308,16 @@ test "dispatch: pipelined request discards unread content-length body" {
     );
 
     const line1 = try request.parseRequestLineBorrowed(&r, 8 * 1024);
-    const rid1 = S.match(line1.method, line1.path, params[0..S.MaxParams]).?;
-    const dr1 = try S.dispatch({}, std.testing.io, a, &r, line1, rid1, params[0..S.MaxParams], 8 * 1024);
-    try std.testing.expectEqual(@as(u16, 200), @intFromEnum(dr1.res.status));
-    try std.testing.expectEqualStrings("p", dr1.res.body);
-    try std.testing.expect(dr1.keep_alive);
+    var out1: [256]u8 = undefined;
+    const res1 = try dispatchForTest(S, {}, a, &r, line1, out1[0..]);
+    try std.testing.expectEqual(.@"continue", res1.action);
+    try std.testing.expect(std.mem.endsWith(u8, out1[0..res1.len], "\r\n\r\np"));
 
     const line2 = try request.parseRequestLineBorrowed(&r, 8 * 1024);
-    const rid2 = S.match(line2.method, line2.path, params[0..S.MaxParams]).?;
-    const dr2 = try S.dispatch({}, std.testing.io, a, &r, line2, rid2, params[0..S.MaxParams], 8 * 1024);
-    try std.testing.expectEqual(@as(u16, 200), @intFromEnum(dr2.res.status));
-    try std.testing.expectEqualStrings("g", dr2.res.body);
+    var out2: [256]u8 = undefined;
+    const res2 = try dispatchForTest(S, {}, a, &r, line2, out2[0..]);
+    try std.testing.expectEqual(.@"continue", res2.action);
+    try std.testing.expect(std.mem.endsWith(u8, out2[0..res2.len], "\r\n\r\ng"));
 }
 
 test "dispatch: pipelined request discards unread chunked body" {
@@ -1303,13 +1332,12 @@ test "dispatch: pipelined request discards unread chunked body" {
                 return Res.text(200, "g");
             }
         }.h, .{}),
-    }, .{}, null);
+    }, .{});
 
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
 
-    var params: [S.MaxParams][]u8 = undefined;
     var r = Io.Reader.fixed(
         "POST /x HTTP/1.1\r\n" ++
             "Transfer-Encoding: chunked\r\n" ++
@@ -1320,17 +1348,16 @@ test "dispatch: pipelined request discards unread chunked body" {
     );
 
     const line1 = try request.parseRequestLineBorrowed(&r, 8 * 1024);
-    const rid1 = S.match(line1.method, line1.path, params[0..S.MaxParams]).?;
-    const dr1 = try S.dispatch({}, std.testing.io, a, &r, line1, rid1, params[0..S.MaxParams], 8 * 1024);
-    try std.testing.expectEqual(@as(u16, 200), @intFromEnum(dr1.res.status));
-    try std.testing.expectEqualStrings("p", dr1.res.body);
-    try std.testing.expect(dr1.keep_alive);
+    var out1: [256]u8 = undefined;
+    const res1 = try dispatchForTest(S, {}, a, &r, line1, out1[0..]);
+    try std.testing.expectEqual(.@"continue", res1.action);
+    try std.testing.expect(std.mem.endsWith(u8, out1[0..res1.len], "\r\n\r\np"));
 
     const line2 = try request.parseRequestLineBorrowed(&r, 8 * 1024);
-    const rid2 = S.match(line2.method, line2.path, params[0..S.MaxParams]).?;
-    const dr2 = try S.dispatch({}, std.testing.io, a, &r, line2, rid2, params[0..S.MaxParams], 8 * 1024);
-    try std.testing.expectEqual(@as(u16, 200), @intFromEnum(dr2.res.status));
-    try std.testing.expectEqualStrings("g", dr2.res.body);
+    var out2: [256]u8 = undefined;
+    const res2 = try dispatchForTest(S, {}, a, &r, line2, out2[0..]);
+    try std.testing.expectEqual(.@"continue", res2.action);
+    try std.testing.expect(std.mem.endsWith(u8, out2[0..res2.len], "\r\n\r\ng"));
 }
 
 // Upgrade-specific route tests are intentionally omitted while upgrade support
@@ -1343,22 +1370,21 @@ test "dispatch: path param percent-decodes" {
                 return Res.text(200, req.paramValue(.id));
             }
         }.h, .{}),
-    }, .{}, null);
+    }, .{});
 
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
 
-    var params: [S.MaxParams][]u8 = undefined;
     var r = Io.Reader.fixed(
         "GET /u/a%2Fb HTTP/1.1\r\n" ++
             "\r\n",
     );
 
     const line = try request.parseRequestLineBorrowed(&r, 8 * 1024);
-    const rid = S.match(line.method, line.path, params[0..S.MaxParams]).?;
-    const dr = try S.dispatch({}, std.testing.io, a, &r, line, rid, params[0..S.MaxParams], 8 * 1024);
-    try std.testing.expectEqualStrings("a/b", dr.res.body);
+    var out: [256]u8 = undefined;
+    const res = try dispatchForTest(S, {}, a, &r, line, out[0..]);
+    try std.testing.expect(std.mem.endsWith(u8, out[0..res.len], "\r\n\r\na/b"));
 }
 
 test "dispatch: typed path params via opts.params" {
@@ -1373,18 +1399,17 @@ test "dispatch: typed path params via opts.params" {
                 id: parse.Int(u32),
             },
         }),
-    }, .{}, null);
+    }, .{});
 
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
 
-    var params: [S.MaxParams][]u8 = undefined;
     var r = Io.Reader.fixed("GET /u/42 HTTP/1.1\r\n\r\n");
     const line = try request.parseRequestLineBorrowed(&r, 8 * 1024);
-    const rid = S.match(line.method, line.path, params[0..S.MaxParams]).?;
-    const dr = try S.dispatch({}, std.testing.io, a, &r, line, rid, params[0..S.MaxParams], 8 * 1024);
-    try std.testing.expectEqualStrings("42", dr.res.body);
+    var out: [256]u8 = undefined;
+    const res = try dispatchForTest(S, {}, a, &r, line, out[0..]);
+    try std.testing.expect(std.mem.endsWith(u8, out[0..res.len], "\r\n\r\n42"));
 }
 
 test "dispatch: typed path params bad value errors" {
@@ -1398,17 +1423,20 @@ test "dispatch: typed path params bad value errors" {
                 id: parse.Int(u32),
             },
         }),
-    }, .{}, null);
+    }, .{});
 
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
 
-    var params: [S.MaxParams][]u8 = undefined;
     var r = Io.Reader.fixed("GET /u/nope HTTP/1.1\r\n\r\n");
     const line = try request.parseRequestLineBorrowed(&r, 8 * 1024);
-    const rid = S.match(line.method, line.path, params[0..S.MaxParams]).?;
-    try std.testing.expectError(error.BadValue, S.dispatch({}, std.testing.io, a, &r, line, rid, params[0..S.MaxParams], 8 * 1024));
+    var out: [256]u8 = undefined;
+    _ = &out;
+    var params: [S.MaxParams][]u8 = undefined;
+    var w = Io.Writer.fixed(out[0..]);
+    const rid = S.match(line.method, line.path).?;
+    try std.testing.expectError(error.BadValue, S.dispatch({}, std.testing.io, a, &r, &w, line, rid, params[0..S.MaxParams], 8 * 1024));
 }
 
 test "dispatch: path params allocate once" {
@@ -1472,20 +1500,19 @@ test "dispatch: path params allocate once" {
                 d: parse.Int(u32),
             },
         }),
-    }, .{}, null);
+    }, .{});
 
-    var params: [S.MaxParams][]u8 = undefined;
     var r = Io.Reader.fixed("GET /u/1/2/3/4 HTTP/1.1\r\n\r\n");
     const line = try request.parseRequestLineBorrowed(&r, 8 * 1024);
-    const rid = S.match(line.method, line.path, params[0..S.MaxParams]).?;
 
     var backing: [1024]u8 = undefined;
     var fba = std.heap.FixedBufferAllocator.init(&backing);
     var ca: CountingAllocator = .{ .inner = fba.allocator() };
     const a = ca.allocator();
 
-    const dr = try S.dispatch({}, std.testing.io, a, &r, line, rid, params[0..S.MaxParams], 8 * 1024);
-    try std.testing.expectEqualStrings("ok", dr.res.body);
+    var out: [256]u8 = undefined;
+    const res = try dispatchForTest(S, {}, a, &r, line, out[0..]);
+    try std.testing.expect(std.mem.endsWith(u8, out[0..res.len], "\r\n\r\nok"));
     try std.testing.expectEqual(@as(usize, 1), ca.alloc_calls);
 }
 
@@ -1510,18 +1537,17 @@ test "dispatch: middleware Needs.params works" {
                 return Res.text(200, body);
             }
         }.h, .{}),
-    }, .{RequireId}, null);
+    }, .{RequireId});
 
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
 
-    var params: [S.MaxParams][]u8 = undefined;
     var r = Io.Reader.fixed("GET /u/7 HTTP/1.1\r\n\r\n");
     const line = try request.parseRequestLineBorrowed(&r, 8 * 1024);
-    const rid = S.match(line.method, line.path, params[0..S.MaxParams]).?;
-    const dr = try S.dispatch({}, std.testing.io, a, &r, line, rid, params[0..S.MaxParams], 8 * 1024);
-    try std.testing.expectEqualStrings("7", dr.res.body);
+    var out: [256]u8 = undefined;
+    const res = try dispatchForTest(S, {}, a, &r, line, out[0..]);
+    try std.testing.expect(std.mem.endsWith(u8, out[0..res.len], "\r\n\r\n7"));
 }
 
 test "middleware data: set in middleware and handler access" {
@@ -1543,47 +1569,39 @@ test "middleware data: set in middleware and handler access" {
                 return Res.text(200, if (data.user_id == 8) "ok" else "bad");
             }
         }.h, .{}),
-    }, .{Auth}, null);
+    }, .{Auth});
 
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
 
-    var params: [S.MaxParams][]u8 = undefined;
     var r = Io.Reader.fixed("GET /x HTTP/1.1\r\n\r\n");
     const line = try request.parseRequestLineBorrowed(&r, 8 * 1024);
-    const rid = S.match(line.method, line.path, params[0..S.MaxParams]).?;
-    const dr = try S.dispatch({}, std.testing.io, a, &r, line, rid, params[0..S.MaxParams], 8 * 1024);
-    try std.testing.expectEqualStrings("ok", dr.res.body);
+    var out: [256]u8 = undefined;
+    const res = try dispatchForTest(S, {}, a, &r, line, out[0..]);
+    try std.testing.expect(std.mem.endsWith(u8, out[0..res.len], "\r\n\r\nok"));
 }
 
-test "error handler: handler error returns response" {
-    const ErrHandler = struct {
-        fn h(err: anyerror) !Res {
-            _ = @errorName(err);
-            return Res.text(555, "handled");
-        }
-    };
-
+test "dispatch: handler error propagates" {
     const S = Compiled(void, .{
         get("/x", struct {
             fn h(_: void, _: anytype) !Res {
                 return error.Boom;
             }
         }.h, .{}),
-    }, .{}, ErrHandler.h);
+    }, .{});
 
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
 
-    var params: [S.MaxParams][]u8 = undefined;
     var r = Io.Reader.fixed("GET /x HTTP/1.1\r\n\r\n");
     const line = try request.parseRequestLineBorrowed(&r, 8 * 1024);
-    const rid = S.match(line.method, line.path, params[0..S.MaxParams]).?;
-    const dr = try S.dispatch({}, std.testing.io, a, &r, line, rid, params[0..S.MaxParams], 8 * 1024);
-    try std.testing.expectEqual(@as(u16, 555), @intFromEnum(dr.res.status));
-    try std.testing.expectEqualStrings("handled", dr.res.body);
+    var out: [256]u8 = undefined;
+    var params: [S.MaxParams][]u8 = undefined;
+    var w = Io.Writer.fixed(out[0..]);
+    const rid = S.match(line.method, line.path).?;
+    try std.testing.expectError(error.Boom, S.dispatch({}, std.testing.io, a, &r, &w, line, rid, params[0..S.MaxParams], 8 * 1024));
 }
 
 test "fuzz: router match does not crash" {
@@ -1603,7 +1621,7 @@ test "fuzz: router match does not crash" {
                 return Res.text(200, "c");
             }
         }.h, .{}),
-    }, .{}, null);
+    }, .{});
 
     const corpus = &.{ "GET", "POST", "HEAD", "BAD" };
     try std.testing.fuzz({}, struct {
@@ -1624,7 +1642,7 @@ test "fuzz: router match does not crash" {
             smith.bytes(path_buf[0..plen]);
             path_buf[0] = '/';
 
-            _ = S.match(method_buf[0..mlen], path_buf[0..plen], params[0..S.MaxParams]);
+            _ = S.match(method_buf[0..mlen], path_buf[0..plen]);
         }
     }.testOne, .{ .corpus = corpus });
 }
@@ -1636,18 +1654,17 @@ test "handler: zero-arg handler supported" {
                 return Res.text(200, "x");
             }
         }.h, .{}),
-    }, .{}, null);
+    }, .{});
 
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
 
-    var params: [S.MaxParams][]u8 = undefined;
     var r = Io.Reader.fixed("GET /a HTTP/1.1\r\n\r\n");
     const line = try request.parseRequestLineBorrowed(&r, 8 * 1024);
-    const rid = S.match(line.method, line.path, params[0..S.MaxParams]).?;
-    const dr = try S.dispatch({}, std.testing.io, a, &r, line, rid, params[0..S.MaxParams], 8 * 1024);
-    try std.testing.expectEqualStrings("x", dr.res.body);
+    var out: [256]u8 = undefined;
+    const res = try dispatchForTest(S, {}, a, &r, line, out[0..]);
+    try std.testing.expect(std.mem.endsWith(u8, out[0..res.len], "\r\n\r\nx"));
 }
 
 test "handler: ctx-only handler supported" {
@@ -1658,19 +1675,18 @@ test "handler: ctx-only handler supported" {
                 return Res.text(200, if (ctx.v == 1) "ok" else "bad");
             }
         }.h, .{}),
-    }, .{}, null);
+    }, .{});
 
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
 
     var ctx: Ctx = .{ .v = 1 };
-    var params: [S.MaxParams][]u8 = undefined;
     var r = Io.Reader.fixed("GET /a HTTP/1.1\r\n\r\n");
     const line = try request.parseRequestLineBorrowed(&r, 8 * 1024);
-    const rid = S.match(line.method, line.path, params[0..S.MaxParams]).?;
-    const dr = try S.dispatch(&ctx, std.testing.io, a, &r, line, rid, params[0..S.MaxParams], 8 * 1024);
-    try std.testing.expectEqualStrings("ok", dr.res.body);
+    var out: [256]u8 = undefined;
+    const res = try dispatchForTest(S, &ctx, a, &r, line, out[0..]);
+    try std.testing.expect(std.mem.endsWith(u8, out[0..res.len], "\r\n\r\nok"));
 }
 
 test "dispatch: invalid path percent-encoding rejected" {
@@ -1680,15 +1696,17 @@ test "dispatch: invalid path percent-encoding rejected" {
                 return Res.text(200, "x");
             }
         }.h, .{}),
-    }, .{}, null);
+    }, .{});
 
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
 
-    var params: [S.MaxParams][]u8 = undefined;
     var r = Io.Reader.fixed("GET /u/%ZZ HTTP/1.1\r\n\r\n");
     const line = try request.parseRequestLineBorrowed(&r, 8 * 1024);
-    const rid = S.match(line.method, line.path, params[0..S.MaxParams]).?;
-    try std.testing.expectError(error.InvalidPercentEncoding, S.dispatch({}, std.testing.io, a, &r, line, rid, params[0..S.MaxParams], 8 * 1024));
+    var out: [256]u8 = undefined;
+    var params: [S.MaxParams][]u8 = undefined;
+    var w = Io.Writer.fixed(out[0..]);
+    const rid = S.match(line.method, line.path).?;
+    try std.testing.expectError(error.InvalidPercentEncoding, S.dispatch({}, std.testing.io, a, &r, &w, line, rid, params[0..S.MaxParams], 8 * 1024));
 }

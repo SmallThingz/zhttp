@@ -13,7 +13,6 @@
 //! - `.query: type`      Query capture schema (keys match exactly)
 //! - `.params: type`     Path param capture schema (for `{name}` segments; defaults to strings)
 //! - `.middlewares: tuple` Per-route middleware types
-//! - `.upgrade: type`    Optional deferred-upgrade runner type
 //!
 //! Server definition fields (for `Server(.{ ... })`):
 //! - `.Context: type` (optional) user context passed to handlers/middlewares
@@ -30,32 +29,6 @@
 //! - `fn(ctx: *Context) !zhttp.Res`
 //! - `fn(ctx: *Context, req: anytype) !zhttp.Res`
 //!
-//! Upgrade-enabled routes
-//!
-//! When a route declares `.upgrade = WsRunner`, the normal HTTP handler still
-//! runs first. If that handler returns `101 Switching Protocols`, `zhttp`
-//! writes the response, unwinds the HTTP parser stack, and then calls
-//! `WsRunner.run(...)` with the raw `std.Io.net.Stream`.
-//! At that point, stream ownership has transferred to `WsRunner`.
-//! The HTTP-side stack frame is gone before `WsRunner.run(...)` begins.
-//!
-//! For upgrade routes, the request gets an `upgrade_data` field:
-//! - type is `WsRunner.Data` when declared, otherwise `void`
-//! - initialized with `WsRunner.initData()` when present, otherwise zeroed
-//!
-//! `WsRunner` must declare `pub fn run(...) void` or `pub fn run(...) !void`
-//! and may optionally declare:
-//! - `pub const Data = type`
-//! - `pub fn initData() Data`
-//! - `pub fn deinitData(gpa: Allocator, data: *Data) void`
-//!
-//! Post-upgrade error surface:
-//! - after takeover, `zhttp` does not use the HTTP `error_handler`
-//! - if `WsRunner.run(...)` returns an error, `zhttp` does not automatically
-//!   send websocket close `1011`
-//! - if you want a graceful websocket close on runner failure, the runner must
-//!   write that close frame itself before returning
-//! - stream lifecycle is runner-owned after takeover
 const std = @import("std");
 const builtin = @import("builtin");
 pub const parse = @import("parse.zig");

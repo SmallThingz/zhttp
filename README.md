@@ -37,17 +37,17 @@ fn hello(req: anytype) !zhttp.Res {
     return zhttp.Res.text(200, body);
 }
 
-pub fn main(init: std.process.Init) !void {
-    const App = zhttp.Server(.{
-        .routes = .{
-            zhttp.get("/hello", hello, .{
-                .query = struct {
-                    name: zhttp.parse.Optional(zhttp.parse.String),
-                },
-            }),
-        },
-    });
+const App = zhttp.Server(.{
+    .routes = .{
+        zhttp.get("/hello", hello, .{
+            .query = struct {
+                name: zhttp.parse.Optional(zhttp.parse.String),
+            },
+        }),
+    },
+});
 
+pub fn main(init: std.process.Init) !void {
     const addr: std.Io.net.IpAddress = .{ .ip4 = std.Io.net.Ip4Address.loopback(8080) };
     var server = try App.init(init.gpa, init.io, addr, {});
     defer server.deinit();

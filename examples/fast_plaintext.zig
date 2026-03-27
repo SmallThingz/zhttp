@@ -32,6 +32,12 @@ fn plaintext() !zhttp.Res {
     };
 }
 
+const SrvT = zhttp.Server(.{
+    .routes = .{
+        zhttp.get("/plaintext", plaintext, .{}),
+    },
+});
+
 pub fn main(init: std.process.Init) !void {
     var port: u16 = 8080;
     var smoke: bool = false;
@@ -60,12 +66,6 @@ pub fn main(init: std.process.Init) !void {
         }
         return error.UnknownArg;
     }
-
-    const SrvT = zhttp.Server(.{
-        .routes = .{
-            zhttp.get("/plaintext", plaintext, .{}),
-        },
-    });
 
     if (smoke) {
         var threaded = std.Io.Threaded.init(init.gpa, .{});

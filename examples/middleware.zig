@@ -44,6 +44,15 @@ fn private() !zhttp.Res {
     return zhttp.Res.text(200, "private\n");
 }
 
+const SrvT = zhttp.Server(.{
+    .routes = .{
+        zhttp.get("/public", public, .{}),
+        zhttp.get("/private", private, .{
+            .middlewares = .{Auth},
+        }),
+    },
+});
+
 pub fn main(init: std.process.Init) !void {
     var port: u16 = 8080;
     var smoke: bool = false;
@@ -72,15 +81,6 @@ pub fn main(init: std.process.Init) !void {
         }
         return error.UnknownArg;
     }
-
-    const SrvT = zhttp.Server(.{
-        .routes = .{
-            zhttp.get("/public", public, .{}),
-            zhttp.get("/private", private, .{
-                .middlewares = .{Auth},
-            }),
-        },
-    });
 
     if (smoke) {
         var threaded = std.Io.Threaded.init(init.gpa, .{});

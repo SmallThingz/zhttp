@@ -35,6 +35,25 @@ fn user(req: anytype) !zhttp.Res {
     return zhttp.Res.text(200, body);
 }
 
+const SrvT = zhttp.Server(.{
+    .routes = .{
+        zhttp.get("/health", health, .{}),
+        zhttp.get("/hello", hello, .{
+            .query = struct {
+                name: zhttp.parse.Optional(zhttp.parse.String),
+            },
+        }),
+        zhttp.get("/users/{id}", user, .{
+            .headers = struct {
+                host: zhttp.parse.Optional(zhttp.parse.String),
+            },
+            .params = struct {
+                id: zhttp.parse.Int(u64),
+            },
+        }),
+    },
+});
+
 pub fn main(init: std.process.Init) !void {
     var port: u16 = 8080;
     var smoke: bool = false;
@@ -63,25 +82,6 @@ pub fn main(init: std.process.Init) !void {
         }
         return error.UnknownArg;
     }
-
-    const SrvT = zhttp.Server(.{
-        .routes = .{
-            zhttp.get("/health", health, .{}),
-            zhttp.get("/hello", hello, .{
-                .query = struct {
-                    name: zhttp.parse.Optional(zhttp.parse.String),
-                },
-            }),
-            zhttp.get("/users/{id}", user, .{
-                .headers = struct {
-                    host: zhttp.parse.Optional(zhttp.parse.String),
-                },
-                .params = struct {
-                    id: zhttp.parse.Int(u64),
-                },
-            }),
-        },
-    });
 
     if (smoke) {
         var threaded = std.Io.Threaded.init(init.gpa, .{});

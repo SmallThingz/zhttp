@@ -53,6 +53,22 @@ fn headerContains(head: []const u8, allocator: std.mem.Allocator, needle_lower: 
     return std.mem.indexOf(u8, lower, needle_lower) != null;
 }
 
+const SrvT = zhttp.Server(.{
+    .middlewares = .{
+        zhttp.middleware.Logger(.{}),
+        zhttp.middleware.SecurityHeaders(.{}),
+        zhttp.middleware.Cors(.{ .origins = &.{"http://example.com"} }),
+        zhttp.middleware.Etag(.{}),
+        zhttp.middleware.RequestId(.{ .name = .rid }),
+        zhttp.middleware.Timeout(.{ .ms = 5000 }),
+        zhttp.middleware.Compression(.{ .min_size = 999999 }),
+        zhttp.middleware.Static(.{ .dir = "examples/static", .mount = "/static" }),
+    },
+    .routes = .{
+        zhttp.get("/public", public, .{}),
+    },
+});
+
 pub fn main(init: std.process.Init) !void {
     var port: u16 = 8080;
     var smoke: bool = false;
@@ -81,22 +97,6 @@ pub fn main(init: std.process.Init) !void {
         }
         return error.UnknownArg;
     }
-
-    const SrvT = zhttp.Server(.{
-        .middlewares = .{
-            zhttp.middleware.Logger(.{}),
-            zhttp.middleware.SecurityHeaders(.{}),
-            zhttp.middleware.Cors(.{ .origins = &.{"http://example.com"} }),
-            zhttp.middleware.Etag(.{}),
-            zhttp.middleware.RequestId(.{ .name = .rid }),
-            zhttp.middleware.Timeout(.{ .ms = 5000 }),
-            zhttp.middleware.Compression(.{ .min_size = 999999 }),
-            zhttp.middleware.Static(.{ .dir = "examples/static", .mount = "/static" }),
-        },
-        .routes = .{
-            zhttp.get("/public", public, .{}),
-        },
-    });
 
     if (smoke) {
         var threaded = std.Io.Threaded.init(init.gpa, .{});

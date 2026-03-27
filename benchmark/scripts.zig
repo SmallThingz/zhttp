@@ -13,7 +13,7 @@ pub const BenchConfig = struct {
     quiet: bool = false,
 };
 
-fn trimCR(line: []const u8) []const u8 {
+pub fn trimCR(line: []const u8) []const u8 {
     if (line.len != 0 and line[line.len - 1] == '\r') return line[0 .. line.len - 1];
     return line;
 }

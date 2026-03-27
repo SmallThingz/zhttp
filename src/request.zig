@@ -65,25 +65,6 @@ pub const RequestLine = struct {
     query: []u8,
 };
 
-fn hasOptionalFn(comptime f: anytype) bool {
-    return @TypeOf(f) != @TypeOf(null);
-}
-
-fn initUpgradeDataValue(comptime Data: type, comptime init_fn: anytype) Data {
-    if (Data == void) return {};
-    if (comptime hasOptionalFn(init_fn)) {
-        return @call(.always_inline, init_fn, .{});
-    }
-    return std.mem.zeroInit(Data, .{});
-}
-
-fn deinitUpgradeDataValue(comptime Data: type, comptime deinit_fn: anytype, a: Allocator, data: *Data) void {
-    if (Data == void) return;
-    if (comptime hasOptionalFn(deinit_fn)) {
-        @call(.always_inline, deinit_fn, .{ a, data });
-    }
-}
-
 pub fn parseRequestLineBorrowed(r: *Io.Reader, max_line_len: usize) ParseLineError!RequestLine {
     var line0_incl: []u8 = undefined;
     const available = r.peekGreedy(1) catch |err| switch (err) {
@@ -204,13 +185,9 @@ fn RequestPWithPatternExt(
     comptime MwCtx: type,
     comptime route_pattern: []const u8,
     comptime method_name: []const u8,
-    comptime UpgradeData: type,
-    comptime upgrade_init: anytype,
-    comptime upgrade_deinit: anytype,
 ) type {
     const HeaderLookup = parse.Lookup(Headers, .header);
     const QueryLookup = parse.Lookup(Query, .query);
-    const has_upgrade_data = UpgradeData != void;
 
     const ParamsEffective = comptime blk: {
         const Provided = Params;
@@ -254,8 +231,6 @@ fn RequestPWithPatternExt(
         headers: Headers = parse.emptyStruct(Headers),
         query: Query = parse.emptyStruct(Query),
         params: ParamsEffective = parse.emptyStruct(ParamsEffective),
-        upgrade_data: UpgradeData = initUpgradeDataValue(UpgradeData, upgrade_init),
-        upgrade_data_transferred: if (has_upgrade_data) bool else void = if (has_upgrade_data) false else {},
 
         const Self = @This();
 
@@ -282,11 +257,6 @@ fn RequestPWithPatternExt(
             parse.destroyStruct(&self.headers, a);
             parse.destroyStruct(&self.query, a);
             parse.destroyStruct(&self.params, a);
-            if (comptime has_upgrade_data) {
-                if (!self.upgrade_data_transferred) {
-                    deinitUpgradeDataValue(UpgradeData, upgrade_deinit, a, &self.upgrade_data);
-                }
-            }
         }
 
         /// Get a captured header by field name, e.g. `req.header(.host)`.
@@ -315,10 +285,6 @@ fn RequestPWithPatternExt(
         /// Get a const pointer to middleware data by name, e.g. `req.middlewareDataConst(.auth)`.
         pub fn middlewareDataConst(self: *const Self, comptime name: @EnumLiteral()) *const middlewareContextFieldType(MwCtx, name) {
             return &@field(self.mw_ctx, middlewareContextFieldName(MwCtx, name));
-        }
-
-        pub fn markUpgradeDataTransferred(self: *Self) void {
-            if (comptime has_upgrade_data) self.upgrade_data_transferred = true;
         }
 
         pub fn keepAlive(self: *const Self) bool {
@@ -639,33 +605,7 @@ pub fn RequestPWithPattern(
     comptime route_pattern: []const u8,
     comptime method_name: []const u8,
 ) type {
-    return RequestPWithPatternExt(Headers, Query, Params, param_names, MwCtx, route_pattern, method_name, void, null, null);
-}
-
-pub fn RequestPWithPatternUpgrade(
-    comptime Headers: type,
-    comptime Query: type,
-    comptime Params: type,
-    comptime param_names: []const []const u8,
-    comptime MwCtx: type,
-    comptime route_pattern: []const u8,
-    comptime method_name: []const u8,
-    comptime UpgradeData: type,
-    comptime upgrade_init: anytype,
-    comptime upgrade_deinit: anytype,
-) type {
-    return RequestPWithPatternExt(
-        Headers,
-        Query,
-        Params,
-        param_names,
-        MwCtx,
-        route_pattern,
-        method_name,
-        UpgradeData,
-        upgrade_init,
-        upgrade_deinit,
-    );
+    return RequestPWithPatternExt(Headers, Query, Params, param_names, MwCtx, route_pattern, method_name);
 }
 
 pub fn Request(comptime Headers: type, comptime Query: type, comptime param_names: []const []const u8, comptime MwCtx: type) type {

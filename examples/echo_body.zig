@@ -26,6 +26,12 @@ fn echo(_: void, req: anytype) !zhttp.Res {
     return zhttp.Res.text(200, body);
 }
 
+const SrvT = zhttp.Server(.{
+    .routes = .{
+        zhttp.post("/echo", echo, .{}),
+    },
+});
+
 pub fn main(init: std.process.Init) !void {
     var port: u16 = 8080;
     var smoke: bool = false;
@@ -54,12 +60,6 @@ pub fn main(init: std.process.Init) !void {
         }
         return error.UnknownArg;
     }
-
-    const SrvT = zhttp.Server(.{
-        .routes = .{
-            zhttp.post("/echo", echo, .{}),
-        },
-    });
 
     if (smoke) {
         var threaded = std.Io.Threaded.init(init.gpa, .{});

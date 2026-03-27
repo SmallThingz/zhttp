@@ -6,23 +6,8 @@ const common = @import("common.zig");
 
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
-const WsHeaders = ws.WsHeaders;
-const Auth = ws.Auth;
 const WsRunner = ws.WsRunner;
-const upgrade = ws.upgrade;
-
-pub const SrvT = zhttp.Server(.{
-    .routes = .{
-        zhttp.get("/ws", upgrade, .{
-            .headers = WsHeaders,
-            .middlewares = .{
-                Auth,
-                ws.Origin,
-            },
-            .upgrade = WsRunner,
-        }),
-    },
-});
+pub const SrvT = ws.ServerWith(WsRunner, true);
 
 fn usage() void {
     std.debug.print(

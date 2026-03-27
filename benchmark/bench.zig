@@ -83,11 +83,6 @@ fn parseBoolFlag(arg: []const u8, comptime name: []const u8) bool {
     return std.mem.eql(u8, arg, "--" ++ name);
 }
 
-fn trimCR(line: []const u8) []const u8 {
-    if (line.len != 0 and line[line.len - 1] == '\r') return line[0 .. line.len - 1];
-    return line;
-}
-
 fn trimLeftSpaceTab(s: []const u8) []const u8 {
     var i: usize = 0;
     while (i < s.len and (s[i] == ' ' or s[i] == '\t')) : (i += 1) {}
@@ -136,7 +131,7 @@ fn discoverFixedResponseBytes(io: Io, address: std.Io.net.IpAddress, request_byt
         };
         header_bytes += line0_incl.len;
         const line0 = line0_incl[0 .. line0_incl.len - 1];
-        const line = trimCR(line0);
+        const line = scripts.trimCR(line0);
         if (line.len == 0) break;
 
         if (asciiStartsWithIgnoreCase(line, "content-length:")) {

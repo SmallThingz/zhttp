@@ -11,6 +11,10 @@ pub const Res = struct {
     headers: []const Header = &.{},
     body: []const u8 = "",
     close: bool = false,
+    format_connection_header: bool = true,
+    format_content_length: bool = true,
+    format_send_body: bool = true,
+    format_body_len_override: ?usize = null,
 
     pub fn text(status: u16, body: []const u8) Res {
         return .{
@@ -18,6 +22,44 @@ pub const Res = struct {
             .headers = &.{.{ .name = "content-type", .value = "text/plain; charset=utf-8" }},
             .body = body,
         };
+    }
+
+    pub fn format(self: Res, w: *std.Io.Writer) !void {
+        try writeStatusLine(w, self.status);
+
+        if (self.format_connection_header) {
+            const connection_line: []const u8 = if (!self.close) "connection: keep-alive\r\n" else "connection: close\r\n";
+            try w.writeAll(connection_line);
+        }
+
+        for (self.headers) |h| {
+            try w.writeAll(h.name);
+            try w.writeAll(": ");
+            try w.writeAll(h.value);
+            try w.writeAll("\r\n");
+        }
+
+        if (self.format_content_length) {
+            var len_buf: [32]u8 = undefined;
+            const body_len: usize = self.format_body_len_override orelse self.body.len;
+            const len_str = std.fmt.bufPrint(&len_buf, "{d}", .{body_len}) catch unreachable;
+            var line_buf: [64]u8 = undefined;
+            var line_len: usize = 0;
+            const prefix = "content-length: ";
+            @memcpy(line_buf[line_len .. line_len + prefix.len], prefix);
+            line_len += prefix.len;
+            @memcpy(line_buf[line_len .. line_len + len_str.len], len_str);
+            line_len += len_str.len;
+            @memcpy(line_buf[line_len .. line_len + 4], "\r\n\r\n");
+            line_len += 4;
+            try w.writeAll(line_buf[0..line_len]);
+        } else {
+            try w.writeAll("\r\n");
+        }
+
+        if (self.format_send_body and self.body.len != 0) {
+            try w.writeAll(self.body);
+        }
     }
 };
 
@@ -36,50 +78,22 @@ pub fn write(
     keep_alive: bool,
     send_body: bool,
 ) !void {
-    try writeStatusLine(w, res.status);
-
-    const connection_line: []const u8 = if (keep_alive and !res.close) "connection: keep-alive\r\n" else "connection: close\r\n";
-    try w.writeAll(connection_line);
-
-    // Application-provided headers.
-    for (res.headers) |h| {
-        try w.writeAll(h.name);
-        try w.writeAll(": ");
-        try w.writeAll(h.value);
-        try w.writeAll("\r\n");
-    }
-
-    // Always emit Content-Length (no chunked responses for now).
-    var len_buf: [32]u8 = undefined;
-    const body_len: usize = res.body.len;
-    const len_str = std.fmt.bufPrint(&len_buf, "{d}", .{body_len}) catch unreachable;
-    var line_buf: [64]u8 = undefined;
-    var line_len: usize = 0;
-    const prefix = "content-length: ";
-    @memcpy(line_buf[line_len .. line_len + prefix.len], prefix);
-    line_len += prefix.len;
-    @memcpy(line_buf[line_len .. line_len + len_str.len], len_str);
-    line_len += len_str.len;
-    @memcpy(line_buf[line_len .. line_len + 4], "\r\n\r\n");
-    line_len += 4;
-    try w.writeAll(line_buf[0..line_len]);
-
-    if (send_body and res.body.len != 0) {
-        try w.writeAll(res.body);
-    }
+    var effective = res;
+    if (!keep_alive) effective.close = true;
+    effective.format_connection_header = true;
+    effective.format_content_length = true;
+    effective.format_send_body = send_body;
+    effective.format_body_len_override = if (send_body) null else res.body.len;
+    try effective.format(w);
 }
 
 pub fn writeUpgrade(w: *std.Io.Writer, res: Res) !void {
-    try writeStatusLine(w, res.status);
-
-    for (res.headers) |h| {
-        try w.writeAll(h.name);
-        try w.writeAll(": ");
-        try w.writeAll(h.value);
-        try w.writeAll("\r\n");
-    }
-
-    try w.writeAll("\r\n");
+    var effective = res;
+    effective.format_connection_header = false;
+    effective.format_content_length = false;
+    effective.format_send_body = false;
+    effective.format_body_len_override = null;
+    try effective.format(w);
 }
 
 fn writeStatusLine(w: *std.Io.Writer, status: std.http.Status) !void {
@@ -108,6 +122,29 @@ test "write: HEAD omits body but keeps content-length" {
         "connection: keep-alive\r\n" ++
         "content-type: text/plain; charset=utf-8\r\n" ++
         "content-length: 5\r\n" ++
+        "\r\n";
+    try std.testing.expectEqualStrings(expected, out[0..w.end]);
+}
+
+test "Res.format: upgrade-like formatting omits injected headers" {
+    var res: Res = .{
+        .status = .switching_protocols,
+        .headers = &.{
+            .{ .name = "connection", .value = "Upgrade" },
+            .{ .name = "upgrade", .value = "websocket" },
+        },
+    };
+    res.format_connection_header = false;
+    res.format_content_length = false;
+    res.format_send_body = false;
+    var out: [256]u8 = undefined;
+    var w = std.Io.Writer.fixed(out[0..]);
+    try res.format(&w);
+
+    const expected =
+        "HTTP/1.1 101 Switching Protocols\r\n" ++
+        "connection: Upgrade\r\n" ++
+        "upgrade: websocket\r\n" ++
         "\r\n";
     try std.testing.expectEqualStrings(expected, out[0..w.end]);
 }

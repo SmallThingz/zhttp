@@ -83,7 +83,7 @@ pub fn Server(comptime def: anytype) type {
             address: std.Io.net.IpAddress,
             ctx: if (Context == void) void else *Context,
         ) !Self {
-            const listener = try std.Io.net.IpAddress.listen(address, io, .{ .reuse_address = true });
+            const listener = try std.Io.net.IpAddress.listen(&address, io, .{ .reuse_address = true });
             return .{
                 .io = io,
                 .gpa = gpa,
@@ -125,18 +125,23 @@ pub fn Server(comptime def: anytype) type {
             if (Conf.tcp_nodelay) setTcpNoDelay(&owned_stream);
 
             if (comptime Compiled.HasUpgradeRoutes) {
-                if (try handleHttpPhase(self, &owned_stream)) |pending| {
-                    close_stream = false;
-                    Compiled.runUpgrade(
-                        if (Context == void) {} else self.ctx,
-                        self.io,
-                        self.gpa,
-                        owned_stream,
-                        pending,
-                    ) catch {
-                        return;
-                    };
-                }
+                const pending = http_phase: {
+                    // Keep the HTTP parser state in a separate scope so its stack
+                    // is gone before the upgraded runner starts owning the stream.
+                    const maybe_pending = try handleHttpPhase(self, &owned_stream);
+                    break :http_phase maybe_pending orelse return;
+                };
+
+                close_stream = false;
+                Compiled.runUpgrade(
+                    if (Context == void) {} else self.ctx,
+                    self.io,
+                    self.gpa,
+                    owned_stream,
+                    pending,
+                ) catch {
+                    return;
+                };
                 return;
             }
 
@@ -190,6 +195,7 @@ pub fn Server(comptime def: anytype) type {
                         if (Context == void) {} else self.ctx,
                         self.io,
                         a,
+                        self.gpa,
                         &sr.interface,
                         line,
                         route_index,
@@ -226,7 +232,6 @@ pub fn Server(comptime def: anytype) type {
                             },
                             .upgrade => |pending| {
                                 errdefer Compiled.deinitPendingUpgrade(self.gpa, pending);
-                                _ = send_body;
                                 response.writeUpgrade(&sw.interface, pending.res) catch {
                                     return null;
                                 };
@@ -339,7 +344,7 @@ test "Connection: close header closes socket" {
     try group.concurrent(io, SrvT.run, .{&server});
 
     const addr: Io.net.IpAddress = .{ .ip4 = Io.net.Ip4Address.loopback(port) };
-    var stream = try Io.net.IpAddress.connect(addr, io, .{ .mode = .stream });
+    var stream = try Io.net.IpAddress.connect(&addr, io, .{ .mode = .stream });
     defer stream.close(io);
 
     const req =
@@ -403,7 +408,7 @@ test "unknown path returns 404 and keeps connection" {
     try group.concurrent(io, SrvT.run, .{&server});
 
     const addr: Io.net.IpAddress = .{ .ip4 = Io.net.Ip4Address.loopback(port) };
-    var stream = try Io.net.IpAddress.connect(addr, io, .{ .mode = .stream });
+    var stream = try Io.net.IpAddress.connect(&addr, io, .{ .mode = .stream });
     defer stream.close(io);
 
     var rb: [4 * 1024]u8 = undefined;
@@ -469,7 +474,7 @@ test "HEAD response omits body" {
     try group.concurrent(io, SrvT.run, .{&server});
 
     const addr: Io.net.IpAddress = .{ .ip4 = Io.net.Ip4Address.loopback(port) };
-    var stream = try Io.net.IpAddress.connect(addr, io, .{ .mode = .stream });
+    var stream = try Io.net.IpAddress.connect(&addr, io, .{ .mode = .stream });
     defer stream.close(io);
 
     var rb: [4 * 1024]u8 = undefined;
@@ -523,7 +528,7 @@ test "bad request line returns 400" {
     try group.concurrent(io, SrvT.run, .{&server});
 
     const addr: Io.net.IpAddress = .{ .ip4 = Io.net.Ip4Address.loopback(port) };
-    var stream = try Io.net.IpAddress.connect(addr, io, .{ .mode = .stream });
+    var stream = try Io.net.IpAddress.connect(&addr, io, .{ .mode = .stream });
     defer stream.close(io);
 
     var rb: [4 * 1024]u8 = undefined;
@@ -580,7 +585,7 @@ test "handler res.close closes socket" {
     try group.concurrent(io, SrvT.run, .{&server});
 
     const addr: Io.net.IpAddress = .{ .ip4 = Io.net.Ip4Address.loopback(port) };
-    var stream = try Io.net.IpAddress.connect(addr, io, .{ .mode = .stream });
+    var stream = try Io.net.IpAddress.connect(&addr, io, .{ .mode = .stream });
     defer stream.close(io);
 
     var rb: [4 * 1024]u8 = undefined;
@@ -635,7 +640,7 @@ test "HTTP/1.0 request does not keep-alive" {
     try group.concurrent(io, SrvT.run, .{&server});
 
     const addr: Io.net.IpAddress = .{ .ip4 = Io.net.Ip4Address.loopback(port) };
-    var stream = try Io.net.IpAddress.connect(addr, io, .{ .mode = .stream });
+    var stream = try Io.net.IpAddress.connect(&addr, io, .{ .mode = .stream });
     defer stream.close(io);
 
     var rb: [4 * 1024]u8 = undefined;

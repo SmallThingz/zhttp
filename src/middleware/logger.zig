@@ -36,7 +36,7 @@ pub fn Logger(comptime opts: anytype) type {
 
         fn handle(comptime Next: type, next: Next, ctx: anytype, req: anytype, data_opt: ?*DataT) !Res {
             const start = Io.Timestamp.now(req.io, clock);
-            var res = try next.call(ctx, req);
+            const res = try next.call(ctx, req);
             const elapsed = start.untilNow(req.io, clock);
 
             if (store) {

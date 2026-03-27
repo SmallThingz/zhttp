@@ -1,5 +1,6 @@
 const std = @import("std");
 const zhttp = @import("zhttp");
+const common = @import("common.zig");
 
 fn usage() void {
     std.debug.print(
@@ -19,12 +20,6 @@ fn usage() void {
         \\  GET /static/hello.txt
         \\
     , .{});
-}
-
-fn parseKeyVal(arg: []const u8) ?struct { key: []const u8, val: []const u8 } {
-    if (!std.mem.startsWith(u8, arg, "--")) return null;
-    const eq = std.mem.indexOfScalar(u8, arg, '=') orelse return null;
-    return .{ .key = arg[2..eq], .val = arg[eq + 1 ..] };
 }
 
 fn public(req: anytype) !zhttp.Res {
@@ -76,7 +71,7 @@ pub fn main(init: std.process.Init) !void {
             smoke = true;
             continue;
         }
-        if (parseKeyVal(arg)) |kv| {
+        if (common.parseKeyVal(arg)) |kv| {
             if (std.mem.eql(u8, kv.key, "port")) {
                 port = try std.fmt.parseInt(u16, kv.val, 10);
             } else {
@@ -118,7 +113,7 @@ pub fn main(init: std.process.Init) !void {
         try group.concurrent(io, SrvT.run, .{&server});
 
         const addr: std.Io.net.IpAddress = .{ .ip4 = std.Io.net.Ip4Address.loopback(actual_port) };
-        var stream = try std.Io.net.IpAddress.connect(addr, io, .{ .mode = .stream });
+        var stream = try std.Io.net.IpAddress.connect(&addr, io, .{ .mode = .stream });
         defer stream.close(io);
 
         var rb: [8 * 1024]u8 = undefined;

@@ -4,6 +4,7 @@ const Allocator = std.mem.Allocator;
 const Io = std.Io;
 
 const Res = @import("response.zig").Res;
+const Header = @import("response.zig").Header;
 const parse = @import("parse.zig");
 const request = @import("request.zig");
 const urldecode = @import("urldecode.zig");
@@ -11,6 +12,45 @@ const util = @import("util.zig");
 
 comptime {
     @setEvalBranchQuota(30000);
+}
+
+fn cloneUpgradeResponse(allocator: Allocator, res: Res) !Res {
+    const headers = try allocator.alloc(Header, res.headers.len);
+    var header_count: usize = 0;
+    errdefer {
+        for (headers[0..header_count]) |header| {
+            allocator.free(header.name);
+            allocator.free(header.value);
+        }
+        allocator.free(headers);
+    }
+
+    for (res.headers, 0..) |header, i| {
+        headers[i] = .{
+            .name = try allocator.dupe(u8, header.name),
+            .value = try allocator.dupe(u8, header.value),
+        };
+        header_count = i + 1;
+    }
+
+    const body = try allocator.dupe(u8, res.body);
+    errdefer allocator.free(body);
+
+    return .{
+        .status = res.status,
+        .headers = headers,
+        .body = body,
+        .close = res.close,
+    };
+}
+
+fn deinitUpgradeResponse(allocator: Allocator, res: Res) void {
+    for (res.headers) |header| {
+        allocator.free(header.name);
+        allocator.free(header.value);
+    }
+    allocator.free(res.headers);
+    allocator.free(res.body);
 }
 
 /// Route options passed at comptime to `route`, `get`, `post`, etc.
@@ -287,6 +327,88 @@ fn upgradeRunnerDataType(comptime Runner: type) type {
 
 fn upgradeRunnerHasData(comptime Runner: type) bool {
     return upgradeRunnerDataType(Runner) != void;
+}
+
+fn validateUpgradeRunner(comptime Runner: type, comptime Context: type) void {
+    if (!@hasDecl(Runner, "run")) @compileError(@typeName(Runner) ++ " missing `pub fn run(...)`");
+    const run_info = @typeInfo(@TypeOf(Runner.run));
+    if (run_info != .@"fn") @compileError(@typeName(Runner) ++ ".run must be a function");
+    const return_type = run_info.@"fn".return_type orelse @compileError(@typeName(Runner) ++ ".run must have an explicit return type");
+    switch (@typeInfo(return_type)) {
+        .void => {},
+        .error_union => |eu| {
+            if (eu.payload != void) @compileError(@typeName(Runner) ++ ".run may only return `void` or `!void`");
+        },
+        else => @compileError(@typeName(Runner) ++ ".run may only return `void` or `!void`"),
+    }
+
+    const Data = upgradeRunnerDataType(Runner);
+    const has_data = Data != void;
+    const params = run_info.@"fn".params;
+
+    if (@hasDecl(Runner, "initData")) {
+        if (!has_data) @compileError(@typeName(Runner) ++ ".initData requires `pub const Data`");
+        const init_info = @typeInfo(@TypeOf(Runner.initData));
+        if (init_info != .@"fn") @compileError(@typeName(Runner) ++ ".initData must be a function");
+        if (init_info.@"fn".params.len != 0) @compileError(@typeName(Runner) ++ ".initData must take no parameters");
+        if (init_info.@"fn".return_type != Data) @compileError(@typeName(Runner) ++ ".initData must return Data");
+    }
+
+    if (@hasDecl(Runner, "deinitData")) {
+        if (!has_data) @compileError(@typeName(Runner) ++ ".deinitData requires `pub const Data`");
+        const deinit_info = @typeInfo(@TypeOf(Runner.deinitData));
+        if (deinit_info != .@"fn") @compileError(@typeName(Runner) ++ ".deinitData must be a function");
+        if (deinit_info.@"fn".params.len != 2) @compileError(@typeName(Runner) ++ ".deinitData must take (Allocator, *Data)");
+        if (deinit_info.@"fn".params[0].type != Allocator) @compileError(@typeName(Runner) ++ ".deinitData first param must be Allocator");
+        if (deinit_info.@"fn".params[1].type) |pt| {
+            if (pt != *Data and pt != *const Data) @compileError(@typeName(Runner) ++ ".deinitData second param must be *Data or *const Data");
+        } else {
+            @compileError(@typeName(Runner) ++ ".deinitData second param must be *Data or *const Data");
+        }
+    }
+
+    switch (params.len) {
+        3 => {
+            if (has_data) @compileError(@typeName(Runner) ++ ".run with 3 params cannot be used when Data is declared");
+            if (Context != void and params[0].type == *Context) {
+                @compileError(@typeName(Runner) ++ ".run ctx-only form requires 4 params");
+            }
+            if (params[0].type != Io or params[1].type != Allocator or params[2].type != std.Io.net.Stream) {
+                @compileError(@typeName(Runner) ++ ".run must be fn(io, gpa, stream)");
+            }
+        },
+        4 => {
+            const p0 = params[0].type orelse @compileError(@typeName(Runner) ++ ".run first param must be typed");
+            const p1 = params[1].type orelse @compileError(@typeName(Runner) ++ ".run second param must be typed");
+            const p2 = params[2].type orelse @compileError(@typeName(Runner) ++ ".run third param must be typed");
+            const p3 = params[3].type orelse @compileError(@typeName(Runner) ++ ".run fourth param must be typed");
+
+            if (p0 == Io) {
+                if (!has_data) @compileError(@typeName(Runner) ++ ".run(io, gpa, stream, data) requires `pub const Data`");
+                if (p1 != Allocator or p2 != std.Io.net.Stream) @compileError(@typeName(Runner) ++ ".run data form must be fn(io, gpa, stream, data)");
+                if (p3 != *Data and p3 != *const Data) @compileError(@typeName(Runner) ++ ".run data param must be *Data or *const Data");
+            } else {
+                if (Context == void) @compileError(@typeName(Runner) ++ ".run(ctx, io, gpa, stream) requires Context");
+                if (has_data) @compileError(@typeName(Runner) ++ ".run with Data and Context must take 5 params");
+                if (p0 != *Context or p1 != Io or p2 != Allocator or p3 != std.Io.net.Stream) {
+                    @compileError(@typeName(Runner) ++ ".run ctx form must be fn(ctx, io, gpa, stream)");
+                }
+            }
+        },
+        5 => {
+            if (Context == void) @compileError(@typeName(Runner) ++ ".run with 5 params requires Context");
+            if (!has_data) @compileError(@typeName(Runner) ++ ".run with 5 params requires `pub const Data`");
+            if (params[0].type != *Context or params[1].type != Io or params[2].type != Allocator or params[3].type != std.Io.net.Stream) {
+                @compileError(@typeName(Runner) ++ ".run ctx+data form must be fn(ctx, io, gpa, stream, data)");
+            }
+            if (params[4].type) |pt| {
+                if (pt != *Data and pt != *const Data) @compileError(@typeName(Runner) ++ ".run data param must be *Data or *const Data");
+            } else {
+                @compileError(@typeName(Runner) ++ ".run data param must be *Data or *const Data");
+            }
+        },
+        else => @compileError(@typeName(Runner) ++ ".run must be fn(io, gpa, stream), fn(ctx, io, gpa, stream), fn(io, gpa, stream, data), or fn(ctx, io, gpa, stream, data)"),
+    }
 }
 
 fn middlewareNeedsHeaders(comptime mws: anytype) type {
@@ -855,58 +977,38 @@ pub fn Compiled(
         }
 
         fn upgradeRunnerCall(comptime Runner: type, ctx: anytype, io: Io, gpa: Allocator, stream: std.Io.net.Stream, data_ptr: ?*anyopaque) !void {
-            if (!@hasDecl(Runner, "run")) @compileError(@typeName(Runner) ++ " missing `pub fn run(...)`");
             const run = Runner.run;
             const info = @typeInfo(@TypeOf(run));
-            if (info != .@"fn") @compileError(@typeName(Runner) ++ ".run must be a function");
-
             const params = info.@"fn".params;
             const Data = upgradeRunnerDataType(Runner);
-            const data_present = Data != void;
 
             if (params.len == 3) {
-                return @call(.auto, run, .{ io, gpa, stream });
+                return upgradeRunnerResult(@call(.auto, run, .{ io, gpa, stream }));
             }
 
             if (params.len == 4) {
-                if (@TypeOf(ctx) != void) {
-                    if (params[0].type) |pt| {
-                        if (pt == @TypeOf(ctx)) return @call(.auto, run, .{ ctx, io, gpa, stream });
-                    }
+                if (params[0].type == Io) {
+                    const data = data_ptr orelse unreachable;
+                    const typed: *Data = @ptrCast(@alignCast(data));
+                    return upgradeRunnerResult(@call(.auto, run, .{ io, gpa, stream, typed }));
                 }
-                if (!data_present) {
-                    @compileError(@typeName(Runner) ++ ".run with 4 params must take ctx when Context is enabled or declare `pub const Data`");
-                }
-                const data = data_ptr orelse unreachable;
-                if (params[3].type) |pt| {
-                    if (pt == *Data or pt == *const Data) {
-                        const typed: *Data = @ptrCast(@alignCast(data));
-                        return @call(.auto, run, .{ io, gpa, stream, typed });
-                    }
-                }
-                @compileError(@typeName(Runner) ++ ".run data param must be *Data or *const Data");
+                return upgradeRunnerResult(@call(.auto, run, .{ ctx, io, gpa, stream }));
             }
 
-            if (params.len == 5) {
-                if (@TypeOf(ctx) == void) @compileError(@typeName(Runner) ++ ".run with 5 params requires Context");
-                const DataT = upgradeRunnerDataType(Runner);
-                if (DataT == void) @compileError(@typeName(Runner) ++ ".run with 5 params requires `pub const Data`");
-                if (params[0].type) |pt| {
-                    if (pt != @TypeOf(ctx)) @compileError(@typeName(Runner) ++ ".run first param must be *Context");
-                }
-                if (params[4].type) |pt| {
-                    if (pt != *DataT and pt != *const DataT) {
-                        @compileError(@typeName(Runner) ++ ".run data param must be *Data or *const Data");
-                    }
-                } else {
-                    @compileError(@typeName(Runner) ++ ".run data param must be *Data or *const Data");
-                }
-                const data = data_ptr orelse unreachable;
-                const typed: *DataT = @ptrCast(@alignCast(data));
-                return @call(.auto, run, .{ ctx, io, gpa, stream, typed });
-            }
+            const data = data_ptr orelse unreachable;
+            const typed: *Data = @ptrCast(@alignCast(data));
+            return upgradeRunnerResult(@call(.auto, run, .{ ctx, io, gpa, stream, typed }));
+        }
 
-            @compileError(@typeName(Runner) ++ ".run must be fn(io, gpa, stream), fn(ctx, io, gpa, stream), fn(io, gpa, stream, data), or fn(ctx, io, gpa, stream, data)");
+        fn upgradeRunnerResult(result: anytype) !void {
+            switch (@typeInfo(@TypeOf(result))) {
+                .void => return result,
+                .error_union => {
+                    try result;
+                    return;
+                },
+                else => comptime unreachable,
+            }
         }
 
         fn middlewareCallUsesData(comptime Mw: type) bool {
@@ -1022,6 +1124,15 @@ pub fn Compiled(
         upgrade: PendingUpgrade,
     } else HttpResponse;
     const has_error_handler: bool = @TypeOf(error_handler) != @TypeOf(null);
+
+    comptime {
+        for (route_fields) |f| {
+            const rd = @field(routes, f.name);
+            if (routeHasUpgrade(rd.options)) {
+                validateUpgradeRunner(routeUpgradeRunner(rd.options), Context);
+            }
+        }
+    }
 
     return struct {
         pub const RouteCount: usize = route_count;
@@ -1169,6 +1280,7 @@ pub fn Compiled(
 
         pub fn deinitPendingUpgrade(gpa: Allocator, pending: PendingUpgrade) void {
             if (!comptime has_upgrade_routes) return;
+            deinitUpgradeResponse(gpa, pending.res);
             inline for (route_fields, 0..) |f, i| {
                 if (pending.route_index == i) {
                     const rd = @field(routes, f.name);
@@ -1214,6 +1326,7 @@ pub fn Compiled(
             ctx: if (Context == void) void else *Context,
             io: Io,
             allocator: Allocator,
+            handoff_allocator: Allocator,
             r: *Io.Reader,
             line: request.RequestLine,
             route_index: u16,
@@ -1326,8 +1439,10 @@ pub fn Compiled(
                                 return error.UnexpectedUpgradeBytes;
                             }
 
+                            const owned_res = try cloneUpgradeResponse(handoff_allocator, res);
+                            errdefer deinitUpgradeResponse(handoff_allocator, owned_res);
                             const data_ptr: ?*anyopaque = if (UpgradeData == void) null else blk: {
-                                const ptr = try allocator.create(UpgradeData);
+                                const ptr = try handoff_allocator.create(UpgradeData);
                                 ptr.* = reqv.upgrade_data;
                                 reqv.markUpgradeDataTransferred();
                                 break :blk ptr;
@@ -1335,7 +1450,7 @@ pub fn Compiled(
                             return .{
                                 .upgrade = .{
                                     .route_index = i,
-                                    .res = res,
+                                    .res = owned_res,
                                     .data = data_ptr,
                                 },
                             };
@@ -1470,14 +1585,14 @@ test "dispatch: pipelined request discards unread content-length body" {
 
     const line1 = try request.parseRequestLineBorrowed(&r, 8 * 1024);
     const rid1 = S.match(line1.method, line1.path, params[0..S.MaxParams]).?;
-    const dr1 = try S.dispatch({}, std.testing.io, a, &r, line1, rid1, params[0..S.MaxParams], 8 * 1024);
+    const dr1 = try S.dispatch({}, std.testing.io, a, a, &r, line1, rid1, params[0..S.MaxParams], 8 * 1024);
     try std.testing.expectEqual(@as(u16, 200), @intFromEnum(dr1.res.status));
     try std.testing.expectEqualStrings("p", dr1.res.body);
     try std.testing.expect(dr1.keep_alive);
 
     const line2 = try request.parseRequestLineBorrowed(&r, 8 * 1024);
     const rid2 = S.match(line2.method, line2.path, params[0..S.MaxParams]).?;
-    const dr2 = try S.dispatch({}, std.testing.io, a, &r, line2, rid2, params[0..S.MaxParams], 8 * 1024);
+    const dr2 = try S.dispatch({}, std.testing.io, a, a, &r, line2, rid2, params[0..S.MaxParams], 8 * 1024);
     try std.testing.expectEqual(@as(u16, 200), @intFromEnum(dr2.res.status));
     try std.testing.expectEqualStrings("g", dr2.res.body);
 }
@@ -1512,14 +1627,14 @@ test "dispatch: pipelined request discards unread chunked body" {
 
     const line1 = try request.parseRequestLineBorrowed(&r, 8 * 1024);
     const rid1 = S.match(line1.method, line1.path, params[0..S.MaxParams]).?;
-    const dr1 = try S.dispatch({}, std.testing.io, a, &r, line1, rid1, params[0..S.MaxParams], 8 * 1024);
+    const dr1 = try S.dispatch({}, std.testing.io, a, a, &r, line1, rid1, params[0..S.MaxParams], 8 * 1024);
     try std.testing.expectEqual(@as(u16, 200), @intFromEnum(dr1.res.status));
     try std.testing.expectEqualStrings("p", dr1.res.body);
     try std.testing.expect(dr1.keep_alive);
 
     const line2 = try request.parseRequestLineBorrowed(&r, 8 * 1024);
     const rid2 = S.match(line2.method, line2.path, params[0..S.MaxParams]).?;
-    const dr2 = try S.dispatch({}, std.testing.io, a, &r, line2, rid2, params[0..S.MaxParams], 8 * 1024);
+    const dr2 = try S.dispatch({}, std.testing.io, a, a, &r, line2, rid2, params[0..S.MaxParams], 8 * 1024);
     try std.testing.expectEqual(@as(u16, 200), @intFromEnum(dr2.res.status));
     try std.testing.expectEqualStrings("g", dr2.res.body);
 }
@@ -1559,7 +1674,7 @@ test "dispatch: upgrade route returns pending handoff with data" {
 
     const line = try request.parseRequestLineBorrowed(&r, 8 * 1024);
     const rid = S.match(line.method, line.path, params[0..S.MaxParams]).?;
-    const dr = try S.dispatch({}, std.testing.io, std.testing.allocator, &r, line, rid, params[0..S.MaxParams], 8 * 1024);
+    const dr = try S.dispatch({}, std.testing.io, std.testing.allocator, std.testing.allocator, &r, line, rid, params[0..S.MaxParams], 8 * 1024);
 
     switch (dr) {
         .upgrade => |pending| {
@@ -1569,6 +1684,54 @@ test "dispatch: upgrade route returns pending handoff with data" {
             try std.testing.expectEqual(@as(u32, 7), typed.user_id);
             S.deinitPendingUpgrade(std.testing.allocator, pending);
             try std.testing.expectEqual(@as(u32, 7), Runner.deinit_sum);
+        },
+        .http => return error.TestUnexpectedResult,
+    }
+}
+
+test "dispatch: upgrade response survives request allocator teardown" {
+    const Runner = struct {
+        fn run(_: Io, _: Allocator, _: std.Io.net.Stream) !void {}
+    };
+
+    const S = Compiled(void, .{
+        get("/ws", struct {
+            fn h(req: anytype) !Res {
+                const headers = try req.allocator().alloc(Header, 1);
+                headers[0] = .{
+                    .name = try req.allocator().dupe(u8, "x-upgrade-token"),
+                    .value = try req.allocator().dupe(u8, "ok"),
+                };
+                return .{
+                    .status = .switching_protocols,
+                    .headers = headers,
+                    .body = try req.allocator().dupe(u8, "ignored"),
+                };
+            }
+        }.h, .{ .upgrade = Runner }),
+    }, .{}, null);
+
+    var params: [S.MaxParams][]u8 = undefined;
+    var r = Io.Reader.fixed(
+        "GET /ws HTTP/1.1\r\n" ++
+            "Host: example.com\r\n" ++
+            "\r\n",
+    );
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const line = try request.parseRequestLineBorrowed(&r, 8 * 1024);
+    const rid = S.match(line.method, line.path, params[0..S.MaxParams]).?;
+    const dr = try S.dispatch({}, std.testing.io, a, std.testing.allocator, &r, line, rid, params[0..S.MaxParams], 8 * 1024);
+
+    switch (dr) {
+        .upgrade => |pending| {
+            defer S.deinitPendingUpgrade(std.testing.allocator, pending);
+            try std.testing.expectEqual(@as(usize, 1), pending.res.headers.len);
+            try std.testing.expectEqualStrings("x-upgrade-token", pending.res.headers[0].name);
+            try std.testing.expectEqualStrings("ok", pending.res.headers[0].value);
+            try std.testing.expectEqualStrings("ignored", pending.res.body);
         },
         .http => return error.TestUnexpectedResult,
     }
@@ -1608,7 +1771,7 @@ test "dispatch: upgrade route returning non-101 stays normal http" {
 
     const line = try request.parseRequestLineBorrowed(&r, 8 * 1024);
     const rid = S.match(line.method, line.path, params[0..S.MaxParams]).?;
-    const dr = try S.dispatch({}, std.testing.io, std.testing.allocator, &r, line, rid, params[0..S.MaxParams], 8 * 1024);
+    const dr = try S.dispatch({}, std.testing.io, std.testing.allocator, std.testing.allocator, &r, line, rid, params[0..S.MaxParams], 8 * 1024);
 
     switch (dr) {
         .http => |http| {
@@ -1621,9 +1784,58 @@ test "dispatch: upgrade route returning non-101 stays normal http" {
     }
 }
 
+test "dispatch: upgrade data honors struct field defaults without initData" {
+    const Runner = struct {
+        pub const Data = struct {
+            user_id: u32 = 9,
+            enabled: bool = true,
+        };
+
+        var deinit_sum: u32 = 0;
+        var saw_enabled: bool = false;
+
+        fn run(_: Io, _: Allocator, _: std.Io.net.Stream, _: *const Data) !void {}
+
+        fn deinitData(_: Allocator, data: *Data) void {
+            deinit_sum += data.user_id;
+            saw_enabled = data.enabled;
+        }
+    };
+
+    const S = Compiled(void, .{
+        get("/ws", struct {
+            fn h(_: anytype) !Res {
+                return Res.text(200, "plain");
+            }
+        }.h, .{ .upgrade = Runner }),
+    }, .{}, null);
+
+    Runner.deinit_sum = 0;
+    Runner.saw_enabled = false;
+
+    var params: [S.MaxParams][]u8 = undefined;
+    var r = Io.Reader.fixed(
+        "GET /ws HTTP/1.1\r\n" ++
+            "\r\n",
+    );
+
+    const line = try request.parseRequestLineBorrowed(&r, 8 * 1024);
+    const rid = S.match(line.method, line.path, params[0..S.MaxParams]).?;
+    const dr = try S.dispatch({}, std.testing.io, std.testing.allocator, std.testing.allocator, &r, line, rid, params[0..S.MaxParams], 8 * 1024);
+
+    switch (dr) {
+        .http => |http| {
+            try std.testing.expectEqual(@as(u16, 200), @intFromEnum(http.res.status));
+            try std.testing.expectEqual(@as(u32, 9), Runner.deinit_sum);
+            try std.testing.expect(Runner.saw_enabled);
+        },
+        .upgrade => return error.TestUnexpectedResult,
+    }
+}
+
 test "dispatch: non-upgrade route returning 101 stays normal http" {
     const Runner = struct {
-        fn run(_: void, _: Io, _: Allocator, _: std.Io.net.Stream) !void {}
+        fn run(_: Io, _: Allocator, _: std.Io.net.Stream) !void {}
     };
 
     const S = Compiled(void, .{
@@ -1647,7 +1859,7 @@ test "dispatch: non-upgrade route returning 101 stays normal http" {
 
     const line = try request.parseRequestLineBorrowed(&r, 8 * 1024);
     const rid = S.match(line.method, line.path, params[0..S.MaxParams]).?;
-    const dr = try S.dispatch({}, std.testing.io, std.testing.allocator, &r, line, rid, params[0..S.MaxParams], 8 * 1024);
+    const dr = try S.dispatch({}, std.testing.io, std.testing.allocator, std.testing.allocator, &r, line, rid, params[0..S.MaxParams], 8 * 1024);
 
     switch (dr) {
         .http => |http| {
@@ -1660,7 +1872,7 @@ test "dispatch: non-upgrade route returning 101 stays normal http" {
 
 test "dispatch: upgrade route discards content-length body before takeover" {
     const Runner = struct {
-        fn run(_: void, _: Io, _: Allocator, _: std.Io.net.Stream) !void {}
+        fn run(_: Io, _: Allocator, _: std.Io.net.Stream) !void {}
     };
 
     const S = Compiled(void, .{
@@ -1681,7 +1893,7 @@ test "dispatch: upgrade route discards content-length body before takeover" {
 
     const line = try request.parseRequestLineBorrowed(&r, 8 * 1024);
     const rid = S.match(line.method, line.path, params[0..S.MaxParams]).?;
-    const dr = try S.dispatch({}, std.testing.io, std.testing.allocator, &r, line, rid, params[0..S.MaxParams], 8 * 1024);
+    const dr = try S.dispatch({}, std.testing.io, std.testing.allocator, std.testing.allocator, &r, line, rid, params[0..S.MaxParams], 8 * 1024);
 
     switch (dr) {
         .upgrade => |pending| {
@@ -1695,7 +1907,7 @@ test "dispatch: upgrade route discards content-length body before takeover" {
 
 test "dispatch: upgrade route discards chunked body before takeover" {
     const Runner = struct {
-        fn run(_: void, _: Io, _: Allocator, _: std.Io.net.Stream) !void {}
+        fn run(_: Io, _: Allocator, _: std.Io.net.Stream) !void {}
     };
 
     const S = Compiled(void, .{
@@ -1716,7 +1928,7 @@ test "dispatch: upgrade route discards chunked body before takeover" {
 
     const line = try request.parseRequestLineBorrowed(&r, 8 * 1024);
     const rid = S.match(line.method, line.path, params[0..S.MaxParams]).?;
-    const dr = try S.dispatch({}, std.testing.io, std.testing.allocator, &r, line, rid, params[0..S.MaxParams], 8 * 1024);
+    const dr = try S.dispatch({}, std.testing.io, std.testing.allocator, std.testing.allocator, &r, line, rid, params[0..S.MaxParams], 8 * 1024);
 
     switch (dr) {
         .upgrade => |pending| {
@@ -1730,7 +1942,7 @@ test "dispatch: upgrade route discards chunked body before takeover" {
 
 test "dispatch: upgrade route rejects buffered early bytes" {
     const Runner = struct {
-        fn run(_: void, _: Io, _: Allocator, _: std.Io.net.Stream) !void {}
+        fn run(_: Io, _: Allocator, _: std.Io.net.Stream) !void {}
     };
 
     const S = Compiled(void, .{
@@ -1752,13 +1964,13 @@ test "dispatch: upgrade route rejects buffered early bytes" {
     const rid = S.match(line.method, line.path, params[0..S.MaxParams]).?;
     try std.testing.expectError(
         error.UnexpectedUpgradeBytes,
-        S.dispatch({}, std.testing.io, std.testing.allocator, &r, line, rid, params[0..S.MaxParams], 8 * 1024),
+        S.dispatch({}, std.testing.io, std.testing.allocator, std.testing.allocator, &r, line, rid, params[0..S.MaxParams], 8 * 1024),
     );
 }
 
 test "dispatch: upgrade early bytes use error handler and close connection" {
     const Runner = struct {
-        fn run(_: void, _: Io, _: Allocator, _: std.Io.net.Stream) !void {}
+        fn run(_: Io, _: Allocator, _: std.Io.net.Stream) !void {}
     };
 
     const Errors = struct {
@@ -1785,7 +1997,7 @@ test "dispatch: upgrade early bytes use error handler and close connection" {
 
     const line = try request.parseRequestLineBorrowed(&r, 8 * 1024);
     const rid = S.match(line.method, line.path, params[0..S.MaxParams]).?;
-    const dr = try S.dispatch({}, std.testing.io, std.testing.allocator, &r, line, rid, params[0..S.MaxParams], 8 * 1024);
+    const dr = try S.dispatch({}, std.testing.io, std.testing.allocator, std.testing.allocator, &r, line, rid, params[0..S.MaxParams], 8 * 1024);
 
     switch (dr) {
         .http => |http| {
@@ -1844,7 +2056,7 @@ test "runUpgrade: ctx and data are passed and deinit runs after success" {
 
     const line = try request.parseRequestLineBorrowed(&r, 8 * 1024);
     const rid = S.match(line.method, line.path, params[0..S.MaxParams]).?;
-    const dr = try S.dispatch(&ctx, std.testing.io, std.testing.allocator, &r, line, rid, params[0..S.MaxParams], 8 * 1024);
+    const dr = try S.dispatch(&ctx, std.testing.io, std.testing.allocator, std.testing.allocator, &r, line, rid, params[0..S.MaxParams], 8 * 1024);
 
     switch (dr) {
         .upgrade => |pending| {
@@ -1852,6 +2064,81 @@ test "runUpgrade: ctx and data are passed and deinit runs after success" {
             try std.testing.expectEqual(@as(usize, 1), ctx.calls);
             try std.testing.expectEqual(@as(u32, 42), ctx.last);
             try std.testing.expectEqual(@as(u32, 42), Runner.deinit_sum);
+        },
+        .http => return error.TestUnexpectedResult,
+    }
+}
+
+test "runUpgrade: ctx-only runner is supported" {
+    const Ctx = struct {
+        calls: usize = 0,
+    };
+
+    const Runner = struct {
+        fn run(ctx: *Ctx, _: Io, _: Allocator, _: std.Io.net.Stream) !void {
+            ctx.calls += 1;
+        }
+    };
+
+    const S = Compiled(Ctx, .{
+        get("/ws", struct {
+            fn h(_: *Ctx, _: anytype) !Res {
+                return .{ .status = .switching_protocols };
+            }
+        }.h, .{ .upgrade = Runner }),
+    }, .{}, null);
+
+    var ctx: Ctx = .{};
+    var params: [S.MaxParams][]u8 = undefined;
+    var r = Io.Reader.fixed(
+        "GET /ws HTTP/1.1\r\n" ++
+            "\r\n",
+    );
+
+    const line = try request.parseRequestLineBorrowed(&r, 8 * 1024);
+    const rid = S.match(line.method, line.path, params[0..S.MaxParams]).?;
+    const dr = try S.dispatch(&ctx, std.testing.io, std.testing.allocator, std.testing.allocator, &r, line, rid, params[0..S.MaxParams], 8 * 1024);
+
+    switch (dr) {
+        .upgrade => |pending| {
+            try S.runUpgrade(&ctx, std.testing.io, std.testing.allocator, undefined, pending);
+            try std.testing.expectEqual(@as(usize, 1), ctx.calls);
+        },
+        .http => return error.TestUnexpectedResult,
+    }
+}
+
+test "runUpgrade: runner returning void is supported" {
+    const Runner = struct {
+        var called: bool = false;
+
+        fn run(_: Io, _: Allocator, _: std.Io.net.Stream) void {
+            called = true;
+        }
+    };
+
+    const S = Compiled(void, .{
+        get("/ws", struct {
+            fn h(_: anytype) !Res {
+                return .{ .status = .switching_protocols };
+            }
+        }.h, .{ .upgrade = Runner }),
+    }, .{}, null);
+
+    var params: [S.MaxParams][]u8 = undefined;
+    var r = Io.Reader.fixed(
+        "GET /ws HTTP/1.1\r\n" ++
+            "\r\n",
+    );
+
+    const line = try request.parseRequestLineBorrowed(&r, 8 * 1024);
+    const rid = S.match(line.method, line.path, params[0..S.MaxParams]).?;
+    const dr = try S.dispatch({}, std.testing.io, std.testing.allocator, std.testing.allocator, &r, line, rid, params[0..S.MaxParams], 8 * 1024);
+
+    switch (dr) {
+        .upgrade => |pending| {
+            try S.runUpgrade({}, std.testing.io, std.testing.allocator, undefined, pending);
+            try std.testing.expect(Runner.called);
         },
         .http => return error.TestUnexpectedResult,
     }
@@ -1893,7 +2180,7 @@ test "runUpgrade: runner error still deinitializes transferred data" {
 
     const line = try request.parseRequestLineBorrowed(&r, 8 * 1024);
     const rid = S.match(line.method, line.path, params[0..S.MaxParams]).?;
-    const dr = try S.dispatch({}, std.testing.io, std.testing.allocator, &r, line, rid, params[0..S.MaxParams], 8 * 1024);
+    const dr = try S.dispatch({}, std.testing.io, std.testing.allocator, std.testing.allocator, &r, line, rid, params[0..S.MaxParams], 8 * 1024);
 
     switch (dr) {
         .upgrade => |pending| {
@@ -1902,6 +2189,46 @@ test "runUpgrade: runner error still deinitializes transferred data" {
         },
         .http => return error.TestUnexpectedResult,
     }
+}
+
+test "runUpgrade: handoff data survives request allocator teardown" {
+    const Runner = struct {
+        pub const Data = struct { user_id: u32 = 0 };
+        var seen_user_id: ?u32 = null;
+
+        fn run(io: Io, gpa: Allocator, stream: std.Io.net.Stream, data: *const Data) !void {
+            _ = io;
+            _ = gpa;
+            _ = stream;
+            seen_user_id = data.user_id;
+        }
+    };
+
+    const S = Compiled(void, .{
+        get("/ws", struct {
+            fn h(_: void, req: anytype) !Res {
+                req.upgrade_data.user_id = 11;
+                return .{ .status = .switching_protocols };
+            }
+        }.h, .{ .upgrade = Runner }),
+    }, .{}, null);
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    const a = arena.allocator();
+
+    var params: [S.MaxParams][]u8 = undefined;
+    var r = Io.Reader.fixed("GET /ws HTTP/1.1\r\n\r\n");
+    const line = try request.parseRequestLineBorrowed(&r, 8 * 1024);
+    const rid = S.match(line.method, line.path, params[0..S.MaxParams]).?;
+    const dr = try S.dispatch({}, std.testing.io, a, std.testing.allocator, &r, line, rid, params[0..S.MaxParams], 8 * 1024);
+    const pending = switch (dr) {
+        .upgrade => |p| p,
+        .http => return error.TestExpectedUpgrade,
+    };
+
+    arena.deinit();
+    try S.runUpgrade({}, std.testing.io, std.testing.allocator, undefined, pending);
+    try std.testing.expectEqual(@as(?u32, 11), Runner.seen_user_id);
 }
 
 test "dispatch: path param percent-decodes" {
@@ -1925,7 +2252,7 @@ test "dispatch: path param percent-decodes" {
 
     const line = try request.parseRequestLineBorrowed(&r, 8 * 1024);
     const rid = S.match(line.method, line.path, params[0..S.MaxParams]).?;
-    const dr = try S.dispatch({}, std.testing.io, a, &r, line, rid, params[0..S.MaxParams], 8 * 1024);
+    const dr = try S.dispatch({}, std.testing.io, a, a, &r, line, rid, params[0..S.MaxParams], 8 * 1024);
     try std.testing.expectEqualStrings("a/b", dr.res.body);
 }
 
@@ -1951,7 +2278,7 @@ test "dispatch: typed path params via opts.params" {
     var r = Io.Reader.fixed("GET /u/42 HTTP/1.1\r\n\r\n");
     const line = try request.parseRequestLineBorrowed(&r, 8 * 1024);
     const rid = S.match(line.method, line.path, params[0..S.MaxParams]).?;
-    const dr = try S.dispatch({}, std.testing.io, a, &r, line, rid, params[0..S.MaxParams], 8 * 1024);
+    const dr = try S.dispatch({}, std.testing.io, a, a, &r, line, rid, params[0..S.MaxParams], 8 * 1024);
     try std.testing.expectEqualStrings("42", dr.res.body);
 }
 
@@ -1976,7 +2303,7 @@ test "dispatch: typed path params bad value errors" {
     var r = Io.Reader.fixed("GET /u/nope HTTP/1.1\r\n\r\n");
     const line = try request.parseRequestLineBorrowed(&r, 8 * 1024);
     const rid = S.match(line.method, line.path, params[0..S.MaxParams]).?;
-    try std.testing.expectError(error.BadValue, S.dispatch({}, std.testing.io, a, &r, line, rid, params[0..S.MaxParams], 8 * 1024));
+    try std.testing.expectError(error.BadValue, S.dispatch({}, std.testing.io, a, a, &r, line, rid, params[0..S.MaxParams], 8 * 1024));
 }
 
 test "dispatch: path params allocate once" {
@@ -2052,7 +2379,7 @@ test "dispatch: path params allocate once" {
     var ca: CountingAllocator = .{ .inner = fba.allocator() };
     const a = ca.allocator();
 
-    const dr = try S.dispatch({}, std.testing.io, a, &r, line, rid, params[0..S.MaxParams], 8 * 1024);
+    const dr = try S.dispatch({}, std.testing.io, a, a, &r, line, rid, params[0..S.MaxParams], 8 * 1024);
     try std.testing.expectEqualStrings("ok", dr.res.body);
     try std.testing.expectEqual(@as(usize, 1), ca.alloc_calls);
 }
@@ -2088,7 +2415,7 @@ test "dispatch: middleware Needs.params works" {
     var r = Io.Reader.fixed("GET /u/7 HTTP/1.1\r\n\r\n");
     const line = try request.parseRequestLineBorrowed(&r, 8 * 1024);
     const rid = S.match(line.method, line.path, params[0..S.MaxParams]).?;
-    const dr = try S.dispatch({}, std.testing.io, a, &r, line, rid, params[0..S.MaxParams], 8 * 1024);
+    const dr = try S.dispatch({}, std.testing.io, a, a, &r, line, rid, params[0..S.MaxParams], 8 * 1024);
     try std.testing.expectEqualStrings("7", dr.res.body);
 }
 
@@ -2121,7 +2448,7 @@ test "middleware data: set in middleware and handler access" {
     var r = Io.Reader.fixed("GET /x HTTP/1.1\r\n\r\n");
     const line = try request.parseRequestLineBorrowed(&r, 8 * 1024);
     const rid = S.match(line.method, line.path, params[0..S.MaxParams]).?;
-    const dr = try S.dispatch({}, std.testing.io, a, &r, line, rid, params[0..S.MaxParams], 8 * 1024);
+    const dr = try S.dispatch({}, std.testing.io, a, a, &r, line, rid, params[0..S.MaxParams], 8 * 1024);
     try std.testing.expectEqualStrings("ok", dr.res.body);
 }
 
@@ -2149,7 +2476,7 @@ test "error handler: handler error returns response" {
     var r = Io.Reader.fixed("GET /x HTTP/1.1\r\n\r\n");
     const line = try request.parseRequestLineBorrowed(&r, 8 * 1024);
     const rid = S.match(line.method, line.path, params[0..S.MaxParams]).?;
-    const dr = try S.dispatch({}, std.testing.io, a, &r, line, rid, params[0..S.MaxParams], 8 * 1024);
+    const dr = try S.dispatch({}, std.testing.io, a, a, &r, line, rid, params[0..S.MaxParams], 8 * 1024);
     try std.testing.expectEqual(@as(u16, 555), @intFromEnum(dr.res.status));
     try std.testing.expectEqualStrings("handled", dr.res.body);
 }
@@ -2214,7 +2541,7 @@ test "handler: zero-arg handler supported" {
     var r = Io.Reader.fixed("GET /a HTTP/1.1\r\n\r\n");
     const line = try request.parseRequestLineBorrowed(&r, 8 * 1024);
     const rid = S.match(line.method, line.path, params[0..S.MaxParams]).?;
-    const dr = try S.dispatch({}, std.testing.io, a, &r, line, rid, params[0..S.MaxParams], 8 * 1024);
+    const dr = try S.dispatch({}, std.testing.io, a, a, &r, line, rid, params[0..S.MaxParams], 8 * 1024);
     try std.testing.expectEqualStrings("x", dr.res.body);
 }
 
@@ -2237,7 +2564,7 @@ test "handler: ctx-only handler supported" {
     var r = Io.Reader.fixed("GET /a HTTP/1.1\r\n\r\n");
     const line = try request.parseRequestLineBorrowed(&r, 8 * 1024);
     const rid = S.match(line.method, line.path, params[0..S.MaxParams]).?;
-    const dr = try S.dispatch(&ctx, std.testing.io, a, &r, line, rid, params[0..S.MaxParams], 8 * 1024);
+    const dr = try S.dispatch(&ctx, std.testing.io, a, a, &r, line, rid, params[0..S.MaxParams], 8 * 1024);
     try std.testing.expectEqualStrings("ok", dr.res.body);
 }
 
@@ -2258,5 +2585,5 @@ test "dispatch: invalid path percent-encoding rejected" {
     var r = Io.Reader.fixed("GET /u/%ZZ HTTP/1.1\r\n\r\n");
     const line = try request.parseRequestLineBorrowed(&r, 8 * 1024);
     const rid = S.match(line.method, line.path, params[0..S.MaxParams]).?;
-    try std.testing.expectError(error.InvalidPercentEncoding, S.dispatch({}, std.testing.io, a, &r, line, rid, params[0..S.MaxParams], 8 * 1024));
+    try std.testing.expectError(error.InvalidPercentEncoding, S.dispatch({}, std.testing.io, a, a, &r, line, rid, params[0..S.MaxParams], 8 * 1024));
 }

@@ -74,7 +74,7 @@ fn initUpgradeDataValue(comptime Data: type, comptime init_fn: anytype) Data {
     if (comptime hasOptionalFn(init_fn)) {
         return @call(.always_inline, init_fn, .{});
     }
-    return std.mem.zeroes(Data);
+    return std.mem.zeroInit(Data, .{});
 }
 
 fn deinitUpgradeDataValue(comptime Data: type, comptime deinit_fn: anytype, a: Allocator, data: *Data) void {

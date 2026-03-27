@@ -60,7 +60,7 @@ fn buildRequest(a: std.mem.Allocator, host: []const u8, path: []const u8, full: 
 }
 
 fn discoverFixedResponseBytes(io: std.Io, address: std.Io.net.IpAddress, request_bytes: []const u8) !usize {
-    var stream = try std.Io.net.IpAddress.connect(address, io, .{ .mode = .stream });
+    var stream = try std.Io.net.IpAddress.connect(&address, io, .{ .mode = .stream });
     defer stream.close(io);
     setTcpNoDelay(&stream);
 

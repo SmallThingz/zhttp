@@ -1,6 +1,7 @@
 const std = @import("std");
 const zhttp = @import("zhttp");
 const builtin = @import("builtin");
+const scripts = @import("scripts.zig");
 
 const Io = std.Io;
 
@@ -82,12 +83,6 @@ fn parseBoolFlag(arg: []const u8, comptime name: []const u8) bool {
     return std.mem.eql(u8, arg, "--" ++ name);
 }
 
-fn parseKeyVal(arg: []const u8) ?struct { key: []const u8, val: []const u8 } {
-    if (!std.mem.startsWith(u8, arg, "--")) return null;
-    const eq = std.mem.indexOfScalar(u8, arg, '=') orelse return null;
-    return .{ .key = arg[2..eq], .val = arg[eq + 1 ..] };
-}
-
 fn trimCR(line: []const u8) []const u8 {
     if (line.len != 0 and line[line.len - 1] == '\r') return line[0 .. line.len - 1];
     return line;
@@ -118,7 +113,7 @@ fn discardExact(r: *Io.Reader, n: usize) !void {
 }
 
 fn discoverFixedResponseBytes(io: Io, address: std.Io.net.IpAddress, request_bytes: []const u8) !usize {
-    var stream = try std.Io.net.IpAddress.connect(address, io, .{ .mode = .stream });
+    var stream = try std.Io.net.IpAddress.connect(&address, io, .{ .mode = .stream });
     defer stream.close(io);
     setTcpNoDelay(&stream);
 
@@ -207,7 +202,7 @@ fn connectAndWarmup(
     for (states) |*st| {
         st.read_buf = try a.alloc(u8, 64 * 1024);
         st.write_buf = try a.alloc(u8, 4096);
-        st.stream = try std.Io.net.IpAddress.connect(address, io, .{ .mode = .stream });
+        st.stream = try std.Io.net.IpAddress.connect(&address, io, .{ .mode = .stream });
         setTcpNoDelay(&st.stream);
 
         if (warmup != 0) {
@@ -366,7 +361,7 @@ pub fn main(init: std.process.Init) !void {
             continue;
         }
 
-        if (parseKeyVal(arg)) |kv| {
+        if (scripts.parseKeyVal(arg)) |kv| {
             if (std.mem.eql(u8, kv.key, "mode")) {
                 cfg.mode = try parseMode(kv.val);
             } else if (std.mem.eql(u8, kv.key, "host")) {

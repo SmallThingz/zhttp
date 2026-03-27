@@ -1,5 +1,6 @@
 const std = @import("std");
 const zhttp = @import("zhttp");
+const scripts = @import("scripts.zig");
 
 fn plaintext() !zhttp.Res {
     const body = "Hello, World!";
@@ -24,12 +25,6 @@ fn usage() void {
     , .{});
 }
 
-fn parseKeyVal(arg: []const u8) ?struct { key: []const u8, val: []const u8 } {
-    if (!std.mem.startsWith(u8, arg, "--")) return null;
-    const eq = std.mem.indexOfScalar(u8, arg, '=') orelse return null;
-    return .{ .key = arg[2..eq], .val = arg[eq + 1 ..] };
-}
-
 pub fn main(init: std.process.Init) !void {
     var port: u16 = 8081;
 
@@ -43,7 +38,7 @@ pub fn main(init: std.process.Init) !void {
             usage();
             return;
         }
-        if (parseKeyVal(arg)) |kv| {
+        if (scripts.parseKeyVal(arg)) |kv| {
             if (std.mem.eql(u8, kv.key, "port")) {
                 port = try std.fmt.parseInt(u16, kv.val, 10);
             } else {

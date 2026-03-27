@@ -7,7 +7,7 @@ test "loopback listen preflight" {
     const io = threaded.io();
 
     const addr0: std.Io.net.IpAddress = .{ .ip4 = std.Io.net.Ip4Address.loopback(0) };
-    var listener = try std.Io.net.IpAddress.listen(addr0, io, .{ .reuse_address = true });
+    var listener = try std.Io.net.IpAddress.listen(&addr0, io, .{ .reuse_address = true });
     listener.deinit(io);
 }
 

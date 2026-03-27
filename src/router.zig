@@ -945,9 +945,9 @@ pub fn Compiled(
     return struct {
         pub const RouteCount: usize = route_count;
         pub const MaxParams: usize = compiled.max_params;
-        pub const RouteParamCounts: [route_count]usize = comptime blk: {
+        pub const RouteParamCounts: [route_count]usize = blk: {
             var out: [route_count]usize = undefined;
-            inline for (route_fields, 0..) |_, i| {
+            for (route_fields, 0..) |_, i| {
                 out[i] = compiled.patterns[i].param_names.len;
             }
             break :blk out;

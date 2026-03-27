@@ -192,7 +192,7 @@ pub fn Server(comptime def: anytype) type {
                     };
 
                     continue :blk if (Compiled.match(line.method, line.path)) |idx| switch (idx) {
-                        inline 0...Compiled.RouteCount => |c_idx| routeAction(c_idx)(self, &sr.interface, &sw.interface, line, a),
+                        inline 0...(Compiled.RouteCount - 1) => |c_idx| routeAction(c_idx)(self, &sr.interface, &sw.interface, line, a),
                         else => unreachable,
                     } else notFoundAction()(self, &sr.interface, &sw.interface, line, a);
                 },

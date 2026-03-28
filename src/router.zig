@@ -74,14 +74,19 @@ fn validateRouteOptions(comptime opts: anytype) void {
     }
 }
 
-pub fn RouteDecl(comptime Handler: type, comptime Options: type) type {
-    return struct {
-        method: []const u8,
-        pattern: []const u8,
-        options: Options,
-        handler: Handler,
-    };
-}
+pub const RouteDecl = struct {
+    method: []const u8,
+    pattern: []const u8,
+    // Bridge type carrying `pub const function = handler`.
+    handler: type,
+    headers: type,
+    query: type,
+    params: type,
+    // Bridge type carrying `pub const value = tuple`.
+    middlewares: type,
+    // Bridge type carrying `pub const value = null|fn|?fn`.
+    upgrade_handler: type,
+};
 
 pub fn route(
     /// HTTP method enum literal, e.g. `.GET`.
@@ -91,35 +96,49 @@ pub fn route(
     comptime handler: anytype,
     /// Route options (see `zhttp/root.zig` docs). Use `.{}` for none.
     comptime opts: anytype,
-) RouteDecl(@TypeOf(handler), @TypeOf(opts)) {
+) RouteDecl {
     validateRouteOptions(opts);
+    const OptT = @TypeOf(opts);
+    const HandlerBridge = struct {
+        pub const function = handler;
+    };
+    const MiddlewaresBridge = struct {
+        pub const value = if (@hasField(OptT, "middlewares")) opts.middlewares else .{};
+    };
+    const UpgradeHandlerBridge = struct {
+        pub const value = if (@hasField(OptT, "upgrade_handler")) opts.upgrade_handler else null;
+    };
     return .{
         .method = @tagName(method_lit),
         .pattern = pattern,
-        .options = opts,
-        .handler = handler,
+        .handler = HandlerBridge,
+        .headers = if (@hasField(OptT, "headers")) opts.headers else struct {},
+        .query = if (@hasField(OptT, "query")) opts.query else struct {},
+        .params = if (@hasField(OptT, "params")) opts.params else struct {},
+        .middlewares = MiddlewaresBridge,
+        .upgrade_handler = UpgradeHandlerBridge,
     };
 }
 
-pub fn get(comptime pattern: []const u8, comptime handler: anytype, comptime opts: anytype) RouteDecl(@TypeOf(handler), @TypeOf(opts)) {
+pub fn get(comptime pattern: []const u8, comptime handler: anytype, comptime opts: anytype) RouteDecl {
     return route(.GET, pattern, handler, opts);
 }
-pub fn post(comptime pattern: []const u8, comptime handler: anytype, comptime opts: anytype) RouteDecl(@TypeOf(handler), @TypeOf(opts)) {
+pub fn post(comptime pattern: []const u8, comptime handler: anytype, comptime opts: anytype) RouteDecl {
     return route(.POST, pattern, handler, opts);
 }
-pub fn put(comptime pattern: []const u8, comptime handler: anytype, comptime opts: anytype) RouteDecl(@TypeOf(handler), @TypeOf(opts)) {
+pub fn put(comptime pattern: []const u8, comptime handler: anytype, comptime opts: anytype) RouteDecl {
     return route(.PUT, pattern, handler, opts);
 }
-pub fn delete(comptime pattern: []const u8, comptime handler: anytype, comptime opts: anytype) RouteDecl(@TypeOf(handler), @TypeOf(opts)) {
+pub fn delete(comptime pattern: []const u8, comptime handler: anytype, comptime opts: anytype) RouteDecl {
     return route(.DELETE, pattern, handler, opts);
 }
-pub fn patch(comptime pattern: []const u8, comptime handler: anytype, comptime opts: anytype) RouteDecl(@TypeOf(handler), @TypeOf(opts)) {
+pub fn patch(comptime pattern: []const u8, comptime handler: anytype, comptime opts: anytype) RouteDecl {
     return route(.PATCH, pattern, handler, opts);
 }
-pub fn head(comptime pattern: []const u8, comptime handler: anytype, comptime opts: anytype) RouteDecl(@TypeOf(handler), @TypeOf(opts)) {
+pub fn head(comptime pattern: []const u8, comptime handler: anytype, comptime opts: anytype) RouteDecl {
     return route(.HEAD, pattern, handler, opts);
 }
-pub fn options(comptime pattern: []const u8, comptime handler: anytype, comptime opts: anytype) RouteDecl(@TypeOf(handler), @TypeOf(opts)) {
+pub fn options(comptime pattern: []const u8, comptime handler: anytype, comptime opts: anytype) RouteDecl {
     return route(.OPTIONS, pattern, handler, opts);
 }
 
@@ -219,15 +238,6 @@ pub fn mergeRoutes(comptime user_routes: anytype, comptime extra_routes: anytype
     assertNoDuplicateRoutes(extra_routes);
     assertNoRouteCollisions(user_routes, extra_routes);
     return tupleConcatValues(user_routes, extra_routes);
-}
-
-fn optionsField(
-    comptime opts: anytype,
-    comptime name: []const u8,
-    comptime default: anytype,
-) @TypeOf(if (@hasField(@TypeOf(opts), name)) @field(opts, name) else default) {
-    if (@hasField(@TypeOf(opts), name)) return @field(opts, name);
-    return default;
 }
 
 fn structFieldsToST(comptime T: type) []const req_ctx.ST {
@@ -852,6 +862,38 @@ pub fn Compiled(
             @call(.auto, handler, .{ server, stream, r, w, line, res });
         }
 
+        fn maybeHandleUpgrade(
+            comptime maybe_upgrade: anytype,
+            server: anytype,
+            stream: *const std.Io.net.Stream,
+            r: *Io.Reader,
+            w: *Io.Writer,
+            line: request.RequestLine,
+            res: Res,
+        ) DispatchError!?Action {
+            if (@TypeOf(maybe_upgrade) == @TypeOf(null)) return null;
+
+            if (@typeInfo(@TypeOf(maybe_upgrade)) == .optional) {
+                if (maybe_upgrade) |upgrade_handler| {
+                    if (res.status == .switching_protocols) {
+                        try response.writeUpgrade(w, res);
+                        if (w.buffered().len != 0) try w.flush();
+                        callUpgradeHandler(upgrade_handler, server, stream, r, w, line, res);
+                        return .upgraded;
+                    }
+                }
+                return null;
+            }
+
+            if (res.status == .switching_protocols) {
+                try response.writeUpgrade(w, res);
+                if (w.buffered().len != 0) try w.flush();
+                callUpgradeHandler(maybe_upgrade, server, stream, r, w, line, res);
+                return .upgraded;
+            }
+            return null;
+        }
+
         pub fn dispatch(
             server: anytype,
             allocator: Allocator,
@@ -867,21 +909,21 @@ pub fn Compiled(
                 if (route_index == i) {
                     const rd = @field(routes, f.name);
                     const p = compiled.patterns[i];
-                    const MwTuple = tupleConcat(global_middlewares, optionsField(rd.options, "middlewares", .{}));
+                    const MwTuple = tupleConcat(global_middlewares, rd.middlewares.value);
                     const NeedH = middleware.needsHeaders(MwTuple);
                     const NeedQ = middleware.needsQuery(MwTuple);
                     const NeedP = middleware.needsParams(MwTuple);
-                    const H = parse.mergeHeaderStructs(NeedH, optionsField(rd.options, "headers", struct {}));
-                    const Q = parse.mergeStructs(NeedQ, optionsField(rd.options, "query", struct {}));
-                    const P = parse.mergeStructs(NeedP, optionsField(rd.options, "params", struct {}));
+                    const H = parse.mergeHeaderStructs(NeedH, rd.headers);
+                    const Q = parse.mergeStructs(NeedQ, rd.query);
+                    const P = parse.mergeStructs(NeedP, rd.params);
                     const MwCtx = middleware.contextType(MwTuple);
                     const mw_ctx = middleware.initContext(MwTuple, MwCtx);
                     const ReqT = request.RequestPWithPatternCtx(H, Q, P, p.param_names, MwCtx, rd.pattern, rd.method, @TypeOf(server.ctx));
                     const ReqCtxT = req_ctx.ReqCtx;
                     const HandlerBridge = struct {
                         pub const function = struct {
-                            fn call(comptime rctxv: ReqCtxT, reqv2: rctxv.T()) callHandlerCompat.returnType(rd.handler, rctxv, rctxv.T()) {
-                                return callHandlerCompat.call(rd.handler, rctxv, reqv2);
+                            fn call(comptime rctxv: ReqCtxT, reqv2: rctxv.T()) callHandlerCompat.returnType(rd.handler.function, rctxv, rctxv.T()) {
+                                return callHandlerCompat.call(rd.handler.function, rctxv, reqv2);
                             }
                         }.call;
                     };
@@ -927,28 +969,7 @@ pub fn Compiled(
 
                     // Ensure unread body is discarded before next request.
                     try reqv.discardUnreadBody();
-                    if (@hasField(@TypeOf(rd.options), "upgrade_handler")) {
-                        const maybe_upgrade = @field(rd.options, "upgrade_handler");
-                        if (@TypeOf(maybe_upgrade) != @TypeOf(null)) {
-                            if (@typeInfo(@TypeOf(maybe_upgrade)) == .optional) {
-                                if (maybe_upgrade) |upgrade_handler| {
-                                    if (res.status == .switching_protocols) {
-                                        try response.writeUpgrade(w, res);
-                                        if (w.buffered().len != 0) try w.flush();
-                                        callUpgradeHandler(upgrade_handler, server, stream, r, w, line, res);
-                                        return .upgraded;
-                                    }
-                                }
-                            } else {
-                                if (res.status == .switching_protocols) {
-                                    try response.writeUpgrade(w, res);
-                                    if (w.buffered().len != 0) try w.flush();
-                                    callUpgradeHandler(maybe_upgrade, server, stream, r, w, line, res);
-                                    return .upgraded;
-                                }
-                            }
-                        }
-                    }
+                    if (try maybeHandleUpgrade(rd.upgrade_handler.value, server, stream, r, w, line, res)) |act| return act;
                     const send_body = !(line.method.len == 4 and line.method[0] == 'H' and line.method[1] == 'E' and line.method[2] == 'A' and line.method[3] == 'D');
                     return finishResponse(w, res, reqv.keepAlive(), send_body);
                 }

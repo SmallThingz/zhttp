@@ -89,6 +89,7 @@ exe.root_module.addImport("zhttp", zhttp_dep.module("zhttp"));
 
 - `zhttp.middleware.Static`
 - `zhttp.middleware.Cors`
+- `zhttp.middleware.Origin`
 - `zhttp.middleware.Logger`
 - `zhttp.middleware.Compression`
 - `zhttp.middleware.Timeout`

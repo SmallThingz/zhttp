@@ -58,6 +58,10 @@ const SrvT = zhttp.Server(.{
     .middlewares = .{
         zhttp.middleware.Logger(.{}),
         zhttp.middleware.SecurityHeaders(.{}),
+        zhttp.middleware.Origin(.{
+            .origins = &.{"http://example.com"},
+            .allow_missing = true,
+        }),
         zhttp.middleware.Cors(.{ .origins = &.{"http://example.com"} }),
         zhttp.middleware.Etag(.{ .header_behavior = .check_then_add }),
         zhttp.middleware.RequestId(.{ .name = "rid" }),
@@ -133,6 +137,17 @@ pub fn main(init: std.process.Init) !void {
             try std.testing.expect(try headerContains(resp.head, init.gpa, "x-request-id:"));
             try std.testing.expect(try headerContains(resp.head, init.gpa, "x-content-type-options: nosniff"));
             try std.testing.expect(std.mem.startsWith(u8, resp.body, "public rid="));
+        }
+
+        {
+            const req = "GET /public HTTP/1.1\r\nHost: x\r\nOrigin: http://forbidden.example\r\n\r\n";
+            try sw.interface.writeAll(req);
+            try sw.interface.flush();
+            const resp = try readResponse(&sr.interface, init.gpa);
+            defer init.gpa.free(resp.head);
+            defer init.gpa.free(resp.body);
+            try std.testing.expect(std.mem.startsWith(u8, resp.head, "HTTP/1.1 403"));
+            try std.testing.expectEqualStrings("forbidden origin\n", resp.body);
         }
 
         {

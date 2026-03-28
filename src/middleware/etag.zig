@@ -32,6 +32,7 @@ fn matchesIfNoneMatch(header_value: []const u8, tag: []const u8) bool {
     var it = std.mem.splitScalar(u8, trimmed, ',');
     while (it.next()) |raw| {
         const t = std.mem.trim(u8, raw, " \t");
+        if (std.mem.eql(u8, t, "*")) return true;
         if (std.mem.eql(u8, t, tag)) return true;
         if (t.len > 2 and t[0] == 'W' and t[1] == '/' and std.mem.eql(u8, t[2..], tag)) return true;
     }
@@ -138,7 +139,9 @@ test "etag: check_then_add skips if already set" {
         }
     };
 
-    const gpa = std.testing.allocator;
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
     const path_buf = "/".*;
     const query_buf: [0]u8 = .{};
     const line: @import("../request.zig").RequestLine = .{
@@ -148,8 +151,8 @@ test "etag: check_then_add skips if already set" {
         .query = @constCast(query_buf[0..]),
     };
     const mw_ctx: MwCtx = .{};
-    var reqv = ReqT.init(gpa, std.testing.io, line, mw_ctx);
-    defer reqv.deinit(gpa);
+    var reqv = ReqT.init(a, std.testing.io, line, mw_ctx);
+    defer reqv.deinit(a);
 
     const res = try runMiddlewareTest(Mw, ReqT, Next, &reqv, line.method);
     try std.testing.expectEqual(@as(usize, 1), res.headers.len);

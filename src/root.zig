@@ -129,6 +129,16 @@ test {
     _ = @import("router.zig");
     _ = @import("server.zig");
     _ = @import("middleware.zig");
+    _ = @import("middleware/mod.zig");
+    _ = @import("middleware/util.zig");
+    _ = @import("middleware/compression.zig");
+    _ = @import("middleware/cors.zig");
+    _ = @import("middleware/etag.zig");
+    _ = @import("middleware/logger.zig");
+    _ = @import("middleware/origin.zig");
+    _ = @import("middleware/request_id.zig");
+    _ = @import("middleware/security_headers.zig");
     _ = @import("middleware/static.zig");
+    _ = @import("middleware/timeout.zig");
     _ = @import("urldecode.zig");
 }

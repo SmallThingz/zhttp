@@ -161,7 +161,9 @@ test "compression: check_then_add skips when content-encoding exists" {
         }
     };
 
-    const gpa = std.testing.allocator;
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
     const path_buf = "/".*;
     const query_buf: [0]u8 = .{};
     const line: @import("../request.zig").RequestLine = .{
@@ -171,10 +173,10 @@ test "compression: check_then_add skips when content-encoding exists" {
         .query = @constCast(query_buf[0..]),
     };
     const mw_ctx: MwCtx = .{};
-    var reqv = ReqT.init(gpa, std.testing.io, line, mw_ctx);
-    defer reqv.deinit(gpa);
+    var reqv = ReqT.init(a, std.testing.io, line, mw_ctx);
+    defer reqv.deinit(a);
     var r = std.Io.Reader.fixed("Accept-Encoding: gzip\r\n\r\n");
-    try reqv.parseHeaders(gpa, &r, 1024);
+    try reqv.parseHeaders(a, &r, 1024);
 
     const res = try runMiddlewareTest(Mw, ReqT, Next, &reqv, line.method);
     try std.testing.expectEqual(@as(usize, 1), res.headers.len);
@@ -207,7 +209,9 @@ test "compression: check_then_add skips duplicate vary" {
         }
     };
 
-    const gpa = std.testing.allocator;
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
     const path_buf = "/".*;
     const query_buf: [0]u8 = .{};
     const line: @import("../request.zig").RequestLine = .{
@@ -217,10 +221,10 @@ test "compression: check_then_add skips duplicate vary" {
         .query = @constCast(query_buf[0..]),
     };
     const mw_ctx: MwCtx = .{};
-    var reqv = ReqT.init(gpa, std.testing.io, line, mw_ctx);
-    defer reqv.deinit(gpa);
+    var reqv = ReqT.init(a, std.testing.io, line, mw_ctx);
+    defer reqv.deinit(a);
     var r = std.Io.Reader.fixed("Accept-Encoding: gzip\r\n\r\n");
-    try reqv.parseHeaders(gpa, &r, 1024);
+    try reqv.parseHeaders(a, &r, 1024);
 
     const res = try runMiddlewareTest(Mw, ReqT, Next, &reqv, line.method);
     try std.testing.expectEqual(@as(usize, 2), res.headers.len);

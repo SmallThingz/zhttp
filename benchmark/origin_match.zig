@@ -6,7 +6,7 @@ comptime {
     @setEvalBranchQuota(200_000);
 }
 
-const allowed_origins = .{
+const allowed_origins = [_][]const u8{
     "https://app.example.com",
     "https://admin.example.com",
     "https://api.example.com",
@@ -60,8 +60,8 @@ const probes = [_][]const u8{
     "null",
 };
 
-const Tree = zhttp.middleware.OriginDecisionTree(allowed_origins);
-const Hash = zhttp.middleware.OriginHashMatcher(allowed_origins);
+const Tree = zhttp.middleware.OriginDecisionTree(allowed_origins[0..]);
+const Hash = zhttp.middleware.OriginHashMatcher(allowed_origins[0..]);
 
 var sink: usize = 0;
 
@@ -71,15 +71,6 @@ fn nowNs() u64 {
     const rc = linux.clock_gettime(linux.CLOCK.MONOTONIC, &ts);
     if (rc != 0) std.process.fatal("clock_gettime failed", .{});
     return @as(u64, @intCast(ts.sec)) * std.time.ns_per_s + @as(u64, @intCast(ts.nsec));
-}
-
-fn allowedOriginsArray() [@typeInfo(@TypeOf(allowed_origins)).@"struct".fields.len][]const u8 {
-    const fields = @typeInfo(@TypeOf(allowed_origins)).@"struct".fields;
-    var out: [fields.len][]const u8 = undefined;
-    inline for (fields, 0..) |f, i| {
-        out[i] = @field(allowed_origins, f.name);
-    }
-    return out;
 }
 
 fn runTree(iters: usize) !u64 {
@@ -150,7 +141,7 @@ pub fn main(init: std.process.Init) !void {
 
     std.debug.print(
         "origin benchmark: {d} allowed origins, {d} probes, {d} total lookups\n",
-        .{ allowedOriginsArray().len, probes.len, total_lookups },
+        .{ allowed_origins.len, probes.len, total_lookups },
     );
     printResult("decision_tree", tree_elapsed, total_lookups);
     printResult("origin_hash_matcher", map_elapsed, total_lookups);

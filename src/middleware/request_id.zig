@@ -123,7 +123,9 @@ test "request_id: adds header" {
         }
     };
 
-    const gpa = std.testing.allocator;
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
     const path_buf = "/".*;
     const query_buf: [0]u8 = .{};
     const line: @import("../request.zig").RequestLine = .{
@@ -133,8 +135,8 @@ test "request_id: adds header" {
         .query = @constCast(query_buf[0..]),
     };
     const mw_ctx: MwCtx = .{};
-    var reqv = ReqT.init(gpa, std.testing.io, line, mw_ctx);
-    defer reqv.deinit(gpa);
+    var reqv = ReqT.init(a, std.testing.io, line, mw_ctx);
+    defer reqv.deinit(a);
 
     const res = try runMiddlewareTest(Mw, ReqT, Next, &reqv, line.method);
     const rid = headerValue(res.headers, "x-request-id") orelse return error.TestExpectedEqual;
@@ -158,7 +160,9 @@ test "request_id: check_then_add keeps existing header" {
         }
     };
 
-    const gpa = std.testing.allocator;
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
     const path_buf = "/".*;
     const query_buf: [0]u8 = .{};
     const line: @import("../request.zig").RequestLine = .{
@@ -168,8 +172,8 @@ test "request_id: check_then_add keeps existing header" {
         .query = @constCast(query_buf[0..]),
     };
     const mw_ctx: MwCtx = .{};
-    var reqv = ReqT.init(gpa, std.testing.io, line, mw_ctx);
-    defer reqv.deinit(gpa);
+    var reqv = ReqT.init(a, std.testing.io, line, mw_ctx);
+    defer reqv.deinit(a);
 
     const res = try runMiddlewareTest(Mw, ReqT, Next, &reqv, line.method);
     try std.testing.expectEqual(@as(usize, 1), res.headers.len);

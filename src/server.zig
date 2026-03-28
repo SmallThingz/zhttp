@@ -51,7 +51,7 @@ fn configField(comptime cfg: anytype, comptime name: []const u8) @FieldType(Conf
 /// - `config: struct`     Optional config overrides (fields match `zhttp.server.Config`).
 /// - `error_handler`      Optional fallback transport/dispatch error handler:
 ///                        `fn(*Server, *Io.Writer, comptime ErrorSet: type, err: ErrorSet) router.Action`.
-/// - `not_found_handler`  Optional fallback handler override for route misses.
+/// - `not_found_handler`  Optional fallback endpoint type override for route misses.
 /// - `not_found_options`  Optional request options for the fallback handler (`headers`, `query`, `middlewares`).
 pub fn Server(comptime def: anytype) type {
     if (!@hasField(@TypeOf(def), "routes")) @compileError("Server definition must include `.routes = .{ ... }`");

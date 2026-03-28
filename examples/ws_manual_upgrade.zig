@@ -78,8 +78,7 @@ const Handshake = struct {
             else => return zhttp.Res.text(400, "bad websocket handshake\n"),
         };
 
-        const client_key = req.header(.sec_websocket_key) orelse unreachable;
-        return zhttp.upgrade.websocketResponse(req.allocator(), client_key, .{
+        return zhttp.upgrade.websocketResponseWithAccept(req.allocator(), accepted.accept_key[0..], .{
             .subprotocol = accepted.selected_subprotocol,
             .extensions = accepted.selected_extensions,
         });

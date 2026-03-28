@@ -1779,7 +1779,7 @@ test "dispatch: route upgrade_handler handles 101 and returns upgraded action" {
 
     const Routes = struct {
         pub fn call(comptime _: ReqCtx, req: anytype) !Res {
-                _ = req;
+            _ = req;
             return .{
                 .status = .switching_protocols,
                 .headers = &.{

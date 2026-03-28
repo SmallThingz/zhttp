@@ -46,6 +46,8 @@ pub fn responseFor(allocator: std.mem.Allocator, opts: ResponseOptions) !Res {
 
 /// Computes the RFC 6455 `sec-websocket-accept` value for a websocket key.
 pub fn websocketAcceptKey(allocator: std.mem.Allocator, sec_websocket_key: []const u8) ![]u8 {
+    if (sec_websocket_key.len == 0) return error.EmptyWebSocketKey;
+
     var sha1 = std.crypto.hash.Sha1.init(.{});
     sha1.update(sec_websocket_key);
     sha1.update(websocket_guid);
@@ -59,13 +61,11 @@ pub fn websocketAcceptKey(allocator: std.mem.Allocator, sec_websocket_key: []con
     return encoded;
 }
 
-/// Builds a websocket `101 Switching Protocols` response.
-pub fn websocketResponse(
+fn websocketResponseFromOwnedAccept(
     allocator: std.mem.Allocator,
-    sec_websocket_key: []const u8,
+    accept: []u8,
     opts: WebSocketResponseOptions,
 ) !Res {
-    const accept = try websocketAcceptKey(allocator, sec_websocket_key);
     errdefer allocator.free(accept);
 
     var header_count: usize = 3 + opts.extra_headers.len;
@@ -101,6 +101,28 @@ pub fn websocketResponse(
     };
 }
 
+/// Builds a websocket `101 Switching Protocols` response.
+pub fn websocketResponse(
+    allocator: std.mem.Allocator,
+    sec_websocket_key: []const u8,
+    opts: WebSocketResponseOptions,
+) !Res {
+    const accept = try websocketAcceptKey(allocator, sec_websocket_key);
+    return websocketResponseFromOwnedAccept(allocator, accept, opts);
+}
+
+/// Builds a websocket `101 Switching Protocols` response from a precomputed accept value.
+pub fn websocketResponseWithAccept(
+    allocator: std.mem.Allocator,
+    sec_websocket_accept: []const u8,
+    opts: WebSocketResponseOptions,
+) !Res {
+    if (sec_websocket_accept.len == 0) return error.EmptyWebSocketAccept;
+
+    const accept = try allocator.dupe(u8, sec_websocket_accept);
+    return websocketResponseFromOwnedAccept(allocator, accept, opts);
+}
+
 test "responseFor: generic upgrade headers are emitted" {
     const extra = [_]Header{.{ .name = "x-up", .value = "1" }};
     const res = try responseFor(std.testing.allocator, .{
@@ -118,11 +140,21 @@ test "responseFor: generic upgrade headers are emitted" {
     try std.testing.expectEqualStrings("1", res.headers[2].value);
 }
 
+test "responseFor: rejects empty protocol" {
+    try std.testing.expectError(error.EmptyProtocol, responseFor(std.testing.allocator, .{
+        .protocol = "",
+    }));
+}
+
 test "websocketAcceptKey: matches RFC 6455 example" {
     const key = "dGhlIHNhbXBsZSBub25jZQ==";
     const accept = try websocketAcceptKey(std.testing.allocator, key);
     defer std.testing.allocator.free(accept);
     try std.testing.expectEqualStrings("s3pPLMBiTxaQ9kYGzzhZRbK+xOo=", accept);
+}
+
+test "websocketAcceptKey: rejects empty key" {
+    try std.testing.expectError(error.EmptyWebSocketKey, websocketAcceptKey(std.testing.allocator, ""));
 }
 
 test "websocketResponse: emits required websocket headers" {
@@ -142,4 +174,25 @@ test "websocketResponse: emits required websocket headers" {
     try std.testing.expectEqualStrings("s3pPLMBiTxaQ9kYGzzhZRbK+xOo=", res.headers[2].value);
     try std.testing.expectEqualStrings("sec-websocket-protocol", res.headers[3].name);
     try std.testing.expectEqualStrings("chat", res.headers[3].value);
+}
+
+test "websocketResponseWithAccept: accepts precomputed value" {
+    const res = try websocketResponseWithAccept(std.testing.allocator, "abc=", .{
+        .extensions = "permessage-deflate",
+        .extra_headers = &.{.{ .name = "x-up", .value = "1" }},
+    });
+    defer std.testing.allocator.free(res.headers);
+    defer std.testing.allocator.free(res.headers[2].value);
+
+    try std.testing.expectEqual(std.http.Status.switching_protocols, res.status);
+    try std.testing.expectEqualStrings("sec-websocket-accept", res.headers[2].name);
+    try std.testing.expectEqualStrings("abc=", res.headers[2].value);
+    try std.testing.expectEqualStrings("sec-websocket-extensions", res.headers[3].name);
+    try std.testing.expectEqualStrings("permessage-deflate", res.headers[3].value);
+    try std.testing.expectEqualStrings("x-up", res.headers[4].name);
+    try std.testing.expectEqualStrings("1", res.headers[4].value);
+}
+
+test "websocketResponseWithAccept: rejects empty accept value" {
+    try std.testing.expectError(error.EmptyWebSocketAccept, websocketResponseWithAccept(std.testing.allocator, "", .{}));
 }

@@ -16,7 +16,8 @@
 //! - `.upgrade_handler: fn(server, stream, r, w, line, res) void` (or `null`)
 //!   If set and the handler returns `101 Switching Protocols`, zhttp writes an upgrade response,
 //!   calls this function, and returns `.upgraded` (the upgrade handler owns connection lifecycle).
-//!   Use `zhttp.upgrade.responseFor` / `zhttp.upgrade.websocketResponse` to build 101 responses.
+//!   Use `zhttp.upgrade.responseFor`, `zhttp.upgrade.websocketResponse`,
+//!   or `zhttp.upgrade.websocketResponseWithAccept` to build 101 responses.
 //!
 //! Server definition fields (for `Server(.{ ... })`):
 //! - `.Context: type` (optional) user context exposed through `req.ctx()`

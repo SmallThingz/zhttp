@@ -5,11 +5,13 @@
     .minimum_zig_version = "0.16.0-dev.2736+3b515fbed",
     .dependencies = .{
         .libzstd = .{
-            .path = "../zcompress",
+            .url = "git+https://github.com/SmallThingz/libzstd.zig?ref=main#441f8adbdd1565c65b9c0a65b4fc0db9ae7ac2f1",
+            .hash = "libzstd-0.0.0-PLY9QDRZAAARJu8cj1dnFsukUTtueTHe8t7kQiOGdrHo",
             .lazy = true,
         },
         .libbrotli = .{
-            .path = "../libbrotli.zig",
+            .url = "git+https://github.com/SmallThingz/libbrotli.zig?ref=main#45ec5412b78ee6cf9dcae6f3d183aa96aa5e36b4",
+            .hash = "libbrotli-0.0.0-JbJ8NSt0AAAj_sjosPyJ5yiDY41oa4vZfGKFOYMnrLVr",
             .lazy = true,
         },
         .zwebsocket = .{

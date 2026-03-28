@@ -12,6 +12,7 @@ pub const CorsSignature = middleware.CorsSignature;
 pub const Logger = middleware.Logger;
 pub const LoggerOptions = middleware.LoggerOptions;
 pub const Compression = middleware.Compression;
+pub const CompressionScheme = middleware.CompressionScheme;
 pub const CompressionOptions = middleware.CompressionOptions;
 pub const Origin = middleware.Origin;
 pub const OriginOptions = middleware.OriginOptions;
@@ -38,6 +39,7 @@ test "mod forwards canonical middleware exports" {
     try std.testing.expect(Logger == middleware.Logger);
     try std.testing.expect(LoggerOptions == middleware.LoggerOptions);
     try std.testing.expect(Compression == middleware.Compression);
+    try std.testing.expect(CompressionScheme == middleware.CompressionScheme);
     try std.testing.expect(CompressionOptions == middleware.CompressionOptions);
     try std.testing.expect(Origin == middleware.Origin);
     try std.testing.expect(OriginOptions == middleware.OriginOptions);

@@ -171,6 +171,16 @@ pub const ReqCtx = struct {
                 return Ctx.call(*const @TypeOf(self2._base.mwCtxConst().*), "mwCtxConst", .{self2});
             }
 
+            /// Implements mw static ctx mut.
+            pub fn mwStaticCtxMut(self2: ReqSelf) *@TypeOf(self2._base.mwStaticCtxMut().*) {
+                return Ctx.call(*@TypeOf(self2._base.mwStaticCtxMut().*), "mwStaticCtxMut", .{self2});
+            }
+
+            /// Implements mw static ctx const.
+            pub fn mwStaticCtxConst(self2: ReqSelf) *const @TypeOf(self2._base.mwStaticCtxConst().*) {
+                return Ctx.call(*const @TypeOf(self2._base.mwStaticCtxConst().*), "mwStaticCtxConst", .{self2});
+            }
+
             /// Implements keep alive.
             pub fn keepAlive(self2: ReqSelf) bool {
                 return Ctx.call(bool, "keepAlive", .{self2});
@@ -204,6 +214,16 @@ pub const ReqCtx = struct {
             /// Implements middleware data const.
             pub fn middlewareDataConst(self2: ReqSelf, comptime name: anytype) @TypeOf(self2._base.middlewareDataConst(name)) {
                 return Ctx.call(@TypeOf(self2._base.middlewareDataConst(name)), "middlewareDataConst", .{ self2, name });
+            }
+
+            /// Implements middleware static.
+            pub fn middlewareStatic(self2: ReqSelf, comptime name: anytype) @TypeOf(self2._base.middlewareStatic(name)) {
+                return Ctx.call(@TypeOf(self2._base.middlewareStatic(name)), "middlewareStatic", .{ self2, name });
+            }
+
+            /// Implements middleware static const.
+            pub fn middlewareStaticConst(self2: ReqSelf, comptime name: anytype) @TypeOf(self2._base.middlewareStaticConst(name)) {
+                return Ctx.call(@TypeOf(self2._base.middlewareStaticConst(name)), "middlewareStaticConst", .{ self2, name });
             }
 
             /// Implements body all.

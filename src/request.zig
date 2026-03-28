@@ -220,6 +220,7 @@ fn RequestPWithPatternExt(
     comptime Params: type,
     comptime param_names: []const []const u8,
     comptime MwCtx: type,
+    comptime MwStaticCtx: type,
     comptime route_pattern: []const u8,
     comptime method_name: []const u8,
     comptime CtxPtr: type,
@@ -269,6 +270,8 @@ fn RequestPWithPatternExt(
         _ctx: CtxPtr,
         /// Stores internal `_mw_ctx` state.
         _mw_ctx: MwCtx,
+        /// Stores internal `_mw_static_ctx` state.
+        _mw_static_ctx: *MwStaticCtx,
         /// Stores internal `_headers` state.
         _headers: Headers = parse.emptyStruct(Headers),
         /// Stores internal `_query` state.
@@ -277,11 +280,19 @@ fn RequestPWithPatternExt(
         _params: ParamsEffective = parse.emptyStruct(ParamsEffective),
 
         const Self = @This();
+        var default_mw_static_ctx: MwStaticCtx = std.mem.zeroes(MwStaticCtx);
 
         pub const ParamNames: []const []const u8 = param_names;
 
         /// Implements init with ctx.
-        pub fn initWithCtx(init_arena: Allocator, init_io: Io, line: RequestLine, mw_ctx: MwCtx, app_ctx: CtxPtr) Self {
+        pub fn initWithCtx(
+            init_arena: Allocator,
+            init_io: Io,
+            line: RequestLine,
+            mw_ctx: MwCtx,
+            app_ctx: CtxPtr,
+            mw_static_ctx: ?*MwStaticCtx,
+        ) Self {
             return .{
                 ._base = .{
                     .io = init_io,
@@ -291,13 +302,14 @@ fn RequestPWithPatternExt(
                 ._path = line.path,
                 ._ctx = app_ctx,
                 ._mw_ctx = mw_ctx,
+                ._mw_static_ctx = mw_static_ctx orelse &default_mw_static_ctx,
             };
         }
 
         /// Initializes this value.
         pub fn init(init_arena: Allocator, init_io: Io, line: RequestLine, mw_ctx: MwCtx) Self {
             if (CtxPtr != void) @compileError("Request.init requires void app context; use initWithCtx for non-void context");
-            return initWithCtx(init_arena, init_io, line, mw_ctx, {});
+            return initWithCtx(init_arena, init_io, line, mw_ctx, {}, null);
         }
 
         /// Implements ctx.
@@ -380,6 +392,21 @@ fn RequestPWithPatternExt(
             self._mw_ctx = value;
         }
 
+        /// Implements mw static ctx mut.
+        pub fn mwStaticCtxMut(self: *Self) *MwStaticCtx {
+            return self._mw_static_ctx;
+        }
+
+        /// Implements mw static ctx const.
+        pub fn mwStaticCtxConst(self: *const Self) *const MwStaticCtx {
+            return self._mw_static_ctx;
+        }
+
+        /// Implements set mw static ctx.
+        pub fn setMwStaticCtx(self: *Self, value: *MwStaticCtx) void {
+            self._mw_static_ctx = value;
+        }
+
         /// Implements headers mut.
         pub fn headersMut(self: *Self) *Headers {
             return &self._headers;
@@ -458,6 +485,16 @@ fn RequestPWithPatternExt(
         /// Get a const pointer to middleware data by name, e.g. `req.middlewareDataConst(.auth)`.
         pub fn middlewareDataConst(self: *const Self, comptime name: anytype) *const middlewareContextFieldType(MwCtx, name) {
             return &@field(self._mw_ctx, middlewareContextFieldName(MwCtx, name));
+        }
+
+        /// Get a pointer to middleware static context by name, e.g. `req.middlewareStatic(.cache)`.
+        pub fn middlewareStatic(self: *Self, comptime name: anytype) *middlewareContextFieldType(MwStaticCtx, name) {
+            return &@field(self._mw_static_ctx.*, middlewareContextFieldName(MwStaticCtx, name));
+        }
+
+        /// Get a const pointer to middleware static context by name.
+        pub fn middlewareStaticConst(self: *const Self, comptime name: anytype) *const middlewareContextFieldType(MwStaticCtx, name) {
+            return &@field(self._mw_static_ctx.*, middlewareContextFieldName(MwStaticCtx, name));
         }
 
         /// Implements keep alive.
@@ -793,7 +830,21 @@ pub fn RequestPWithPattern(
     comptime route_pattern: []const u8,
     comptime method_name: []const u8,
 ) type {
-    return RequestPWithPatternExt(Headers, Query, Params, param_names, MwCtx, route_pattern, method_name, void);
+    return RequestPWithPatternExt(Headers, Query, Params, param_names, MwCtx, struct {}, route_pattern, method_name, void);
+}
+
+/// Implements request pwith pattern static.
+pub fn RequestPWithPatternStatic(
+    comptime Headers: type,
+    comptime Query: type,
+    comptime Params: type,
+    comptime param_names: []const []const u8,
+    comptime MwCtx: type,
+    comptime MwStaticCtx: type,
+    comptime route_pattern: []const u8,
+    comptime method_name: []const u8,
+) type {
+    return RequestPWithPatternExt(Headers, Query, Params, param_names, MwCtx, MwStaticCtx, route_pattern, method_name, void);
 }
 
 /// Implements request pwith pattern ctx.
@@ -807,7 +858,22 @@ pub fn RequestPWithPatternCtx(
     comptime method_name: []const u8,
     comptime CtxPtr: type,
 ) type {
-    return RequestPWithPatternExt(Headers, Query, Params, param_names, MwCtx, route_pattern, method_name, CtxPtr);
+    return RequestPWithPatternExt(Headers, Query, Params, param_names, MwCtx, struct {}, route_pattern, method_name, CtxPtr);
+}
+
+/// Implements request pwith pattern ctx static.
+pub fn RequestPWithPatternCtxStatic(
+    comptime Headers: type,
+    comptime Query: type,
+    comptime Params: type,
+    comptime param_names: []const []const u8,
+    comptime MwCtx: type,
+    comptime MwStaticCtx: type,
+    comptime route_pattern: []const u8,
+    comptime method_name: []const u8,
+    comptime CtxPtr: type,
+) type {
+    return RequestPWithPatternExt(Headers, Query, Params, param_names, MwCtx, MwStaticCtx, route_pattern, method_name, CtxPtr);
 }
 
 /// Implements request.

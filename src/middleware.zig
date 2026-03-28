@@ -11,6 +11,14 @@ pub const MiddlewareInfo = struct {
     name: []const u8,
     /// Optional middleware data type stored in request middleware context.
     data: ?type = null,
+    /// Optional per-route static context type for this middleware.
+    ///
+    /// If set, initialization runs once at server startup per route.
+    /// When this type exposes
+    /// `pub fn init(io: std.Io, allocator: std.mem.Allocator, route_decl: anytype) Self|!Self`,
+    /// that function is used to build the route-local context value and any init error
+    /// is returned from `Server.init`.
+    static_context: ?type = null,
     /// Optional path param capture type required by this middleware.
     path: ?type = null,
     /// Optional query capture type required by this middleware.
@@ -41,6 +49,11 @@ pub fn info(comptime Mw: type) MiddlewareInfo {
     if (out.path) |Path| {
         if (@typeInfo(Path) != .@"struct") {
             @compileError("middleware " ++ @typeName(Mw) ++ " Info.path must be a struct type");
+        }
+    }
+    if (out.static_context) |StaticContext| {
+        if (@typeInfo(StaticContext) != .@"struct") {
+            @compileError("middleware " ++ @typeName(Mw) ++ " Info.static_context must be a struct type");
         }
     }
     if (out.query) |Query| {
@@ -105,11 +118,18 @@ pub fn needsParams(comptime mws: anytype) type {
 }
 
 const EmptyMiddlewareData = struct {};
+const EmptyMiddlewareStaticContext = struct {};
 
 fn dataType(comptime Mw: type) type {
     const mw_info = info(Mw);
     if (mw_info.data) |Data| return Data;
     return EmptyMiddlewareData;
+}
+
+fn staticContextTypeForMw(comptime Mw: type) type {
+    const mw_info = info(Mw);
+    if (mw_info.static_context) |StaticContext| return StaticContext;
+    return EmptyMiddlewareStaticContext;
 }
 
 fn name(comptime Mw: type) []const u8 {
@@ -121,6 +141,12 @@ fn hasStoredData(comptime Mw: type) bool {
     return Data != EmptyMiddlewareData and @sizeOf(Data) != 0;
 }
 
+fn hasStoredStaticContext(comptime Mw: type) bool {
+    const StaticContext = staticContextTypeForMw(Mw);
+    if (StaticContext == EmptyMiddlewareStaticContext) return false;
+    return @sizeOf(StaticContext) != 0 or @hasDecl(StaticContext, "init");
+}
+
 fn initData(comptime Mw: type) dataType(Mw) {
     const Data = dataType(Mw);
     if (Data == EmptyMiddlewareData) return .{};
@@ -128,6 +154,21 @@ fn initData(comptime Mw: type) dataType(Mw) {
         return @call(.always_inline, Mw.initData, .{});
     }
     return std.mem.zeroes(Data);
+}
+
+fn initStaticContextValue(comptime StaticContext: type, io: std.Io, allocator: std.mem.Allocator, route_decl: anytype) !StaticContext {
+    if (@hasDecl(StaticContext, "init")) {
+        const init_fn = StaticContext.init;
+        const ret = @call(.auto, init_fn, .{ io, allocator, route_decl });
+        const RetT = @TypeOf(ret);
+        if (RetT == StaticContext) return ret;
+        if (@typeInfo(RetT) == .error_union and @typeInfo(RetT).error_union.payload == StaticContext) {
+            return try ret;
+        }
+        @compileError("middleware static context init must return StaticContext or !StaticContext");
+    }
+
+    return std.mem.zeroes(StaticContext);
 }
 
 /// Builds the middleware context struct type used by requests.
@@ -211,6 +252,81 @@ pub fn initContext(comptime mws: anytype, comptime Ctx: type) Ctx {
         if (!seen) {
             @field(ctx, mw_name) = initData(Mw);
         }
+    }
+    return ctx;
+}
+
+/// Builds the per-route static middleware context struct type.
+pub fn staticContextType(comptime mws: anytype) type {
+    const list = typeList(mws);
+    comptime var field_count: usize = 0;
+    inline for (list, 0..) |Mw, i| {
+        if (!hasStoredStaticContext(Mw)) continue;
+        const mw_name = comptime name(Mw);
+        const StaticContext = staticContextTypeForMw(Mw);
+
+        comptime var seen = false;
+        inline for (list[0..i]) |Prev| {
+            if (!hasStoredStaticContext(Prev)) continue;
+            const prev_name = comptime name(Prev);
+            if (comptime std.mem.eql(u8, prev_name, mw_name)) {
+                const PrevStaticContext = staticContextTypeForMw(Prev);
+                if (PrevStaticContext != StaticContext) {
+                    @compileError("middleware static_context field '" ++ mw_name ++ "' has conflicting types");
+                }
+                seen = true;
+                break;
+            }
+        }
+        if (!seen) field_count += 1;
+    }
+
+    if (field_count == 0) return struct {};
+
+    comptime var out_names: [field_count][]const u8 = undefined;
+    comptime var out_types: [field_count]type = undefined;
+    comptime var out_attrs: [field_count]std.builtin.Type.StructField.Attributes = undefined;
+    comptime var out_index: usize = 0;
+
+    inline for (list, 0..) |Mw, i| {
+        if (!hasStoredStaticContext(Mw)) continue;
+        const mw_name = comptime name(Mw);
+        const StaticContext = staticContextTypeForMw(Mw);
+
+        comptime var seen = false;
+        inline for (list[0..i]) |Prev| {
+            if (!hasStoredStaticContext(Prev)) continue;
+            const prev_name = comptime name(Prev);
+            if (comptime std.mem.eql(u8, prev_name, mw_name)) {
+                seen = true;
+                break;
+            }
+        }
+        if (seen) continue;
+
+        out_names[out_index] = mw_name;
+        out_types[out_index] = StaticContext;
+        out_attrs[out_index] = .{
+            .@"comptime" = false,
+            .@"align" = @alignOf(StaticContext),
+            .default_value_ptr = null,
+        };
+        out_index += 1;
+    }
+
+    return @Struct(.auto, null, out_names[0..], &out_types, &out_attrs);
+}
+
+/// Initializes per-route static middleware context values.
+pub fn initStaticContext(
+    comptime Ctx: type,
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    route_decl: anytype,
+) !Ctx {
+    var ctx: Ctx = std.mem.zeroes(Ctx);
+    inline for (std.meta.fields(Ctx)) |f| {
+        @field(ctx, f.name) = try initStaticContextValue(f.type, io, allocator, route_decl);
     }
     return ctx;
 }
@@ -319,6 +435,7 @@ pub const CorsSignature = @import("middleware/cors.zig").CorsSignature;
 pub const Logger = @import("middleware/logger.zig").Logger;
 pub const LoggerOptions = @import("middleware/logger.zig").LoggerOptions;
 pub const Compression = @import("middleware/compression.zig").Compression;
+pub const CompressionScheme = @import("middleware/compression.zig").CompressionScheme;
 pub const CompressionOptions = @import("middleware/compression.zig").CompressionOptions;
 pub const Origin = @import("middleware/origin.zig").Origin;
 pub const OriginOptions = @import("middleware/origin.zig").OriginOptions;

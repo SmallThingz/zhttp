@@ -11,7 +11,7 @@ Low-latency HTTP/1.1 server primitives for Zig with comptime routing, typed capt
 
 - 🧭 **Comptime route table**: define routes once with `zhttp.Server(.{ .routes = .{ ... } })`.
 - 🧠 **Typed request captures**: decode headers, query params, and path params with `zhttp.parse.*`.
-- 🪝 **Flexible handlers**: support no-arg, request-only, context-only, or context + request handlers.
+- 🪝 **Endpoint-first routes**: register middleware-shaped endpoint types per route (`pub fn call(comptime rctx, req)`).
 - 🧱 **Composable middleware**: mix global and per-route middleware with compile-time `Info` capture merging.
 - 📦 **Built-in middleware**: static files, CORS, logging, compression, timeout, ETag, request IDs, and security headers.
 - 🏎 **Tight hot path**: direct request parsing and response writing for low-overhead HTTP/1.1 servers.
@@ -31,16 +31,17 @@ Minimal server:
 const std = @import("std");
 const zhttp = @import("zhttp");
 
-fn hello(comptime rctx: anytype, req: rctx.T()) !zhttp.Res {
-    const name = req.queryParam(.name) orelse "world";
-    const body = try std.fmt.allocPrint(req.allocator(), "hello {s}\n", .{name});
-    _ = rctx;
-    return zhttp.Res.text(200, body);
-}
+const Hello = struct {
+    pub fn call(comptime rctx: zhttp.ReqCtx, req: rctx.T()) !zhttp.Res {
+        const name = req.queryParam(.name) orelse "world";
+        const body = try std.fmt.allocPrint(req.allocator(), "hello {s}\n", .{name});
+        return zhttp.Res.text(200, body);
+    }
+};
 
 const App = zhttp.Server(.{
     .routes = .{
-        zhttp.get("/hello", hello, .{
+        zhttp.get("/hello", Hello, .{
             .query = struct {
                 name: zhttp.parse.Optional(zhttp.parse.String),
             },
@@ -80,6 +81,8 @@ exe.root_module.addImport("zhttp", zhttp_dep.module("zhttp"));
 - `zhttp.Server(.{ ... })` accepts `.Context`, `.middlewares`, `.operations`, `.routes`, `.config`, `.error_handler`, `.not_found_handler`, and `.not_found_options`. `.error_handler` is a writer-based hook for user handler/middleware errors with signature `fn(*Server, *std.Io.Writer, comptime ErrorSet: type, err: ErrorSet) zhttp.router.Action`. Server parse/validation errors stay on the built-in bad-request path. If no not-found handler is provided, a built-in `404 not found` handler is used.
 - Route helpers: `zhttp.get`, `post`, `put`, `delete`, `patch`, `head`, `options`, and `zhttp.route(...)`.
 - Route options: `.headers`, `.query`, `.params`, `.middlewares`, `.upgrade_handler`.
+- Preferred route endpoint shape: `type` exposing `pub fn call(comptime rctx: zhttp.ReqCtx, req: rctx.T()) !zhttp.Res`.
+- Legacy function handlers are still accepted for compatibility.
 - `.upgrade_handler` is route-local and optional (`null` by default). If present and the route returns `101 Switching Protocols`, zhttp writes the upgrade response and calls `fn(server, stream, r, w, line, res) void`; that path returns `zhttp.router.Action.upgraded` and the upgrade handler owns connection close/lifecycle.
 - Standard middleware signatures are available at top-level as `zhttp.CorsSignature`.
 - Header capture keys match case-insensitively, and `_` in field names matches `-` in incoming headers.

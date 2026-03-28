@@ -6,6 +6,7 @@ const Io = std.Io;
 
 const response = @import("response.zig");
 const request = @import("request.zig");
+const ReqCtx = @import("req_ctx.zig").ReqCtx;
 const router = @import("router.zig");
 const middleware = @import("middleware.zig");
 const operations = @import("operations.zig");
@@ -69,6 +70,17 @@ pub fn Server(comptime def: anytype) type {
     const Middlewares = if (@hasField(DefT, "middlewares")) def.middlewares else .{};
     const Operations = if (@hasField(DefT, "operations")) def.operations else .{};
     const Routes = operations.apply(def.routes, Middlewares, Operations);
+    const GlobalMwList = comptime middleware.typeList(Middlewares);
+    const route_fields = @typeInfo(@TypeOf(Routes)).@"struct".fields;
+    const RouteStaticCtxTuple = comptime blk: {
+        var Ts: [route_fields.len]type = undefined;
+        for (route_fields, 0..) |f, i| {
+            const rd = @field(Routes, f.name);
+            const MwList = middleware.concatTypeLists(GlobalMwList, rd.middlewares);
+            Ts[i] = middleware.staticContextType(MwList);
+        }
+        break :blk std.meta.Tuple(&Ts);
+    };
     const Compiled = router.Compiled(Context, Routes, Middlewares);
     const DefaultNotFound = struct {
         fn handler(_: anytype) !response.Res {
@@ -77,7 +89,10 @@ pub fn Server(comptime def: anytype) type {
     };
     const NotFoundHandler = if (@hasField(DefT, "not_found_handler")) def.not_found_handler else DefaultNotFound.handler;
     const NotFoundOptions = if (@hasField(DefT, "not_found_options")) def.not_found_options else .{};
-    const NotFoundCompiled = router.Compiled(Context, .{router.get("/", NotFoundHandler, NotFoundOptions)}, Middlewares);
+    const NotFoundRoute = router.get("/", NotFoundHandler, NotFoundOptions);
+    const NotFoundCompiled = router.Compiled(Context, .{NotFoundRoute}, Middlewares);
+    const NotFoundMwList = middleware.concatTypeLists(GlobalMwList, NotFoundRoute.middlewares);
+    const NotFoundStaticCtx = middleware.staticContextType(NotFoundMwList);
 
     return struct {
         /// Stores `io`.
@@ -90,6 +105,10 @@ pub fn Server(comptime def: anytype) type {
         group: Io.Group = .init,
         /// Stores `ctx`.
         ctx: if (Context == void) void else *Context,
+        /// Stores per-route middleware static contexts.
+        route_static_ctx: RouteStaticCtxTuple,
+        /// Stores not-found middleware static context.
+        not_found_static_ctx: NotFoundStaticCtx,
 
         const Self = @This();
         pub const config = Conf;
@@ -118,6 +137,16 @@ pub fn Server(comptime def: anytype) type {
         };
         const ErrorHandler = if (@hasField(DefT, "error_handler")) def.error_handler else DefaultErrorHandler.call;
 
+        fn initRouteStaticContexts(io: Io, gpa: Allocator) !RouteStaticCtxTuple {
+            var out: RouteStaticCtxTuple = undefined;
+            inline for (route_fields, 0..) |f, i| {
+                const rd = @field(Routes, f.name);
+                const StaticCtx = comptime @TypeOf(@field(out, std.fmt.comptimePrint("{d}", .{i})));
+                @field(out, std.fmt.comptimePrint("{d}", .{i})) = try middleware.initStaticContext(StaticCtx, io, gpa, rd);
+            }
+            return out;
+        }
+
         /// Initializes this value.
         pub fn init(
             gpa: Allocator,
@@ -125,12 +154,17 @@ pub fn Server(comptime def: anytype) type {
             address: std.Io.net.IpAddress,
             ctx: if (Context == void) void else *Context,
         ) !Self {
-            const listener = try std.Io.net.IpAddress.listen(&address, io, .{ .reuse_address = true });
+            var listener = try std.Io.net.IpAddress.listen(&address, io, .{ .reuse_address = true });
+            errdefer listener.deinit(io);
+            const route_static_ctx = try initRouteStaticContexts(io, gpa);
+            const not_found_static_ctx = try middleware.initStaticContext(NotFoundStaticCtx, io, gpa, NotFoundRoute);
             return .{
                 .io = io,
                 .gpa = gpa,
                 .listener = listener,
                 .ctx = ctx,
+                .route_static_ctx = route_static_ctx,
+                .not_found_static_ctx = not_found_static_ctx,
             };
         }
 
@@ -263,12 +297,14 @@ pub fn Server(comptime def: anytype) type {
                     a: Allocator,
                 ) Compiled.DispatchError!Action {
                     var params_buf: [Compiled.RouteParamCounts[route_index]][]u8 = undefined;
+                    const route_static_ctx: *anyopaque = @ptrCast(&@field(server.route_static_ctx, std.fmt.comptimePrint("{d}", .{route_index})));
                     return Compiled.dispatch(
                         server,
                         a,
                         r,
                         w,
                         stream,
+                        route_static_ctx,
                         line,
                         route_index,
                         params_buf[0..Compiled.RouteParamCounts[route_index]],
@@ -289,12 +325,14 @@ pub fn Server(comptime def: anytype) type {
                     a: Allocator,
                 ) NotFoundCompiled.DispatchError!Action {
                     var params_buf: [NotFoundCompiled.RouteParamCounts[0]][]u8 = undefined;
+                    const route_static_ctx: *anyopaque = @ptrCast(&server.not_found_static_ctx);
                     return NotFoundCompiled.dispatch(
                         server,
                         a,
                         r,
                         w,
                         stream,
+                        route_static_ctx,
                         line,
                         0,
                         params_buf[0..NotFoundCompiled.RouteParamCounts[0]],
@@ -935,4 +973,138 @@ test "upgrade_handler: 101 triggers upgrade callback and stream ownership" {
 
     group.cancel(io);
     group.await(io) catch {};
+}
+
+test "middleware static_context: per-route init and request access" {
+    const RouteStaticCtx = struct {
+        pattern: []const u8,
+        method: []const u8,
+
+        pub fn init(_: Io, _: Allocator, route_decl: anytype) @This() {
+            return .{
+                .pattern = route_decl.pattern,
+                .method = route_decl.method,
+            };
+        }
+    };
+
+    const StaticMw = struct {
+        pub const Info: middleware.MiddlewareInfo = .{
+            .name = "static_ctx",
+            .static_context = RouteStaticCtx,
+        };
+
+        pub fn call(comptime rctx: ReqCtx, req: rctx.T()) !response.Res {
+            return rctx.next(req);
+        }
+    };
+
+    const Handlers = struct {
+        fn a(req: anytype) !response.Res {
+            const sc = req.middlewareStaticConst(.static_ctx);
+            return response.Res.text(200, sc.pattern);
+        }
+
+        fn b(req: anytype) !response.Res {
+            const sc = req.middlewareStaticConst(.static_ctx);
+            const out = try std.fmt.allocPrint(req.allocator(), "{s}:{s}", .{ sc.method, sc.pattern });
+            return response.Res.text(200, out);
+        }
+    };
+
+    const io = std.testing.io;
+    primeSocketBackend();
+
+    const SrvT = Server(.{
+        .routes = .{
+            router.get("/a", Handlers.a, .{ .middlewares = .{StaticMw} }),
+            router.get("/b", Handlers.b, .{ .middlewares = .{StaticMw} }),
+        },
+    });
+
+    const addr0: Io.net.IpAddress = .{ .ip4 = Io.net.Ip4Address.loopback(0) };
+    var server = try SrvT.init(std.testing.allocator, io, addr0, {});
+    defer server.deinit();
+    const port: u16 = server.listener.socket.address.getPort();
+
+    var group: Io.Group = .init;
+    defer group.cancel(io);
+    try group.concurrent(io, SrvT.run, .{&server});
+
+    const addr: Io.net.IpAddress = .{ .ip4 = Io.net.Ip4Address.loopback(port) };
+    var stream = try Io.net.IpAddress.connect(&addr, io, .{ .mode = .stream });
+    defer stream.close(io);
+
+    var rb: [4 * 1024]u8 = undefined;
+    var wb: [256]u8 = undefined;
+    var sr = stream.reader(io, &rb);
+    var sw = stream.writer(io, &wb);
+
+    try sw.interface.writeAll("GET /a HTTP/1.1\r\nHost: x\r\n\r\n");
+    try sw.interface.flush();
+
+    const resp_a =
+        "HTTP/1.1 200 OK\r\n" ++
+        "connection: keep-alive\r\n" ++
+        "content-type: text/plain; charset=utf-8\r\n" ++
+        "content-length: 2\r\n" ++
+        "\r\n" ++
+        "/a";
+    var got_a: [resp_a.len]u8 = undefined;
+    try sr.interface.readSliceAll(got_a[0..]);
+    try std.testing.expectEqualStrings(resp_a, got_a[0..]);
+
+    try sw.interface.writeAll("GET /b HTTP/1.1\r\nHost: x\r\n\r\n");
+    try sw.interface.flush();
+
+    const resp_b =
+        "HTTP/1.1 200 OK\r\n" ++
+        "connection: keep-alive\r\n" ++
+        "content-type: text/plain; charset=utf-8\r\n" ++
+        "content-length: 6\r\n" ++
+        "\r\n" ++
+        "GET:/b";
+    var got_b: [resp_b.len]u8 = undefined;
+    try sr.interface.readSliceAll(got_b[0..]);
+    try std.testing.expectEqualStrings(resp_b, got_b[0..]);
+
+    group.cancel(io);
+    group.await(io) catch {};
+}
+
+test "middleware static_context: init errors propagate from Server.init" {
+    const FailingStaticCtx = struct {
+        pub fn init(_: Io, _: Allocator, _: anytype) !@This() {
+            return error.StaticContextInitFailed;
+        }
+    };
+
+    const FailingMw = struct {
+        pub const Info: middleware.MiddlewareInfo = .{
+            .name = "failing_static",
+            .static_context = FailingStaticCtx,
+        };
+
+        pub fn call(comptime rctx: ReqCtx, req: rctx.T()) !response.Res {
+            return rctx.next(req);
+        }
+    };
+
+    const Handlers = struct {
+        fn ok(_: anytype) !response.Res {
+            return response.Res.text(200, "ok");
+        }
+    };
+
+    const io = std.testing.io;
+    primeSocketBackend();
+
+    const SrvT = Server(.{
+        .routes = .{
+            router.get("/x", Handlers.ok, .{ .middlewares = .{FailingMw} }),
+        },
+    });
+
+    const addr0: Io.net.IpAddress = .{ .ip4 = Io.net.Ip4Address.loopback(0) };
+    try std.testing.expectError(error.StaticContextInitFailed, SrvT.init(std.testing.allocator, io, addr0, {}));
 }

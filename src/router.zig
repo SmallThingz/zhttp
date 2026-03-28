@@ -79,9 +79,8 @@ pub const RouteDecl = struct {
     method: []const u8,
     /// Stores `pattern`.
     pattern: []const u8,
-    // Bridge type carrying `pub const function = handler`.
-    /// Stores `handler`.
-    handler: type,
+    /// Stores endpoint type exposing `pub fn call(comptime rctx: ReqCtx, req: rctx.T()) !Res`.
+    endpoint: type,
     /// Stores `headers`.
     headers: type,
     /// Stores `query`.
@@ -94,6 +93,48 @@ pub const RouteDecl = struct {
     /// Stores `upgrade_handler`.
     upgrade_handler: type,
 };
+
+fn endpointCallReturnType(comptime f: anytype, comptime rctxv: ReqCtx, comptime ReqT: type) type {
+    const Ft = @TypeOf(f);
+    const info = @typeInfo(Ft);
+    if (info != .@"fn") @compileError("legacy route endpoint must be a function");
+    const params = info.@"fn".params;
+    if (params.len == 2) return @TypeOf(@call(.auto, f, .{ rctxv, @as(ReqT, undefined) }));
+    if (params.len == 1) return @TypeOf(@call(.auto, f, .{@as(ReqT, undefined)}));
+    if (params.len == 0) return @TypeOf(@call(.auto, f, .{}));
+    @compileError("legacy route endpoint function must be fn(comptime rctx, req), fn(req), or fn()");
+}
+
+fn endpointCallCompat(comptime f: anytype, comptime rctxv: ReqCtx, reqv: anytype) endpointCallReturnType(f, rctxv, @TypeOf(reqv)) {
+    const Ft = @TypeOf(f);
+    const info = @typeInfo(Ft);
+    if (info != .@"fn") @compileError("legacy route endpoint must be a function");
+    const params = info.@"fn".params;
+    if (params.len == 2) return @call(.auto, f, .{ rctxv, reqv });
+    if (params.len == 1) return @call(.auto, f, .{reqv});
+    if (params.len == 0) return @call(.auto, f, .{});
+    @compileError("legacy route endpoint function must be fn(comptime rctx, req), fn(req), or fn()");
+}
+
+fn endpointType(comptime endpoint_like: anytype) type {
+    if (@TypeOf(endpoint_like) == type) {
+        const Endpoint = endpoint_like;
+        if (!@hasDecl(Endpoint, "call")) {
+            @compileError("route endpoint type must expose `pub fn call(comptime rctx: ReqCtx, req: rctx.T()) !Res`");
+        }
+        return Endpoint;
+    }
+    const f = endpoint_like;
+    const Ft = @TypeOf(f);
+    if (@typeInfo(Ft) != .@"fn") {
+        @compileError("route endpoint must be a type with `call(...)` (or a legacy handler function)");
+    }
+    return struct {
+        pub fn call(comptime rctxv: ReqCtx, reqv: rctxv.T()) endpointCallReturnType(f, rctxv, rctxv.T()) {
+            return endpointCallCompat(f, rctxv, reqv);
+        }
+    };
+}
 
 fn tupleToTypeList(comptime t: anytype) []const type {
     const info = @typeInfo(@TypeOf(t));
@@ -117,23 +158,21 @@ pub fn route(
     /// HTTP method enum literal, e.g. `.GET`.
     comptime method_lit: @EnumLiteral(),
     comptime pattern: []const u8,
-    /// Handler function (see supported signatures in `zhttp/root.zig` docs).
-    comptime handler: anytype,
+    /// Route endpoint type (middleware-shaped) or legacy handler function.
+    comptime endpoint_like: anytype,
     /// Route options (see `zhttp/root.zig` docs). Use `.{}` for none.
     comptime opts: anytype,
 ) RouteDecl {
     validateRouteOptions(opts);
     const OptT = @TypeOf(opts);
-    const HandlerBridge = struct {
-        pub const function = handler;
-    };
+    const Endpoint = endpointType(endpoint_like);
     const UpgradeHandlerBridge = struct {
         pub const value = if (@hasField(OptT, "upgrade_handler")) opts.upgrade_handler else null;
     };
     return .{
         .method = @tagName(method_lit),
         .pattern = pattern,
-        .handler = HandlerBridge,
+        .endpoint = Endpoint,
         .headers = if (@hasField(OptT, "headers")) opts.headers else struct {},
         .query = if (@hasField(OptT, "query")) opts.query else struct {},
         .params = if (@hasField(OptT, "params")) opts.params else struct {},
@@ -143,32 +182,32 @@ pub fn route(
 }
 
 /// Implements get.
-pub fn get(comptime pattern: []const u8, comptime handler: anytype, comptime opts: anytype) RouteDecl {
-    return route(.GET, pattern, handler, opts);
+pub fn get(comptime pattern: []const u8, comptime endpoint_like: anytype, comptime opts: anytype) RouteDecl {
+    return route(.GET, pattern, endpoint_like, opts);
 }
 /// Implements post.
-pub fn post(comptime pattern: []const u8, comptime handler: anytype, comptime opts: anytype) RouteDecl {
-    return route(.POST, pattern, handler, opts);
+pub fn post(comptime pattern: []const u8, comptime endpoint_like: anytype, comptime opts: anytype) RouteDecl {
+    return route(.POST, pattern, endpoint_like, opts);
 }
 /// Implements put.
-pub fn put(comptime pattern: []const u8, comptime handler: anytype, comptime opts: anytype) RouteDecl {
-    return route(.PUT, pattern, handler, opts);
+pub fn put(comptime pattern: []const u8, comptime endpoint_like: anytype, comptime opts: anytype) RouteDecl {
+    return route(.PUT, pattern, endpoint_like, opts);
 }
 /// Implements delete.
-pub fn delete(comptime pattern: []const u8, comptime handler: anytype, comptime opts: anytype) RouteDecl {
-    return route(.DELETE, pattern, handler, opts);
+pub fn delete(comptime pattern: []const u8, comptime endpoint_like: anytype, comptime opts: anytype) RouteDecl {
+    return route(.DELETE, pattern, endpoint_like, opts);
 }
 /// Implements patch.
-pub fn patch(comptime pattern: []const u8, comptime handler: anytype, comptime opts: anytype) RouteDecl {
-    return route(.PATCH, pattern, handler, opts);
+pub fn patch(comptime pattern: []const u8, comptime endpoint_like: anytype, comptime opts: anytype) RouteDecl {
+    return route(.PATCH, pattern, endpoint_like, opts);
 }
 /// Implements head.
-pub fn head(comptime pattern: []const u8, comptime handler: anytype, comptime opts: anytype) RouteDecl {
-    return route(.HEAD, pattern, handler, opts);
+pub fn head(comptime pattern: []const u8, comptime endpoint_like: anytype, comptime opts: anytype) RouteDecl {
+    return route(.HEAD, pattern, endpoint_like, opts);
 }
 /// Implements options.
-pub fn options(comptime pattern: []const u8, comptime handler: anytype, comptime opts: anytype) RouteDecl {
-    return route(.OPTIONS, pattern, handler, opts);
+pub fn options(comptime pattern: []const u8, comptime endpoint_like: anytype, comptime opts: anytype) RouteDecl {
+    return route(.OPTIONS, pattern, endpoint_like, opts);
 }
 
 fn tupleConcatValuesType(comptime a: anytype, comptime b: anytype) type {
@@ -574,8 +613,8 @@ pub fn Compiled(
         }
 
         fn addRoute(self: *Self, comptime route_index: usize, rd: anytype) void {
-            if (!@hasField(@TypeOf(rd), "method") or !@hasField(@TypeOf(rd), "pattern") or !@hasField(@TypeOf(rd), "handler")) {
-                @compileError("route() value must have fields: method, pattern, handler");
+            if (!@hasField(@TypeOf(rd), "method") or !@hasField(@TypeOf(rd), "pattern") or !@hasField(@TypeOf(rd), "endpoint")) {
+                @compileError("route() value must have fields: method, pattern, endpoint");
             }
 
             self.patterns[route_index] = compilePattern(rd.pattern);
@@ -694,30 +733,6 @@ pub fn Compiled(
         var out: [method_count]u8 = undefined;
         for (0..method_count) |i| out[i] = @intCast(i);
         break :blk out;
-    };
-
-    const callHandlerCompat = struct {
-        fn returnType(comptime handler: anytype, comptime rctxv: ReqCtx, comptime ReqT: type) type {
-            const Ht = @TypeOf(handler);
-            const info = @typeInfo(Ht);
-            if (info != .@"fn") @compileError("handler must be a function");
-            const params = info.@"fn".params;
-            if (params.len == 2) return @TypeOf(@call(.auto, handler, .{ rctxv, @as(ReqT, undefined) }));
-            if (params.len == 1) return @TypeOf(@call(.auto, handler, .{@as(ReqT, undefined)}));
-            if (params.len == 0) return @TypeOf(@call(.auto, handler, .{}));
-            @compileError("handler must be fn(comptime rctx, req), fn(req), or fn()");
-        }
-
-        fn call(comptime handler: anytype, comptime rctxv: ReqCtx, reqv: anytype) returnType(handler, rctxv, @TypeOf(reqv)) {
-            const Ht = @TypeOf(handler);
-            const info = @typeInfo(Ht);
-            if (info != .@"fn") @compileError("handler must be a function");
-            const params = info.@"fn".params;
-            if (params.len == 2) return @call(.auto, handler, .{ rctxv, reqv });
-            if (params.len == 1) return @call(.auto, handler, .{reqv});
-            if (params.len == 0) return @call(.auto, handler, .{});
-            @compileError("handler must be fn(comptime rctx, req), fn(req), or fn()");
-        }
     };
 
     return struct {
@@ -956,6 +971,7 @@ pub fn Compiled(
             r: *Io.Reader,
             w: *Io.Writer,
             stream: *const std.Io.net.Stream,
+            route_static_ctx: *anyopaque,
             line: request.RequestLine,
             route_index: u16,
             params_buf: [][]u8,
@@ -974,17 +990,15 @@ pub fn Compiled(
                     const P = parse.mergeStructs(NeedP, rd.params);
                     const MwCtx = comptime middleware.contextType(MwList);
                     const mw_ctx = comptime middleware.initContext(MwList, MwCtx);
-                    const ReqT = request.RequestPWithPatternCtx(H, Q, P, p.param_names, MwCtx, rd.pattern, rd.method, @TypeOf(server.ctx));
+                    const MwStaticCtx = comptime middleware.staticContextType(MwList);
+                    const route_mw_static_ctx: *MwStaticCtx = @ptrCast(@alignCast(route_static_ctx));
+                    const ReqT = request.RequestPWithPatternCtxStatic(H, Q, P, p.param_names, MwCtx, MwStaticCtx, rd.pattern, rd.method, @TypeOf(server.ctx));
                     const ReqCtxT = req_ctx.ReqCtx;
-                    const HandlerBridge = struct {
-                        pub const function = struct {
-                            fn call(comptime rctxv: ReqCtxT, reqv2: rctxv.T()) callHandlerCompat.returnType(rd.handler.function, rctxv, rctxv.T()) {
-                                return callHandlerCompat.call(rd.handler.function, rctxv, reqv2);
-                            }
-                        }.call;
+                    const EndpointBridge = struct {
+                        pub const function = rd.endpoint.call;
                     };
                     const rctx: ReqCtxT = comptime .{
-                        .handler = HandlerBridge,
+                        .handler = EndpointBridge,
                         .middlewares = MwList,
                         .path = structFieldsToST(P),
                         .query = structFieldsToST(Q),
@@ -994,7 +1008,7 @@ pub fn Compiled(
                         ._base_req_type = ReqT,
                     };
 
-                    var reqv = ReqT.initWithCtx(allocator, server.io, line, mw_ctx, server.ctx);
+                    var reqv = ReqT.initWithCtx(allocator, server.io, line, mw_ctx, server.ctx, route_mw_static_ctx);
                     reqv.setReader(r);
                     defer reqv.deinit(allocator);
                     errdefer reqv.discardUnreadBody() catch {};
@@ -1066,8 +1080,9 @@ fn dispatchForTest(
     var params: [S.MaxParams][]u8 = undefined;
     var w = Io.Writer.fixed(out);
     var stream: std.Io.net.Stream = undefined;
+    var route_static_ctx: struct {} = .{};
     const rid = S.match(line.method, line.path).?;
-    const action = try S.dispatch(&server, allocator, r, &w, &stream, line, rid, params[0..S.MaxParams], 8 * 1024);
+    const action = try S.dispatch(&server, allocator, r, &w, &stream, @ptrCast(&route_static_ctx), line, rid, params[0..S.MaxParams], 8 * 1024);
     return .{ .action = action, .len = w.end };
 }
 
@@ -1412,7 +1427,8 @@ test "dispatch: typed path params bad value errors" {
     };
     var server: ServerT = .{ .io = std.testing.io, .ctx = {} };
     const rid = S.match(line.method, line.path).?;
-    try std.testing.expectError(error.BadValue, S.dispatch(&server, a, &r, &w, &stream, line, rid, params[0..S.MaxParams], 8 * 1024));
+    var route_static_ctx: struct {} = .{};
+    try std.testing.expectError(error.BadValue, S.dispatch(&server, a, &r, &w, &stream, @ptrCast(&route_static_ctx), line, rid, params[0..S.MaxParams], 8 * 1024));
 }
 
 test "dispatch: typed path params with non-string parsers allocate zero" {
@@ -1611,7 +1627,8 @@ test "dispatch: handler error uses callback" {
         .called = &called,
     };
     const rid = S.match(line.method, line.path).?;
-    const action = try S.dispatch(&server, a, &r, &w, &stream, line, rid, params[0..S.MaxParams], 8 * 1024);
+    var route_static_ctx: struct {} = .{};
+    const action = try S.dispatch(&server, a, &r, &w, &stream, @ptrCast(&route_static_ctx), line, rid, params[0..S.MaxParams], 8 * 1024);
     try std.testing.expect(called);
     try std.testing.expectEqual(.close, action);
     try std.testing.expectEqual(@as(usize, 0), w.end);
@@ -1703,6 +1720,29 @@ test "handler: app ctx accessible through req" {
     try std.testing.expect(std.mem.endsWith(u8, out[0..res.len], "\r\n\r\nok"));
 }
 
+test "route: endpoint type accepted" {
+    const Endpoint = struct {
+        pub fn call(comptime rctx: ReqCtx, req: rctx.T()) !Res {
+            _ = req;
+            return Res.text(200, "ok");
+        }
+    };
+
+    const S = Compiled(void, .{
+        get("/e", Endpoint, .{}),
+    }, .{});
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    var r = Io.Reader.fixed("GET /e HTTP/1.1\r\n\r\n");
+    const line = try request.parseRequestLineBorrowed(&r, 8 * 1024);
+    var out: [256]u8 = undefined;
+    const res = try dispatchForTest(S, {}, a, &r, line, out[0..]);
+    try std.testing.expect(std.mem.endsWith(u8, out[0..res.len], "\r\n\r\nok"));
+}
+
 test "dispatch: invalid path percent-encoding rejected" {
     const S = Compiled(void, .{
         get("/u/{id}", struct {
@@ -1735,7 +1775,8 @@ test "dispatch: invalid path percent-encoding rejected" {
     };
     var server: ServerT = .{ .io = std.testing.io, .ctx = {} };
     const rid = S.match(line.method, line.path).?;
-    try std.testing.expectError(error.InvalidPercentEncoding, S.dispatch(&server, a, &r, &w, &stream, line, rid, params[0..S.MaxParams], 8 * 1024));
+    var route_static_ctx: struct {} = .{};
+    try std.testing.expectError(error.InvalidPercentEncoding, S.dispatch(&server, a, &r, &w, &stream, @ptrCast(&route_static_ctx), line, rid, params[0..S.MaxParams], 8 * 1024));
 }
 
 test "dispatch: route upgrade_handler handles 101 and returns upgraded action" {
@@ -1789,7 +1830,8 @@ test "dispatch: route upgrade_handler handles 101 and returns upgraded action" {
     var w = Io.Writer.fixed(out[0..]);
     var stream: std.Io.net.Stream = undefined;
     const rid = S.match(line.method, line.path).?;
-    const action = try S.dispatch(&server, a, &r, &w, &stream, line, rid, params[0..S.MaxParams], 8 * 1024);
+    var route_static_ctx: struct {} = .{};
+    const action = try S.dispatch(&server, a, &r, &w, &stream, @ptrCast(&route_static_ctx), line, rid, params[0..S.MaxParams], 8 * 1024);
 
     try std.testing.expectEqual(Action.upgraded, action);
     try std.testing.expect(server.upgraded);
@@ -1840,7 +1882,8 @@ test "dispatch: null upgrade_handler does not check status" {
     var w = Io.Writer.fixed(out[0..]);
     var stream: std.Io.net.Stream = undefined;
     const rid = S.match(line.method, line.path).?;
-    const action = try S.dispatch(&server, a, &r, &w, &stream, line, rid, params[0..S.MaxParams], 8 * 1024);
+    var route_static_ctx: struct {} = .{};
+    const action = try S.dispatch(&server, a, &r, &w, &stream, @ptrCast(&route_static_ctx), line, rid, params[0..S.MaxParams], 8 * 1024);
 
     try std.testing.expectEqual(Action.@"continue", action);
     try std.testing.expect(std.mem.indexOf(u8, out[0..w.end], "content-length: 0\r\n") != null);

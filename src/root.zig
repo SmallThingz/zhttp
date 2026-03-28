@@ -3,10 +3,10 @@
 //! ## Route registration
 //!
 //! You register routes at comptime via `zhttp.Server(.{ .routes = .{ ... } })`.
-//! Route helpers accept a pattern, a handler, then comptime options:
+//! Route helpers accept a pattern, an endpoint, then comptime options:
 //!
-//! - With options: `zhttp.get("/users/{id}", handler, .{ .params = struct { id: zhttp.parse.Int(u64) } })`
-//! - No options: `zhttp.get("/health", handler, .{})`
+//! - With options: `zhttp.get("/users/{id}", Endpoint, .{ .params = struct { id: zhttp.parse.Int(u64) } })`
+//! - No options: `zhttp.get("/health", Endpoint, .{})`
 //!
 //! Supported route option fields (all optional):
 //! - `.headers: type`    Header capture schema (header keys match case-insensitively; `_` matches `-`)
@@ -29,11 +29,12 @@
 //! - `.not_found_handler: fn(...) !Res` (optional) fallback-handler override for route misses
 //! - `.not_found_options: struct` (optional) request options for the fallback handler
 //!
-//! ## Handler signatures
+//! ## Endpoint Shape
 //!
-//! Handlers can be any of:
-//! - `fn() !zhttp.Res`
-//! - `fn(req: anytype) !zhttp.Res`
+//! Preferred route endpoint shape:
+//! - `type` exposing `pub fn call(comptime rctx: zhttp.ReqCtx, req: rctx.T()) !zhttp.Res`
+//!
+//! Legacy function handlers are still accepted for compatibility.
 //!
 //! When `.Context` is configured, it is available only via `req.ctx()`.
 //! Standard middleware signature types are exported at top-level:

@@ -26,11 +26,11 @@ pub fn build(b: *std.Build) void {
     const zstd_mod = if (zstd_dep) |dep|
         dep.module("libzstd")
     else
-        @panic("missing 'libzstd' dependency; run `zig fetch --save ../zcompress`");
+        @panic("missing 'libzstd' dependency; run `zig fetch --save git+https://github.com/SmallThingz/libzstd.zig?ref=main`");
     const brotli_mod = if (brotli_dep) |dep|
         dep.module("libbrotli")
     else
-        @panic("missing 'libbrotli' dependency; run `zig fetch --save ../libbrotli.zig`");
+        @panic("missing 'libbrotli' dependency; run `zig fetch --save git+https://github.com/SmallThingz/libbrotli.zig?ref=main`");
     mod.addImport("libzstd", zstd_mod);
     mod.addImport("libbrotli", brotli_mod);
 

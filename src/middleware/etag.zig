@@ -90,6 +90,32 @@ test "etag: matches if-none-match" {
     try std.testing.expect(!matchesIfNoneMatch("\"nope\"", "\"abc\""));
 }
 
+fn runMiddlewareTest(
+    comptime Mw: type,
+    comptime ReqT: type,
+    comptime Handler: type,
+    reqv: *ReqT,
+    method: []const u8,
+) !Res {
+    const rctx: ReqCtx = .{
+        .handler = Handler,
+        .middlewares = &.{Mw},
+        .path = &.{},
+        .query = &.{},
+        .headers = &.{},
+        .middleware_contexts = &.{},
+        .idx = 0,
+        ._base_req_type = ReqT,
+    };
+    const ReqW = rctx.T();
+    const reqw: ReqW = .{
+        ._base = reqv,
+        .path = reqv.rawPath(),
+        .method = method,
+    };
+    return rctx.run(reqw);
+}
+
 test "etag: check_then_add skips if already set" {
     const Mw = Etag(.{ .header_behavior = .check_then_add });
     const MwCtx = struct {};
@@ -102,7 +128,8 @@ test "etag: check_then_add skips if already set" {
 
     const Next = struct {
         /// Test helper next-handler implementation with pre-existing etag.
-        pub fn call(_: @This(), _: anytype) !Res {
+        pub const function = call;
+        pub fn call(comptime rctx: ReqCtx, _: rctx.T()) !Res {
             return .{
                 .status = .ok,
                 .headers = &.{.{ .name = "etag", .value = "\"user\"" }},
@@ -124,7 +151,7 @@ test "etag: check_then_add skips if already set" {
     var reqv = ReqT.init(gpa, std.testing.io, line, mw_ctx);
     defer reqv.deinit(gpa);
 
-    const res = try Mw.call(Next, Next{}, &reqv);
+    const res = try runMiddlewareTest(Mw, ReqT, Next, &reqv, line.method);
     try std.testing.expectEqual(@as(usize, 1), res.headers.len);
     try std.testing.expectEqualStrings("\"user\"", res.headers[0].value);
     try std.testing.expectEqualStrings("hello", res.body);

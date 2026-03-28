@@ -26,6 +26,32 @@ fn testLog(method: []const u8, path: []const u8, status: u16, _: Io.Duration) vo
     log_state.status = status;
 }
 
+fn runMiddlewareTest(
+    comptime Mw: type,
+    comptime ReqT: type,
+    comptime Handler: type,
+    reqv: *ReqT,
+    method: []const u8,
+) !Res {
+    const rctx: ReqCtx = .{
+        .handler = Handler,
+        .middlewares = &.{Mw},
+        .path = &.{},
+        .query = &.{},
+        .headers = &.{},
+        .middleware_contexts = &.{},
+        .idx = 0,
+        ._base_req_type = ReqT,
+    };
+    const ReqW = rctx.T();
+    const reqw: ReqW = .{
+        ._base = reqv,
+        .path = reqv.rawPath(),
+        .method = method,
+    };
+    return rctx.run(reqw);
+}
+
 /// Configuration for `Logger`.
 pub const LoggerOptions = struct {
     /// Optional middleware context field name used to store timing/status data.
@@ -107,7 +133,8 @@ test "logger: invokes log function" {
 
     const Next = struct {
         /// Test helper next-handler implementation.
-        pub fn call(_: @This(), _: anytype) !Res {
+        pub const function = call;
+        pub fn call(comptime rctx: ReqCtx, _: rctx.T()) !Res {
             return Res.text(201, "ok");
         }
     };
@@ -125,7 +152,7 @@ test "logger: invokes log function" {
     var reqv = ReqT.init(gpa, std.testing.io, line, mw_ctx);
     defer reqv.deinit(gpa);
 
-    const res = try Mw.call(Next, Next{}, &reqv);
+    const res = try runMiddlewareTest(Mw, ReqT, Next, &reqv, line.method);
     try std.testing.expectEqual(@as(u16, 201), @intFromEnum(res.status));
     try std.testing.expect(log_state.called);
     try std.testing.expectEqualStrings("GET", log_state.method);

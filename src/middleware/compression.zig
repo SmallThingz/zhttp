@@ -39,6 +39,32 @@ fn acceptsGzip(header_value: []const u8) bool {
     return false;
 }
 
+fn runMiddlewareTest(
+    comptime Mw: type,
+    comptime ReqT: type,
+    comptime Handler: type,
+    reqv: *ReqT,
+    method: []const u8,
+) !Res {
+    const rctx: ReqCtx = .{
+        .handler = Handler,
+        .middlewares = &.{Mw},
+        .path = &.{},
+        .query = &.{},
+        .headers = &.{},
+        .middleware_contexts = &.{},
+        .idx = 0,
+        ._base_req_type = ReqT,
+    };
+    const ReqW = rctx.T();
+    const reqw: ReqW = .{
+        ._base = reqv,
+        .path = reqv.rawPath(),
+        .method = method,
+    };
+    return rctx.run(reqw);
+}
+
 /// Configuration for `Compression`.
 pub const CompressionOptions = struct {
     /// Minimum uncompressed body size required before compression is attempted.
@@ -125,7 +151,8 @@ test "compression: check_then_add skips when content-encoding exists" {
 
     const Next = struct {
         /// Test helper next-handler implementation with pre-existing encoding.
-        pub fn call(_: @This(), _: anytype) !Res {
+        pub const function = call;
+        pub fn call(comptime rctx: ReqCtx, _: rctx.T()) !Res {
             return .{
                 .status = .ok,
                 .headers = &.{.{ .name = "content-encoding", .value = "br" }},
@@ -149,7 +176,7 @@ test "compression: check_then_add skips when content-encoding exists" {
     var r = std.Io.Reader.fixed("Accept-Encoding: gzip\r\n\r\n");
     try reqv.parseHeaders(gpa, &r, 1024);
 
-    const res = try Mw.call(Next, Next{}, &reqv);
+    const res = try runMiddlewareTest(Mw, ReqT, Next, &reqv, line.method);
     try std.testing.expectEqual(@as(usize, 1), res.headers.len);
     try std.testing.expectEqualStrings("br", res.headers[0].value);
     try std.testing.expectEqualStrings("hello", res.body);
@@ -170,7 +197,8 @@ test "compression: check_then_add skips duplicate vary" {
 
     const Next = struct {
         /// Test helper next-handler implementation with compressible payload.
-        pub fn call(_: @This(), _: anytype) !Res {
+        pub const function = call;
+        pub fn call(comptime rctx: ReqCtx, _: rctx.T()) !Res {
             return .{
                 .status = .ok,
                 .headers = &.{.{ .name = "vary", .value = "accept-encoding" }},
@@ -194,7 +222,7 @@ test "compression: check_then_add skips duplicate vary" {
     var r = std.Io.Reader.fixed("Accept-Encoding: gzip\r\n\r\n");
     try reqv.parseHeaders(gpa, &r, 1024);
 
-    const res = try Mw.call(Next, Next{}, &reqv);
+    const res = try runMiddlewareTest(Mw, ReqT, Next, &reqv, line.method);
     try std.testing.expectEqual(@as(usize, 2), res.headers.len);
     try std.testing.expectEqualStrings("content-encoding", res.headers[1].name);
 }

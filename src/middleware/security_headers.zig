@@ -141,6 +141,32 @@ fn countHeader(headers: []const Header, name: []const u8) usize {
     return n;
 }
 
+fn runMiddlewareTest(
+    comptime Mw: type,
+    comptime ReqT: type,
+    comptime Handler: type,
+    reqv: *ReqT,
+    method: []const u8,
+) !Res {
+    const rctx: ReqCtx = .{
+        .handler = Handler,
+        .middlewares = &.{Mw},
+        .path = &.{},
+        .query = &.{},
+        .headers = &.{},
+        .middleware_contexts = &.{},
+        .idx = 0,
+        ._base_req_type = ReqT,
+    };
+    const ReqW = rctx.T();
+    const reqw: ReqW = .{
+        ._base = reqv,
+        .path = reqv.rawPath(),
+        .method = method,
+    };
+    return rctx.run(reqw);
+}
+
 test "security_headers: default headers present" {
     const Mw = SecurityHeaders(.{});
     const MwCtx = struct {};
@@ -148,7 +174,8 @@ test "security_headers: default headers present" {
 
     const Next = struct {
         /// Test helper next-handler implementation.
-        pub fn call(_: @This(), _: anytype) !Res {
+        pub const function = call;
+        pub fn call(comptime rctx: ReqCtx, _: rctx.T()) !Res {
             return Res.text(200, "ok");
         }
     };
@@ -166,7 +193,7 @@ test "security_headers: default headers present" {
     var reqv = ReqT.init(gpa, std.testing.io, line, mw_ctx);
     defer reqv.deinit(gpa);
 
-    const res = try Mw.call(Next, Next{}, &reqv);
+    const res = try runMiddlewareTest(Mw, ReqT, Next, &reqv, line.method);
     try std.testing.expect(hasHeader(res.headers, "x-content-type-options"));
     try std.testing.expect(hasHeader(res.headers, "x-frame-options"));
     try std.testing.expect(hasHeader(res.headers, "referrer-policy"));
@@ -179,7 +206,8 @@ test "security_headers: check_then_add skips existing" {
 
     const Next = struct {
         /// Test helper next-handler implementation with pre-existing headers.
-        pub fn call(_: @This(), _: anytype) !Res {
+        pub const function = call;
+        pub fn call(comptime rctx: ReqCtx, _: rctx.T()) !Res {
             return .{
                 .status = .ok,
                 .headers = &.{.{ .name = "x-frame-options", .value = "SAMEORIGIN" }},
@@ -201,7 +229,7 @@ test "security_headers: check_then_add skips existing" {
     var reqv = ReqT.init(gpa, std.testing.io, line, mw_ctx);
     defer reqv.deinit(gpa);
 
-    const res = try Mw.call(Next, Next{}, &reqv);
+    const res = try runMiddlewareTest(Mw, ReqT, Next, &reqv, line.method);
     try std.testing.expectEqual(@as(usize, 1), countHeader(res.headers, "x-frame-options"));
     try std.testing.expect(hasHeader(res.headers, "x-content-type-options"));
 }

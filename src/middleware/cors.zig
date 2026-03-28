@@ -345,6 +345,32 @@ fn countHeader(headers: []const Header, name: []const u8) usize {
     return n;
 }
 
+fn runMiddlewareTest(
+    comptime Mw: type,
+    comptime ReqT: type,
+    comptime Handler: type,
+    reqv: *ReqT,
+    method: []const u8,
+) !Res {
+    const rctx: ReqCtx = .{
+        .handler = Handler,
+        .middlewares = &.{Mw},
+        .path = &.{},
+        .query = &.{},
+        .headers = &.{},
+        .middleware_contexts = &.{},
+        .idx = 0,
+        ._base_req_type = ReqT,
+    };
+    const ReqW = rctx.T();
+    const reqw: ReqW = .{
+        ._base = reqv,
+        .path = reqv.rawPath(),
+        .method = method,
+    };
+    return rctx.run(reqw);
+}
+
 test "cors: preflight and simple request" {
     const Mw = Cors(.{ .origins = &.{"https://example.com"} });
     const MwCtx = struct {};
@@ -361,7 +387,8 @@ test "cors: preflight and simple request" {
 
     const Next = struct {
         /// Handles a middleware invocation for the current request context.
-        pub fn call(_: @This(), _: anytype) !Res {
+        pub const function = call;
+        pub fn call(comptime rctx: ReqCtx, _: rctx.T()) !Res {
             return Res.text(200, "ok");
         }
     };
@@ -383,7 +410,7 @@ test "cors: preflight and simple request" {
         var r = std.Io.Reader.fixed("Origin: https://example.com\r\nAccess-Control-Request-Method: POST\r\n\r\n");
         try reqv.parseHeaders(gpa, &r, 1024);
 
-        const res = try Mw.call(Next, Next{}, &reqv);
+        const res = try runMiddlewareTest(Mw, ReqT, Next, &reqv, line.method);
         try std.testing.expectEqual(@as(u16, 204), @intFromEnum(res.status));
         try std.testing.expectEqualStrings("https://example.com", headerValue(res.headers, "access-control-allow-origin").?);
     }
@@ -403,7 +430,7 @@ test "cors: preflight and simple request" {
         var r = std.Io.Reader.fixed("Origin: https://example.com\r\n\r\n");
         try reqv.parseHeaders(gpa, &r, 1024);
 
-        const res = try Mw.call(Next, Next{}, &reqv);
+        const res = try runMiddlewareTest(Mw, ReqT, Next, &reqv, line.method);
         try std.testing.expectEqual(@as(u16, 200), @intFromEnum(res.status));
         try std.testing.expectEqualStrings("https://example.com", headerValue(res.headers, "access-control-allow-origin").?);
     }
@@ -429,7 +456,8 @@ test "cors: check_then_add skips existing response headers" {
 
     const Next = struct {
         /// Handles a middleware invocation for the current request context.
-        pub fn call(_: @This(), _: anytype) !Res {
+        pub const function = call;
+        pub fn call(comptime rctx: ReqCtx, _: rctx.T()) !Res {
             return .{
                 .status = .ok,
                 .headers = &.{
@@ -456,7 +484,7 @@ test "cors: check_then_add skips existing response headers" {
     var r = std.Io.Reader.fixed("Origin: https://example.com\r\n\r\n");
     try reqv.parseHeaders(gpa, &r, 1024);
 
-    const res = try Mw.call(Next, Next{}, &reqv);
+    const res = try runMiddlewareTest(Mw, ReqT, Next, &reqv, line.method);
     try std.testing.expectEqual(@as(usize, 1), countHeader(res.headers, "access-control-allow-origin"));
     try std.testing.expectEqual(@as(usize, 1), countHeader(res.headers, "vary"));
 }

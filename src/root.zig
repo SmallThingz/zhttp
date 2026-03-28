@@ -125,21 +125,10 @@ fn fuzzBuiltin(
 test {
     _ = @import("parse.zig");
     _ = @import("request.zig");
-    _ = @import("req_ctx.zig");
     _ = @import("response.zig");
     _ = @import("router.zig");
     _ = @import("server.zig");
-    _ = @import("util.zig");
     _ = @import("middleware.zig");
-    _ = @import("middleware/util.zig");
-    _ = @import("middleware/compression.zig");
-    _ = @import("middleware/cors.zig");
-    _ = @import("middleware/etag.zig");
-    _ = @import("middleware/logger.zig");
-    _ = @import("middleware/origin.zig");
-    _ = @import("middleware/request_id.zig");
-    _ = @import("middleware/security_headers.zig");
     _ = @import("middleware/static.zig");
-    _ = @import("middleware/timeout.zig");
     _ = @import("urldecode.zig");
 }

@@ -92,6 +92,32 @@ pub fn Timeout(comptime opts: TimeoutOptions) type {
     };
 }
 
+fn runMiddlewareTest(
+    comptime Mw: type,
+    comptime ReqT: type,
+    comptime Handler: type,
+    reqv: *ReqT,
+    method: []const u8,
+) !Res {
+    const rctx: ReqCtx = .{
+        .handler = Handler,
+        .middlewares = &.{Mw},
+        .path = &.{},
+        .query = &.{},
+        .headers = &.{},
+        .middleware_contexts = &.{},
+        .idx = 0,
+        ._base_req_type = ReqT,
+    };
+    const ReqW = rctx.T();
+    const reqw: ReqW = .{
+        ._base = reqv,
+        .path = reqv.rawPath(),
+        .method = method,
+    };
+    return rctx.run(reqw);
+}
+
 test "timeout: immediate timeout" {
     const Mw = Timeout(.{ .duration = std.Io.Duration.fromNanoseconds(-1) });
     const MwCtx = struct {};
@@ -99,7 +125,8 @@ test "timeout: immediate timeout" {
 
     const Next = struct {
         /// Test helper next-handler implementation.
-        pub fn call(_: @This(), _: anytype) !Res {
+        pub const function = call;
+        pub fn call(comptime rctx: ReqCtx, _: rctx.T()) !Res {
             return Res.text(200, "ok");
         }
     };
@@ -117,6 +144,6 @@ test "timeout: immediate timeout" {
     var reqv = ReqT.init(gpa, std.testing.io, line, mw_ctx);
     defer reqv.deinit(gpa);
 
-    const res = try Mw.call(Next, Next{}, &reqv);
+    const res = try runMiddlewareTest(Mw, ReqT, Next, &reqv, line.method);
     try std.testing.expectEqual(@as(u16, 504), @intFromEnum(res.status));
 }

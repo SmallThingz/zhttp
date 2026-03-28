@@ -197,3 +197,41 @@ test "security_headers: check_then_add skips existing" {
     try std.testing.expectEqual(@as(usize, 1), test_helpers.countHeader(res.headers, "x-frame-options"));
     try std.testing.expect(test_helpers.hasHeader(res.headers, "x-content-type-options"));
 }
+
+test "security_headers: regression allocates header slice when base response has no headers" {
+    const Mw = SecurityHeaders(.{});
+    const MwCtx = struct {};
+    const ReqT = @import("../request.zig").Request(struct {}, struct {}, &.{}, MwCtx);
+
+    const Next = struct {
+        pub const function = call;
+        pub fn call(comptime rctx: ReqCtx, _: rctx.T()) !Res {
+            return .{
+                .status = .ok,
+                .body = "ok",
+            };
+        }
+    };
+
+    var backing: [2048]u8 = undefined;
+    var fba = std.heap.FixedBufferAllocator.init(backing[0..]);
+    const a = fba.allocator();
+    const path_buf = "/".*;
+    const query_buf: [0]u8 = .{};
+    const line: @import("../request.zig").RequestLine = .{
+        .method = "GET",
+        .version = .http11,
+        .path = @constCast(path_buf[0..]),
+        .query = @constCast(query_buf[0..]),
+    };
+    const mw_ctx: MwCtx = .{};
+    var reqv = ReqT.init(a, std.testing.io, line, mw_ctx);
+
+    const res = try test_helpers.runMiddlewareTest(Mw, ReqT, Next, &reqv, line.method);
+    try std.testing.expect(res.headers.len >= 3);
+
+    const start = @intFromPtr(&backing[0]);
+    const end = start + backing.len;
+    const ptr = @intFromPtr(res.headers.ptr);
+    try std.testing.expect(ptr >= start and ptr < end);
+}

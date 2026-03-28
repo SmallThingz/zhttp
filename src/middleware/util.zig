@@ -1,30 +1,38 @@
 const std = @import("std");
 const Res = @import("../response.zig").Res;
 const Header = @import("../response.zig").Header;
+const core_util = @import("../util.zig");
 
 pub const HeaderSetBehavior = enum {
     assert_absent,
     check_then_add,
 };
 
-/// Returns `base` with `extra` appended as a single header slice.
+/// Returns an owned header slice containing `base` followed by `extra`.
 pub fn appendHeaders(
     allocator: std.mem.Allocator,
     base: []const Header,
     extra: []const Header,
 ) ![]const Header {
     if (extra.len == 0) return base;
-    if (base.len == 0) return extra;
     const out = try allocator.alloc(Header, base.len + extra.len);
     @memcpy(out[0..base.len], base);
     @memcpy(out[base.len..], extra);
     return out;
 }
 
+/// Copies `src` into allocator-owned header storage.
+pub fn copyHeaders(allocator: std.mem.Allocator, src: []const Header) ![]const Header {
+    if (src.len == 0) return &.{};
+    const out = try allocator.alloc(Header, src.len);
+    @memcpy(out, src);
+    return out;
+}
+
 /// Returns true when `headers` already contains `name` (case-insensitive).
 pub fn hasHeader(headers: []const Header, name: []const u8) bool {
     for (headers) |h| {
-        if (std.ascii.eqlIgnoreCase(h.name, name)) return true;
+        if (core_util.asciiEqlIgnoreCase(h.name, name)) return true;
     }
     return false;
 }
@@ -69,12 +77,47 @@ pub fn hasToken(value: []const u8, token: []const u8) bool {
     var it = std.mem.splitScalar(u8, value, ',');
     while (it.next()) |part| {
         const t = std.mem.trim(u8, part, " \t");
-        if (std.ascii.eqlIgnoreCase(t, token)) return true;
+        if (core_util.asciiEqlIgnoreCase(t, token)) return true;
     }
     return false;
 }
 
-test "appendHeaders: short-circuits empty slices" {
+/// Builds a quoted ETag from `body` using a Wyhash digest.
+pub fn makeEtag(allocator: std.mem.Allocator, body: []const u8, weak: bool) ![]const u8 {
+    const h = std.hash.Wyhash.hash(0, body);
+    var tmp: [16]u8 = undefined;
+    const hex = std.fmt.bufPrint(&tmp, "{x:0>16}", .{h}) catch unreachable;
+    const extra: usize = if (weak) 4 else 2;
+    const out = try allocator.alloc(u8, extra + hex.len);
+    var i: usize = 0;
+    if (weak) {
+        out[i] = 'W';
+        out[i + 1] = '/';
+        i += 2;
+    }
+    out[i] = '"';
+    i += 1;
+    @memcpy(out[i .. i + hex.len], hex);
+    i += hex.len;
+    out[i] = '"';
+    return out;
+}
+
+/// Matches an `If-None-Match` header value against `tag`.
+pub fn matchesIfNoneMatch(header_value: []const u8, tag: []const u8) bool {
+    const trimmed = std.mem.trim(u8, header_value, " \t");
+    if (std.mem.eql(u8, trimmed, "*")) return true;
+    var it = std.mem.splitScalar(u8, trimmed, ',');
+    while (it.next()) |raw| {
+        const t = std.mem.trim(u8, raw, " \t");
+        if (std.mem.eql(u8, t, "*")) return true;
+        if (std.mem.eql(u8, t, tag)) return true;
+        if (t.len > 2 and t[0] == 'W' and t[1] == '/' and std.mem.eql(u8, t[2..], tag)) return true;
+    }
+    return false;
+}
+
+test "appendHeaders: copies added headers when needed" {
     const base = [_]Header{.{ .name = "x-a", .value = "1" }};
     const extra = [_]Header{.{ .name = "x-b", .value = "2" }};
 
@@ -83,7 +126,8 @@ test "appendHeaders: short-circuits empty slices" {
     try std.testing.expectEqual(@as(usize, 1), out1.len);
 
     const out2 = try appendHeaders(std.testing.allocator, &.{}, extra[0..]);
-    try std.testing.expectEqual(@as(usize, @intFromPtr(extra[0..].ptr)), @as(usize, @intFromPtr(out2.ptr)));
+    defer std.testing.allocator.free(out2);
+    try std.testing.expect(out2.ptr != extra[0..].ptr);
     try std.testing.expectEqual(@as(usize, 1), out2.len);
 }
 
@@ -128,4 +172,11 @@ test "hasToken: trims tokens and ignores case" {
     try std.testing.expect(hasToken("gzip, deflate, br", "BR"));
     try std.testing.expect(hasToken(" gzip ,\tdeflate\t", "deflate"));
     try std.testing.expect(!hasToken("gzip,br", "zstd"));
+}
+
+test "matchesIfNoneMatch: strong, weak and wildcard tags" {
+    try std.testing.expect(matchesIfNoneMatch("\"abc\"", "\"abc\""));
+    try std.testing.expect(matchesIfNoneMatch("W/\"abc\"", "\"abc\""));
+    try std.testing.expect(matchesIfNoneMatch("*, W/\"nope\"", "\"abc\""));
+    try std.testing.expect(!matchesIfNoneMatch("\"nope\"", "\"abc\""));
 }

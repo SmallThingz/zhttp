@@ -455,3 +455,129 @@ pub const RequestIdOptions = @import("middleware/request_id.zig").RequestIdOptio
 pub const SecurityHeaders = @import("middleware/security_headers.zig").SecurityHeaders;
 pub const SecurityHeadersOptions = @import("middleware/security_headers.zig").SecurityHeadersOptions;
 pub const staticContentTypeFor = @import("middleware/static.zig").contentTypeFor;
+
+test "middleware helpers: merge needs, dedupe context data, and init static context" {
+    const testing = std.testing;
+    const AuthData = struct { counter: u8 };
+
+    const StaticCtx = struct {
+        pattern: []const u8,
+
+        pub fn init(_: std.Io, _: std.mem.Allocator, rd: StaticContextRouteDecl) @This() {
+            return .{ .pattern = rd.pattern };
+        }
+    };
+
+    const MwA = struct {
+        pub const Info: MiddlewareInfo = .{
+            .name = "auth",
+            .data = AuthData,
+            .static_context = StaticCtx,
+            .header = struct { x_token: parse.Optional(parse.String) },
+            .query = struct { page: parse.Optional(parse.Int(u8)) },
+            .path = struct { id: parse.Int(u32) },
+        };
+
+        pub fn call(_: anytype, _: anytype) !@import("response.zig").Res {
+            unreachable;
+        }
+
+        pub fn initData() Info.data.? {
+            return .{ .counter = 7 };
+        }
+    };
+
+    const MwADupe = struct {
+        pub const Info: MiddlewareInfo = .{
+            .name = "auth",
+            .data = AuthData,
+            .static_context = StaticCtx,
+            .header = struct { host: parse.Optional(parse.String) },
+            .query = struct { q: parse.Optional(parse.String) },
+            .path = struct { slug: parse.String },
+        };
+
+        pub fn call(_: anytype, _: anytype) !@import("response.zig").Res {
+            unreachable;
+        }
+    };
+
+    const MwB = struct {
+        pub const Info: MiddlewareInfo = .{
+            .name = "trace",
+            .data = struct { enabled: bool },
+        };
+
+        pub fn call(_: anytype, _: anytype) !@import("response.zig").Res {
+            unreachable;
+        }
+    };
+
+    const headers_t = needsHeaders(.{ MwA, MwADupe });
+    try testing.expect(@hasField(headers_t, "x_token"));
+    try testing.expect(@hasField(headers_t, "host"));
+
+    const query_t = needsQuery(.{ MwA, MwADupe });
+    try testing.expect(@hasField(query_t, "page"));
+    try testing.expect(@hasField(query_t, "q"));
+
+    const params_t = needsParams(.{ MwA, MwADupe });
+    try testing.expect(@hasField(params_t, "id"));
+    try testing.expect(@hasField(params_t, "slug"));
+
+    const Ctx = contextType(.{ MwA, MwADupe, MwB });
+    try testing.expect(@hasField(Ctx, "auth"));
+    try testing.expect(@hasField(Ctx, "trace"));
+    try testing.expectEqual(@as(usize, 2), std.meta.fields(Ctx).len);
+
+    const ctx = comptime initContext(.{ MwA, MwADupe, MwB }, Ctx);
+    try testing.expectEqual(@as(u8, 7), ctx.auth.counter);
+    try testing.expectEqual(false, ctx.trace.enabled);
+
+    const st = comptime contextST(.{ MwA, MwADupe, MwB });
+    try testing.expectEqual(@as(usize, 2), st.len);
+    try testing.expectEqualStrings("auth", st[0].name);
+    try testing.expectEqualStrings("trace", st[1].name);
+
+    const StaticCtxT = staticContextType(.{ MwA, MwADupe, MwB });
+    try testing.expect(@hasField(StaticCtxT, "auth"));
+    try testing.expectEqual(@as(usize, 1), std.meta.fields(StaticCtxT).len);
+
+    const rd: StaticContextRouteDecl = .{
+        .method = "GET",
+        .pattern = "/items/{id}",
+        .endpoint = struct {},
+        .headers = struct {},
+        .query = struct {},
+        .params = struct {},
+        .middlewares = &.{},
+        .operations = &.{},
+    };
+    const static_ctx = try initStaticContext(StaticCtxT, testing.io, testing.allocator, rd);
+    try testing.expectEqualStrings("/items/{id}", static_ctx.auth.pattern);
+}
+
+test "middleware helpers: typeList and concatTypeLists support tuple/array inputs" {
+    const A = struct {};
+    const B = struct {};
+    const C = struct {};
+
+    const tuple_list = comptime typeList(.{ A, B });
+    try std.testing.expectEqual(@as(usize, 2), tuple_list.len);
+    comptime {
+        if (tuple_list[0] != A or tuple_list[1] != B) @compileError("tuple typeList order changed");
+    }
+
+    const array = comptime [_]type{B};
+    const array_list = comptime typeList(array);
+    try std.testing.expectEqual(@as(usize, 1), array_list.len);
+    comptime {
+        if (array_list[0] != B) @compileError("array typeList order changed");
+    }
+
+    const joined = comptime concatTypeLists(tuple_list, &.{C});
+    try std.testing.expectEqual(@as(usize, 3), joined.len);
+    comptime {
+        if (joined[2] != C) @compileError("concatTypeLists order changed");
+    }
+}

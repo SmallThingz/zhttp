@@ -7,6 +7,7 @@ const ReqCtx = @import("../req_ctx.zig").ReqCtx;
 const parse = @import("../parse.zig");
 const test_helpers = @import("test_helpers.zig");
 const util = @import("util.zig");
+const core_util = @import("../util.zig");
 const zstd = @import("libzstd");
 const brotli = @import("libbrotli");
 
@@ -36,7 +37,7 @@ fn qValue(params: []const u8) f32 {
         if (part.len < 2) continue;
         const eq = std.mem.indexOfScalar(u8, part, '=') orelse continue;
         const k = std.mem.trim(u8, part[0..eq], " \t");
-        if (!std.ascii.eqlIgnoreCase(k, "q")) continue;
+        if (!core_util.asciiEqlLower(k, "q")) continue;
         const v = std.mem.trim(u8, part[eq + 1 ..], " \t");
         const q = std.fmt.parseFloat(f32, v) catch return 0.0;
         return std.math.clamp(q, 0.0, 1.0);
@@ -82,15 +83,15 @@ fn negotiateEncodings(header_value: []const u8, allowed: []const CompressionSche
         const token = std.mem.trim(u8, part[0..semi], " \t");
         const q = if (semi == part.len) 1.0 else qValue(part[semi + 1 ..]);
 
-        if (std.ascii.eqlIgnoreCase(token, "br")) {
+        if (core_util.asciiEqlLower(token, "br")) {
             br_q = q;
-        } else if (std.ascii.eqlIgnoreCase(token, "zstd")) {
+        } else if (core_util.asciiEqlLower(token, "zstd")) {
             zstd_q = q;
-        } else if (std.ascii.eqlIgnoreCase(token, "gzip")) {
+        } else if (core_util.asciiEqlLower(token, "gzip")) {
             gzip_q = q;
-        } else if (std.ascii.eqlIgnoreCase(token, "deflate")) {
+        } else if (core_util.asciiEqlLower(token, "deflate")) {
             deflate_q = q;
-        } else if (std.ascii.eqlIgnoreCase(token, "*")) {
+        } else if (core_util.asciiEqlLower(token, "*")) {
             star_q = q;
         }
     }

@@ -146,3 +146,41 @@ test "request_id: check_then_add keeps existing header" {
     try std.testing.expectEqual(@as(usize, 1), res.headers.len);
     try std.testing.expectEqualStrings("fixed-id", res.headers[0].value);
 }
+
+test "request_id: regression allocates header slice when base response has no headers" {
+    const Mw = RequestId(.{});
+    const MwCtx = struct {};
+    const ReqT = @import("../request.zig").Request(struct {}, struct {}, &.{}, MwCtx);
+
+    const Next = struct {
+        pub const function = call;
+        pub fn call(comptime rctx: ReqCtx, _: rctx.T()) !Res {
+            return .{
+                .status = .ok,
+                .body = "ok",
+            };
+        }
+    };
+
+    var backing: [2048]u8 = undefined;
+    var fba = std.heap.FixedBufferAllocator.init(backing[0..]);
+    const a = fba.allocator();
+    const path_buf = "/".*;
+    const query_buf: [0]u8 = .{};
+    const line: @import("../request.zig").RequestLine = .{
+        .method = "GET",
+        .version = .http11,
+        .path = @constCast(path_buf[0..]),
+        .query = @constCast(query_buf[0..]),
+    };
+    const mw_ctx: MwCtx = .{};
+    var reqv = ReqT.init(a, std.testing.io, line, mw_ctx);
+
+    const res = try test_helpers.runMiddlewareTest(Mw, ReqT, Next, &reqv, line.method);
+    try std.testing.expectEqual(@as(usize, 1), res.headers.len);
+
+    const start = @intFromPtr(&backing[0]);
+    const end = start + backing.len;
+    const ptr = @intFromPtr(res.headers.ptr);
+    try std.testing.expect(ptr >= start and ptr < end);
+}

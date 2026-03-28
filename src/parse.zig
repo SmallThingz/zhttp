@@ -1,6 +1,7 @@
 const std = @import("std");
 
 const Allocator = std.mem.Allocator;
+const util = @import("util.zig");
 
 pub const CaptureError = error{
     MissingRequired,
@@ -500,8 +501,8 @@ pub const Bool = struct {
                 '0' => false,
                 else => error.BadValue,
             },
-            4 => if (std.ascii.eqlIgnoreCase(raw, "true")) true else error.BadValue,
-            5 => if (std.ascii.eqlIgnoreCase(raw, "false")) false else error.BadValue,
+            4 => if (util.asciiEqlLower(raw, "true")) true else error.BadValue,
+            5 => if (util.asciiEqlLower(raw, "false")) false else error.BadValue,
             else => error.BadValue,
         };
     }

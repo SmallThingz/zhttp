@@ -31,3 +31,32 @@ pub const RouteDecl = struct {
     /// Stores `operations`.
     operations: []const type,
 };
+
+test "EndpointInfo: defaults are empty" {
+    const info: EndpointInfo = .{};
+    try @import("std").testing.expect(info.headers == null);
+    try @import("std").testing.expect(info.query == null);
+    try @import("std").testing.expect(info.path == null);
+    try @import("std").testing.expectEqual(@as(usize, 0), info.middlewares.len);
+    try @import("std").testing.expectEqual(@as(usize, 0), info.operations.len);
+}
+
+test "RouteDecl: stores resolved route metadata" {
+    const DummyEndpoint = struct {};
+    const route: RouteDecl = .{
+        .method = "GET",
+        .pattern = "/users/{id}",
+        .endpoint = DummyEndpoint,
+        .headers = struct { host: []const u8 },
+        .query = struct { page: u8 },
+        .params = struct { id: u32 },
+        .middlewares = &.{struct {}},
+        .operations = &.{struct {}},
+    };
+
+    try @import("std").testing.expectEqualStrings("GET", route.method);
+    try @import("std").testing.expectEqualStrings("/users/{id}", route.pattern);
+    try @import("std").testing.expect(route.endpoint == DummyEndpoint);
+    try @import("std").testing.expectEqual(@as(usize, 1), route.middlewares.len);
+    try @import("std").testing.expectEqual(@as(usize, 1), route.operations.len);
+}

@@ -177,7 +177,7 @@ pub fn parseRequestLineBorrowed(r: *Io.Reader, max_line_len: usize) ParseLineErr
 }
 
 fn headerIs(name: []const u8, comptime wanted: []const u8) bool {
-    return std.ascii.eqlIgnoreCase(name, wanted);
+    return util.asciiEqlLower(name, wanted);
 }
 
 fn containsTokenIgnoreCase(value: []const u8, comptime token: []const u8) bool {
@@ -185,7 +185,7 @@ fn containsTokenIgnoreCase(value: []const u8, comptime token: []const u8) bool {
     var it = std.mem.splitScalar(u8, value, ',');
     while (it.next()) |part| {
         const t = std.mem.trim(u8, part, " \t");
-        if (std.ascii.eqlIgnoreCase(t, token)) return true;
+        if (util.asciiEqlLower(t, token)) return true;
     }
     return false;
 }

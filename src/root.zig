@@ -147,6 +147,42 @@ fn fuzzBuiltin(
     if (map_opt) |*m| m.deinit();
 }
 
+test "fuzz: empty corpus runs once" {
+    const Ctx = struct {
+        count: usize = 0,
+        saw_empty: bool = false,
+    };
+    const Helper = struct {
+        pub fn testOne(ctx: *Ctx, smith: *std.testing.Smith) !void {
+            ctx.count += 1;
+            ctx.saw_empty = if (smith.*.in) |bytes| bytes.len == 0 else true;
+        }
+    };
+
+    var ctx: Ctx = .{};
+    try fuzz(&ctx, Helper.testOne, .{ .corpus = &.{} });
+    try std.testing.expectEqual(@as(usize, 1), ctx.count);
+    try std.testing.expect(ctx.saw_empty);
+}
+
+test "fuzz: corpus iterates all inputs in non-fuzz mode" {
+    const Ctx = struct {
+        count: usize = 0,
+        total_bytes: usize = 0,
+    };
+    const Helper = struct {
+        pub fn testOne(ctx: *Ctx, smith: *std.testing.Smith) !void {
+            ctx.count += 1;
+            ctx.total_bytes += if (smith.*.in) |bytes| bytes.len else 0;
+        }
+    };
+
+    var ctx: Ctx = .{};
+    try fuzz(&ctx, Helper.testOne, .{ .corpus = &.{ "a", "bc", "" } });
+    try std.testing.expectEqual(@as(usize, 3), ctx.count);
+    try std.testing.expectEqual(@as(usize, 3), ctx.total_bytes);
+}
+
 test {
     _ = @import("parse.zig");
     _ = @import("request.zig");

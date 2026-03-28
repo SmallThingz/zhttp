@@ -9,6 +9,7 @@ const request = @import("../request.zig");
 const route_decl = @import("../route_decl.zig");
 const router = @import("../router.zig");
 const test_helpers = @import("test_helpers.zig");
+const util = @import("util.zig");
 
 const Io = std.Io;
 
@@ -133,36 +134,6 @@ pub fn contentTypeFor(path: []const u8) ?[]const u8 {
         },
         else => null,
     };
-}
-
-fn etagFor(allocator: std.mem.Allocator, body: []const u8) ![]const u8 {
-    const h = std.hash.Wyhash.hash(0, body);
-    var tmp: [16]u8 = undefined;
-    const hex = std.fmt.bufPrint(&tmp, "{x:0>16}", .{h}) catch unreachable;
-    const out = try allocator.alloc(u8, 18);
-    out[0] = '"';
-    @memcpy(out[1..17], hex);
-    out[17] = '"';
-    return out;
-}
-
-fn etagMatches(if_none_match: []const u8, tag: []const u8) bool {
-    const trimmed = std.mem.trim(u8, if_none_match, " \t");
-    if (std.mem.eql(u8, trimmed, "*")) return true;
-    var it = std.mem.splitScalar(u8, trimmed, ',');
-    while (it.next()) |part| {
-        const t = std.mem.trim(u8, part, " \t");
-        if (std.mem.eql(u8, t, tag)) return true;
-        if (t.len > 2 and t[0] == 'W' and t[1] == '/' and std.mem.eql(u8, t[2..], tag)) return true;
-    }
-    return false;
-}
-
-fn allocHeaders(allocator: std.mem.Allocator, src: []const Header) ![]const Header {
-    if (src.len == 0) return &.{};
-    const out = try allocator.alloc(Header, src.len);
-    @memcpy(out, src);
-    return out;
 }
 
 /// Filesystem watch options for `Static` cache invalidation.
@@ -528,15 +499,15 @@ pub fn Static(comptime opts: StaticOptions) type {
                 hcount += 1;
                 if (etag_enabled) {
                     if (req.header(.if_none_match)) |hdr| {
-                        if (etagMatches(hdr, t)) {
-                            const headers_304 = try allocHeaders(a, headers_buf[0..hcount]);
+                        if (util.matchesIfNoneMatch(hdr, t)) {
+                            const headers_304 = try util.copyHeaders(a, headers_buf[0..hcount]);
                             return .{ .status = .not_modified, .headers = headers_304, .body = "" };
                         }
                     }
                 }
             }
 
-            const headers = try allocHeaders(a, headers_buf[0..hcount]);
+            const headers = try util.copyHeaders(a, headers_buf[0..hcount]);
             return .{ .status = .ok, .headers = headers, .body = body };
         }
 
@@ -584,7 +555,7 @@ pub fn Static(comptime opts: StaticOptions) type {
             try fr.interface.readSliceAll(body);
 
             const content_type = contentTypeFor(file_rel);
-            const tag = if (etag_enabled) try etagFor(a, body) else null;
+            const tag = if (etag_enabled) try util.makeEtag(a, body, false) else null;
 
             cacheInsert(req.io(), static_ctx, file_rel, body, tag, content_type, size, st.mtime.nanoseconds);
             return buildResponse(req, body, content_type, tag);
@@ -611,11 +582,11 @@ test "static: helper functions handle edge cases" {
     try std.testing.expectEqualStrings("image/jpeg", contentTypeFor("photo.JpEg").?);
     try std.testing.expect(contentTypeFor("noext") == null);
 
-    try std.testing.expect(etagMatches("\"abc\"", "\"abc\""));
-    try std.testing.expect(etagMatches("W/\"abc\"", "\"abc\""));
-    try std.testing.expect(etagMatches("W/\"x\", \"abc\"", "\"abc\""));
-    try std.testing.expect(etagMatches("*", "\"abc\""));
-    try std.testing.expect(!etagMatches("\"x\", \"y\"", "\"abc\""));
+    try std.testing.expect(util.matchesIfNoneMatch("\"abc\"", "\"abc\""));
+    try std.testing.expect(util.matchesIfNoneMatch("W/\"abc\"", "\"abc\""));
+    try std.testing.expect(util.matchesIfNoneMatch("W/\"x\", \"abc\"", "\"abc\""));
+    try std.testing.expect(util.matchesIfNoneMatch("*", "\"abc\""));
+    try std.testing.expect(!util.matchesIfNoneMatch("\"x\", \"y\"", "\"abc\""));
 }
 
 fn writeTestFile(path: []const u8, content: []const u8) !void {

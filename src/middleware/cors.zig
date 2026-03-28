@@ -7,12 +7,13 @@ const ReqCtx = @import("../req_ctx.zig").ReqCtx;
 const parse = @import("../parse.zig");
 const test_helpers = @import("test_helpers.zig");
 const util = @import("util.zig");
+const core_util = @import("../util.zig");
 
 pub const CorsSignature = struct {};
 
 fn listContainsIgnoreCase(list: []const []const u8, value: []const u8) bool {
     for (list) |item| {
-        if (std.ascii.eqlIgnoreCase(item, value)) return true;
+        if (core_util.asciiEqlIgnoreCase(item, value)) return true;
     }
     return false;
 }
@@ -25,13 +26,6 @@ fn parseHeaderList(value: []const u8, allocator: std.mem.Allocator) ![]const []c
         if (t.len != 0) try parts.append(allocator, t);
     }
     return parts.toOwnedSlice(allocator);
-}
-
-fn allocHeaders(allocator: std.mem.Allocator, src: []const Header) ![]const Header {
-    if (src.len == 0) return &.{};
-    const out = try allocator.alloc(Header, src.len);
-    @memcpy(out, src);
-    return out;
 }
 
 /// Configuration for `Cors`.
@@ -178,10 +172,6 @@ pub fn Cors(comptime opts: CorsOptions) type {
                 "origin";
         }
 
-        fn appendCorsHeaders(allocator: std.mem.Allocator, base: []const Header, extra: []const Header) ![]const Header {
-            return util.appendHeaders(allocator, base, extra);
-        }
-
         fn handle(comptime rctx: ReqCtx, req: rctx.T()) !Res {
             const origin_opt = req.header(.origin) orelse return rctx.next(req);
             const origin = origin_opt;
@@ -189,7 +179,7 @@ pub fn Cors(comptime opts: CorsOptions) type {
             const origin_copy = if (needs_origin_copy) try req.allocator().dupe(u8, origin) else origin;
             const allowed = originAllowed(origin);
 
-            const is_options = std.ascii.eqlIgnoreCase(req.method, "OPTIONS");
+            const is_options = core_util.asciiEqlLower(req.method, "options");
             const preflight = is_options and req.header(.access_control_request_method) != null;
 
             if (store) {
@@ -263,7 +253,7 @@ pub fn Cors(comptime opts: CorsOptions) type {
                     n += 1;
                 }
 
-                const headers = try allocHeaders(req.allocator(), hdrs[0..n]);
+                const headers = try util.copyHeaders(req.allocator(), hdrs[0..n]);
                 return .{ .status = .no_content, .headers = headers, .body = "" };
             }
 
@@ -304,7 +294,7 @@ pub fn Cors(comptime opts: CorsOptions) type {
             }
 
             if (n == 0) return res;
-            res.headers = try appendCorsHeaders(req.allocator(), res.headers, hdrs[0..n]);
+            res.headers = try util.appendHeaders(req.allocator(), res.headers, hdrs[0..n]);
             return res;
         }
     };

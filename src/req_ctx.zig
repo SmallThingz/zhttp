@@ -362,3 +362,184 @@ pub const ReqCtx = struct {
         return self.invoke(req);
     }
 };
+
+test "ReqCtx: run/next/override chain and server access work" {
+    const testing = std.testing;
+    const Res = response.Res;
+
+    const FakeServer = struct {
+        tag: u8,
+    };
+
+    const FakeBase = struct {
+        const InnerBase = struct {
+            touched: bool = false,
+        };
+        const AppCtx = struct {
+            value: u8 = 3,
+        };
+        const MwCtx = struct {
+            dummy: u8 = 0,
+        };
+        const MwStaticCtx = struct {
+            dummy: u8 = 0,
+        };
+
+        allocator_value: std.mem.Allocator,
+        io_value: std.Io,
+        inner: InnerBase = .{},
+        app_ctx: AppCtx = .{},
+        mw_ctx: MwCtx = .{},
+        mw_static_ctx: MwStaticCtx = .{},
+        server_ptr: *FakeServer,
+        call_trace: [4]u8 = .{ 0, 0, 0, 0 },
+        trace_len: usize = 0,
+        override_seen: bool = false,
+
+        pub fn allocator(self: *@This()) std.mem.Allocator {
+            return self.allocator_value;
+        }
+        pub fn io(self: *@This()) std.Io {
+            return self.io_value;
+        }
+        pub fn base(self: *@This()) *InnerBase {
+            return &self.inner;
+        }
+        pub fn baseConst(self: *@This()) *const InnerBase {
+            return &self.inner;
+        }
+        pub fn ctx(self: *@This()) *AppCtx {
+            return &self.app_ctx;
+        }
+        pub fn ctxConst(self: *@This()) *const AppCtx {
+            return &self.app_ctx;
+        }
+        pub fn mwCtxMut(self: *@This()) *MwCtx {
+            return &self.mw_ctx;
+        }
+        pub fn mwCtxConst(self: *@This()) *const MwCtx {
+            return &self.mw_ctx;
+        }
+        pub fn mwStaticCtxMut(self: *@This()) *MwStaticCtx {
+            return &self.mw_static_ctx;
+        }
+        pub fn mwStaticCtxConst(self: *@This()) *const MwStaticCtx {
+            return &self.mw_static_ctx;
+        }
+        pub fn keepAlive(_: *@This()) bool {
+            return true;
+        }
+        pub fn header(_: *@This(), comptime _: anytype) ?[]const u8 {
+            return null;
+        }
+        pub fn queryParam(_: *@This(), comptime _: anytype) ?[]const u8 {
+            return null;
+        }
+        pub fn paramValue(_: *@This(), comptime _: anytype) ?[]const u8 {
+            return null;
+        }
+        pub fn middlewareData(_: *@This(), comptime _: anytype) *MwCtx {
+            unreachable;
+        }
+        pub fn middlewareDataConst(_: *@This(), comptime _: anytype) *const MwCtx {
+            unreachable;
+        }
+        pub fn middlewareStatic(_: *@This(), comptime _: anytype) *MwStaticCtx {
+            unreachable;
+        }
+        pub fn middlewareStaticConst(_: *@This(), comptime _: anytype) *const MwStaticCtx {
+            unreachable;
+        }
+        pub fn server(self: *@This()) *FakeServer {
+            return self.server_ptr;
+        }
+        pub fn bodyAll(self: *@This(), _: usize) error{Dummy}![]const u8 {
+            self.override_seen = false;
+            return "base";
+        }
+        pub fn discardUnreadBody(_: *@This()) error{Dummy}!void {}
+    };
+
+    const M1 = struct {
+        pub fn call(comptime rctx: ReqCtx, req: rctx.T()) !Res {
+            req.raw().call_trace[req.raw().trace_len] = '1';
+            req.raw().trace_len += 1;
+            return rctx.next(req);
+        }
+
+        pub fn Override(comptime rctx: ReqCtx) type {
+            return struct {
+                pub fn bodyAll(req: *rctx.T(), max_bytes: usize) error{Dummy}![]const u8 {
+                    _ = max_bytes;
+                    req.raw().override_seen = true;
+                    return "mw1";
+                }
+            };
+        }
+    };
+
+    const M2 = struct {
+        pub fn call(comptime rctx: ReqCtx, req: rctx.T()) !Res {
+            req.raw().call_trace[req.raw().trace_len] = '2';
+            req.raw().trace_len += 1;
+            return rctx.next(req);
+        }
+
+        pub fn Override(comptime rctx: ReqCtx) type {
+            return struct {
+                pub fn bodyAll(req: *rctx.T(), max_bytes: usize) error{Dummy}![]const u8 {
+                    req.raw().call_trace[req.raw().trace_len] = 'o';
+                    req.raw().trace_len += 1;
+                    return req.bodyAll(max_bytes);
+                }
+            };
+        }
+    };
+
+    const Handler = struct {
+        pub const function = call;
+
+        pub fn call(comptime rctx: ReqCtx, req: rctx.T()) !rctx.Response([]const u8) {
+            try testing.expect(rctx.Server() == FakeServer);
+            try testing.expectEqual(@as(u8, 9), req.server().tag);
+            req.baseMut().touched = true;
+            const body = try req.bodyAll(128);
+            req.raw().call_trace[req.raw().trace_len] = 'h';
+            req.raw().trace_len += 1;
+            return Res.text(200, body);
+        }
+    };
+
+    var server: FakeServer = .{ .tag = 9 };
+    var base: FakeBase = .{
+        .allocator_value = testing.allocator,
+        .io_value = testing.io,
+        .server_ptr = &server,
+    };
+
+    const rctx: ReqCtx = .{
+        .handler = Handler,
+        .middlewares = &.{ M1, M2 },
+        .path = &.{},
+        .query = &.{},
+        .headers = &.{},
+        .middleware_contexts = &.{},
+        .idx = 0,
+        ._base_req_type = FakeBase,
+        ._server_type = FakeServer,
+    };
+
+    const ReqT = rctx.T();
+    const req: ReqT = .{
+        ._base = &base,
+        .path = "/items/1",
+        .method = "GET",
+    };
+
+    const res = try rctx.run(req);
+    try testing.expectEqualStrings("mw1", res.body);
+    try testing.expect(base.inner.touched);
+    try testing.expect(base.override_seen);
+    try testing.expectEqual(@as(usize, 4), base.trace_len);
+    try testing.expectEqualStrings("12oh", base.call_trace[0..base.trace_len]);
+}

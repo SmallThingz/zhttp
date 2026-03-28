@@ -5,6 +5,7 @@ const Res = @import("../response.zig").Res;
 const MiddlewareInfo = @import("../middleware.zig").MiddlewareInfo;
 const ReqCtx = @import("../req_ctx.zig").ReqCtx;
 const test_helpers = @import("test_helpers.zig");
+const util = @import("../util.zig");
 
 /// Configuration for `Expect`.
 pub const ExpectOptions = struct {
@@ -32,7 +33,7 @@ const ExpectState = struct {
 };
 
 fn is100Continue(value: []const u8) bool {
-    return std.ascii.eqlIgnoreCase(std.mem.trim(u8, value, " \t"), "100-continue");
+    return util.asciiEqlLower(std.mem.trim(u8, value, " \t"), "100-continue");
 }
 
 /// Validates request `Expect` header and enables `100 Continue` body-read handling.

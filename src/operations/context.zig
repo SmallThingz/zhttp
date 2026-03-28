@@ -15,3 +15,32 @@ pub const OperationCtx = struct {
         return r.filterByOperation(self.operation);
     }
 };
+
+test "OperationCtx: T and filter delegate to router" {
+    const std = @import("std");
+
+    const Op = struct {};
+    const FakeRouter = struct {
+        called: bool = false,
+
+        pub fn filterByOperation(self: *@This(), comptime operation: type) []const usize {
+            comptime {
+                if (operation != Op) @compileError("OperationCtx.filter passed wrong operation type");
+            }
+            self.called = true;
+            return &.{ 1, 3, 5 };
+        }
+    };
+
+    const opctx: OperationCtx = .{
+        .operation = Op,
+        .router_type = FakeRouter,
+    };
+    try std.testing.expect(opctx.T() == *FakeRouter);
+
+    var router: FakeRouter = .{};
+    const indices = opctx.filter(&router);
+    try std.testing.expect(router.called);
+    try std.testing.expectEqual(@as(usize, 3), indices.len);
+    try std.testing.expectEqual(@as(usize, 3), indices[1]);
+}

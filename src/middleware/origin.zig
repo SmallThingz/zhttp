@@ -4,6 +4,7 @@ const parse = @import("../parse.zig");
 const Res = @import("../response.zig").Res;
 const MiddlewareInfo = @import("../middleware.zig").MiddlewareInfo;
 const ReqCtx = @import("../req_ctx.zig").ReqCtx;
+const test_helpers = @import("test_helpers.zig");
 
 comptime {
     @setEvalBranchQuota(200_000);
@@ -297,32 +298,6 @@ test "origin hash matcher matches exact origins" {
     try std.testing.expect(!Matcher.contains("http://localhost"));
 }
 
-fn runMiddlewareTest(
-    comptime Mw: type,
-    comptime ReqT: type,
-    comptime Handler: type,
-    reqv: *ReqT,
-    method: []const u8,
-) !Res {
-    const rctx: ReqCtx = .{
-        .handler = Handler,
-        .middlewares = &.{Mw},
-        .path = &.{},
-        .query = &.{},
-        .headers = &.{},
-        .middleware_contexts = &.{},
-        .idx = 0,
-        ._base_req_type = ReqT,
-    };
-    const ReqW = rctx.T();
-    const reqw: ReqW = .{
-        ._base = reqv,
-        .path = reqv.rawPath(),
-        .method = method,
-    };
-    return rctx.run(reqw);
-}
-
 test "origin middleware allows configured origin" {
     const Mw = Origin(.{
         .origins = &.{ "https://app.example.com", "http://localhost:3000" },
@@ -358,7 +333,7 @@ test "origin middleware allows configured origin" {
         .inner = .{ .value = "https://app.example.com" },
     };
 
-    const res = try runMiddlewareTest(Mw, ReqT, Next, &reqv, line.method);
+    const res = try test_helpers.runMiddlewareTest(Mw, ReqT, Next, &reqv, line.method);
     try std.testing.expectEqual(@as(u16, 200), @intFromEnum(res.status));
 }
 
@@ -391,7 +366,7 @@ test "origin middleware rejects missing origin by default" {
     var reqv = ReqT.init(gpa, std.testing.io, line, mw_ctx);
     defer reqv.deinit(gpa);
 
-    const res = try runMiddlewareTest(Mw, ReqT, Next, &reqv, line.method);
+    const res = try test_helpers.runMiddlewareTest(Mw, ReqT, Next, &reqv, line.method);
     try std.testing.expectEqual(@as(u16, 403), @intFromEnum(res.status));
     try std.testing.expectEqualStrings("forbidden origin\n", res.body);
 }
@@ -437,7 +412,7 @@ test "origin middleware can allow missing origin and store decision" {
     var reqv = ReqT.init(gpa, std.testing.io, line, mw_ctx);
     defer reqv.deinit(gpa);
 
-    const res = try runMiddlewareTest(Mw, ReqT, Next, &reqv, line.method);
+    const res = try test_helpers.runMiddlewareTest(Mw, ReqT, Next, &reqv, line.method);
     try std.testing.expectEqual(@as(u16, 200), @intFromEnum(res.status));
     try std.testing.expect(reqv.mwCtxConst().origin.allowed);
     try std.testing.expect(reqv.mwCtxConst().origin.missing);

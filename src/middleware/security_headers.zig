@@ -4,6 +4,7 @@ const Res = @import("../response.zig").Res;
 const Header = @import("../response.zig").Header;
 const MiddlewareInfo = @import("../middleware.zig").MiddlewareInfo;
 const ReqCtx = @import("../req_ctx.zig").ReqCtx;
+const test_helpers = @import("test_helpers.zig");
 const util = @import("util.zig");
 
 /// Configuration for `SecurityHeaders`.
@@ -126,47 +127,6 @@ pub fn SecurityHeaders(comptime opts: SecurityHeadersOptions) type {
     };
 }
 
-fn hasHeader(headers: []const Header, name: []const u8) bool {
-    for (headers) |h| {
-        if (std.ascii.eqlIgnoreCase(h.name, name)) return true;
-    }
-    return false;
-}
-
-fn countHeader(headers: []const Header, name: []const u8) usize {
-    var n: usize = 0;
-    for (headers) |h| {
-        if (std.ascii.eqlIgnoreCase(h.name, name)) n += 1;
-    }
-    return n;
-}
-
-fn runMiddlewareTest(
-    comptime Mw: type,
-    comptime ReqT: type,
-    comptime Handler: type,
-    reqv: *ReqT,
-    method: []const u8,
-) !Res {
-    const rctx: ReqCtx = .{
-        .handler = Handler,
-        .middlewares = &.{Mw},
-        .path = &.{},
-        .query = &.{},
-        .headers = &.{},
-        .middleware_contexts = &.{},
-        .idx = 0,
-        ._base_req_type = ReqT,
-    };
-    const ReqW = rctx.T();
-    const reqw: ReqW = .{
-        ._base = reqv,
-        .path = reqv.rawPath(),
-        .method = method,
-    };
-    return rctx.run(reqw);
-}
-
 test "security_headers: default headers present" {
     const Mw = SecurityHeaders(.{});
     const MwCtx = struct {};
@@ -195,10 +155,10 @@ test "security_headers: default headers present" {
     var reqv = ReqT.init(a, std.testing.io, line, mw_ctx);
     defer reqv.deinit(a);
 
-    const res = try runMiddlewareTest(Mw, ReqT, Next, &reqv, line.method);
-    try std.testing.expect(hasHeader(res.headers, "x-content-type-options"));
-    try std.testing.expect(hasHeader(res.headers, "x-frame-options"));
-    try std.testing.expect(hasHeader(res.headers, "referrer-policy"));
+    const res = try test_helpers.runMiddlewareTest(Mw, ReqT, Next, &reqv, line.method);
+    try std.testing.expect(test_helpers.hasHeader(res.headers, "x-content-type-options"));
+    try std.testing.expect(test_helpers.hasHeader(res.headers, "x-frame-options"));
+    try std.testing.expect(test_helpers.hasHeader(res.headers, "referrer-policy"));
 }
 
 test "security_headers: check_then_add skips existing" {
@@ -233,7 +193,7 @@ test "security_headers: check_then_add skips existing" {
     var reqv = ReqT.init(a, std.testing.io, line, mw_ctx);
     defer reqv.deinit(a);
 
-    const res = try runMiddlewareTest(Mw, ReqT, Next, &reqv, line.method);
-    try std.testing.expectEqual(@as(usize, 1), countHeader(res.headers, "x-frame-options"));
-    try std.testing.expect(hasHeader(res.headers, "x-content-type-options"));
+    const res = try test_helpers.runMiddlewareTest(Mw, ReqT, Next, &reqv, line.method);
+    try std.testing.expectEqual(@as(usize, 1), test_helpers.countHeader(res.headers, "x-frame-options"));
+    try std.testing.expect(test_helpers.hasHeader(res.headers, "x-content-type-options"));
 }

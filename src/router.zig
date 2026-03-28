@@ -864,6 +864,7 @@ pub fn Compiled(
 
                     var reqv = ReqT.initWithCtx(allocator, server.io, line, mw_ctx, server.ctx, route_mw_static_ctx);
                     reqv.setReader(r);
+                    reqv.setWriter(w);
                     defer reqv.deinit(allocator);
                     errdefer reqv.discardUnreadBody() catch {};
                     if (p.param_names.len != 0) {
@@ -1145,6 +1146,74 @@ test "dispatch: pipelined request discards unread content-length body" {
     const res2 = try dispatchForTest(S, {}, a, &r, line2, out2[0..]);
     try std.testing.expectEqual(.@"continue", res2.action);
     try std.testing.expect(std.mem.endsWith(u8, out2[0..res2.len], "\r\n\r\ng"));
+}
+
+test "dispatch: expect middleware emits interim 100-continue before final response" {
+    const ExpectMw = @import("middleware/expect.zig").Expect(.{});
+    const S = Compiled(void, .{
+        post("/echo", struct {
+            pub const Info: EndpointInfo = .{};
+            pub fn call(comptime _: ReqCtx, req: anytype) !Res {
+                const body = try req.bodyAll(1024);
+                return Res.text(200, body);
+            }
+        }),
+    }, .{ExpectMw});
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    var r = Io.Reader.fixed(
+        "POST /echo HTTP/1.1\r\n" ++
+            "Expect: 100-continue\r\n" ++
+            "Content-Length: 5\r\n" ++
+            "\r\n" ++
+            "hello",
+    );
+
+    const line = try request.parseRequestLineBorrowed(&r, 8 * 1024);
+    var out: [512]u8 = undefined;
+    const res = try dispatchForTest(S, {}, a, &r, line, out[0..]);
+    try std.testing.expectEqual(.@"continue", res.action);
+    const got = out[0..res.len];
+    try std.testing.expect(std.mem.startsWith(u8, got, "HTTP/1.1 100 Continue\r\n\r\n"));
+    try std.testing.expect(std.mem.indexOf(u8, got, "HTTP/1.1 200 OK\r\n") != null);
+    try std.testing.expect(std.mem.endsWith(u8, got, "\r\n\r\nhello"));
+}
+
+test "dispatch: expect middleware rejects unsupported expectation with 417" {
+    const ExpectMw = @import("middleware/expect.zig").Expect(.{});
+    const S = Compiled(void, .{
+        post("/x", struct {
+            pub const Info: EndpointInfo = .{};
+            pub fn call(comptime _: ReqCtx, req: anytype) !Res {
+                _ = req;
+                return Res.text(200, "ok");
+            }
+        }),
+    }, .{ExpectMw});
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    var r = Io.Reader.fixed(
+        "POST /x HTTP/1.1\r\n" ++
+            "Expect: custom-expectation\r\n" ++
+            "Content-Length: 5\r\n" ++
+            "\r\n" ++
+            "hello",
+    );
+
+    const line = try request.parseRequestLineBorrowed(&r, 8 * 1024);
+    var out: [512]u8 = undefined;
+    const res = try dispatchForTest(S, {}, a, &r, line, out[0..]);
+    try std.testing.expectEqual(.close, res.action);
+    const got = out[0..res.len];
+    try std.testing.expect(std.mem.startsWith(u8, got, "HTTP/1.1 417 Expectation Failed\r\n"));
+    try std.testing.expect(std.mem.indexOf(u8, got, "100 Continue") == null);
+    try std.testing.expect(std.mem.endsWith(u8, got, "\r\n\r\nexpectation failed\n"));
 }
 
 test "dispatch: pipelined request discards unread chunked body" {

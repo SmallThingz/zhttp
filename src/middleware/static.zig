@@ -6,6 +6,7 @@ const MiddlewareInfo = @import("../middleware.zig").MiddlewareInfo;
 const ReqCtx = @import("../req_ctx.zig").ReqCtx;
 const parse = @import("../parse.zig");
 const router = @import("../router.zig");
+const test_helpers = @import("test_helpers.zig");
 
 const Io = std.Io;
 
@@ -579,13 +580,6 @@ test "static: helper functions handle edge cases" {
     try std.testing.expect(!etagMatches("\"x\", \"y\"", "\"abc\""));
 }
 
-fn headerValue(headers: []const Header, name: []const u8) ?[]const u8 {
-    for (headers) |h| {
-        if (std.ascii.eqlIgnoreCase(h.name, name)) return h.value;
-    }
-    return null;
-}
-
 fn writeTestFile(path: []const u8, content: []const u8) !void {
     try Io.Dir.cwd().writeFile(std.testing.io, .{
         .sub_path = path,
@@ -635,7 +629,7 @@ test "static: serves file and index, blocks traversal" {
         const res = try S.serve(&reqv);
         try std.testing.expectEqual(@as(u16, 200), @intFromEnum(res.status));
         try std.testing.expectEqualStrings("hello\n", res.body);
-        try std.testing.expect(headerValue(res.headers, "content-type") != null);
+        try std.testing.expect(test_helpers.headerValue(res.headers, "content-type") != null);
     }
 
     {
@@ -748,7 +742,7 @@ test "static: etag returns 304 on match" {
         var rel1 = "hello.txt".*;
         try reqv.parseParams(a, &.{rel1[0..]});
         const res = try S.serve(&reqv);
-        const tag = headerValue(res.headers, "etag") orelse return error.TestExpectedEqual;
+        const tag = test_helpers.headerValue(res.headers, "etag") orelse return error.TestExpectedEqual;
         const header_line = try std.fmt.allocPrint(a, "If-None-Match: {s}\r\n\r\n", .{tag});
 
         const line2: @import("../request.zig").RequestLine = .{

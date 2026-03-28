@@ -5,6 +5,7 @@ const Header = @import("../response.zig").Header;
 const MiddlewareInfo = @import("../middleware.zig").MiddlewareInfo;
 const ReqCtx = @import("../req_ctx.zig").ReqCtx;
 const parse = @import("../parse.zig");
+const test_helpers = @import("test_helpers.zig");
 const util = @import("util.zig");
 
 pub const CorsSignature = struct {};
@@ -318,47 +319,6 @@ pub fn Cors(comptime opts: CorsOptions) type {
     };
 }
 
-fn headerValue(headers: []const Header, name: []const u8) ?[]const u8 {
-    for (headers) |h| {
-        if (std.ascii.eqlIgnoreCase(h.name, name)) return h.value;
-    }
-    return null;
-}
-
-fn countHeader(headers: []const Header, name: []const u8) usize {
-    var n: usize = 0;
-    for (headers) |h| {
-        if (std.ascii.eqlIgnoreCase(h.name, name)) n += 1;
-    }
-    return n;
-}
-
-fn runMiddlewareTest(
-    comptime Mw: type,
-    comptime ReqT: type,
-    comptime Handler: type,
-    reqv: *ReqT,
-    method: []const u8,
-) !Res {
-    const rctx: ReqCtx = .{
-        .handler = Handler,
-        .middlewares = &.{Mw},
-        .path = &.{},
-        .query = &.{},
-        .headers = &.{},
-        .middleware_contexts = &.{},
-        .idx = 0,
-        ._base_req_type = ReqT,
-    };
-    const ReqW = rctx.T();
-    const reqw: ReqW = .{
-        ._base = reqv,
-        .path = reqv.rawPath(),
-        .method = method,
-    };
-    return rctx.run(reqw);
-}
-
 test "cors: preflight and simple request" {
     const Mw = Cors(.{ .origins = &.{"https://example.com"} });
     const MwCtx = struct {};
@@ -399,9 +359,9 @@ test "cors: preflight and simple request" {
         var r = std.Io.Reader.fixed("Origin: https://example.com\r\nAccess-Control-Request-Method: POST\r\n\r\n");
         try reqv.parseHeaders(a, &r, 1024);
 
-        const res = try runMiddlewareTest(Mw, ReqT, Next, &reqv, line.method);
+        const res = try test_helpers.runMiddlewareTest(Mw, ReqT, Next, &reqv, line.method);
         try std.testing.expectEqual(@as(u16, 204), @intFromEnum(res.status));
-        try std.testing.expectEqualStrings("https://example.com", headerValue(res.headers, "access-control-allow-origin").?);
+        try std.testing.expectEqualStrings("https://example.com", test_helpers.headerValue(res.headers, "access-control-allow-origin").?);
     }
 
     {
@@ -422,9 +382,9 @@ test "cors: preflight and simple request" {
         var r = std.Io.Reader.fixed("Origin: https://example.com\r\n\r\n");
         try reqv.parseHeaders(a, &r, 1024);
 
-        const res = try runMiddlewareTest(Mw, ReqT, Next, &reqv, line.method);
+        const res = try test_helpers.runMiddlewareTest(Mw, ReqT, Next, &reqv, line.method);
         try std.testing.expectEqual(@as(u16, 200), @intFromEnum(res.status));
-        try std.testing.expectEqualStrings("https://example.com", headerValue(res.headers, "access-control-allow-origin").?);
+        try std.testing.expectEqualStrings("https://example.com", test_helpers.headerValue(res.headers, "access-control-allow-origin").?);
     }
 }
 
@@ -478,7 +438,7 @@ test "cors: check_then_add skips existing response headers" {
     var r = std.Io.Reader.fixed("Origin: https://example.com\r\n\r\n");
     try reqv.parseHeaders(a, &r, 1024);
 
-    const res = try runMiddlewareTest(Mw, ReqT, Next, &reqv, line.method);
-    try std.testing.expectEqual(@as(usize, 1), countHeader(res.headers, "access-control-allow-origin"));
-    try std.testing.expectEqual(@as(usize, 1), countHeader(res.headers, "vary"));
+    const res = try test_helpers.runMiddlewareTest(Mw, ReqT, Next, &reqv, line.method);
+    try std.testing.expectEqual(@as(usize, 1), test_helpers.countHeader(res.headers, "access-control-allow-origin"));
+    try std.testing.expectEqual(@as(usize, 1), test_helpers.countHeader(res.headers, "vary"));
 }

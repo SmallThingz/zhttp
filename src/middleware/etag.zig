@@ -4,6 +4,7 @@ const Res = @import("../response.zig").Res;
 const MiddlewareInfo = @import("../middleware.zig").MiddlewareInfo;
 const ReqCtx = @import("../req_ctx.zig").ReqCtx;
 const parse = @import("../parse.zig");
+const test_helpers = @import("test_helpers.zig");
 const util = @import("util.zig");
 
 fn makeEtag(allocator: std.mem.Allocator, body: []const u8, weak: bool) ![]const u8 {
@@ -91,32 +92,6 @@ test "etag: matches if-none-match" {
     try std.testing.expect(!matchesIfNoneMatch("\"nope\"", "\"abc\""));
 }
 
-fn runMiddlewareTest(
-    comptime Mw: type,
-    comptime ReqT: type,
-    comptime Handler: type,
-    reqv: *ReqT,
-    method: []const u8,
-) !Res {
-    const rctx: ReqCtx = .{
-        .handler = Handler,
-        .middlewares = &.{Mw},
-        .path = &.{},
-        .query = &.{},
-        .headers = &.{},
-        .middleware_contexts = &.{},
-        .idx = 0,
-        ._base_req_type = ReqT,
-    };
-    const ReqW = rctx.T();
-    const reqw: ReqW = .{
-        ._base = reqv,
-        .path = reqv.rawPath(),
-        .method = method,
-    };
-    return rctx.run(reqw);
-}
-
 test "etag: check_then_add skips if already set" {
     const Mw = Etag(.{ .header_behavior = .check_then_add });
     const MwCtx = struct {};
@@ -154,7 +129,7 @@ test "etag: check_then_add skips if already set" {
     var reqv = ReqT.init(a, std.testing.io, line, mw_ctx);
     defer reqv.deinit(a);
 
-    const res = try runMiddlewareTest(Mw, ReqT, Next, &reqv, line.method);
+    const res = try test_helpers.runMiddlewareTest(Mw, ReqT, Next, &reqv, line.method);
     try std.testing.expectEqual(@as(usize, 1), res.headers.len);
     try std.testing.expectEqualStrings("\"user\"", res.headers[0].value);
     try std.testing.expectEqualStrings("hello", res.body);

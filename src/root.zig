@@ -161,6 +161,7 @@ test {
     _ = @import("middleware/compression.zig");
     _ = @import("middleware/cors.zig");
     _ = @import("middleware/etag.zig");
+    _ = @import("middleware/expect.zig");
     _ = @import("middleware/logger.zig");
     _ = @import("middleware/origin.zig");
     _ = @import("middleware/request_id.zig");

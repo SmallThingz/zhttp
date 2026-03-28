@@ -1,9 +1,9 @@
 const std = @import("std");
 
 const Res = @import("../response.zig").Res;
-const Header = @import("../response.zig").Header;
 const MiddlewareInfo = @import("../middleware.zig").MiddlewareInfo;
 const ReqCtx = @import("../req_ctx.zig").ReqCtx;
+const test_helpers = @import("test_helpers.zig");
 const util = @import("util.zig");
 
 /// Configuration for `RequestId`.
@@ -77,39 +77,6 @@ pub fn RequestId(comptime opts: RequestIdOptions) type {
     };
 }
 
-fn headerValue(headers: []const Header, name: []const u8) ?[]const u8 {
-    for (headers) |h| {
-        if (std.ascii.eqlIgnoreCase(h.name, name)) return h.value;
-    }
-    return null;
-}
-
-fn runMiddlewareTest(
-    comptime Mw: type,
-    comptime ReqT: type,
-    comptime Handler: type,
-    reqv: *ReqT,
-    method: []const u8,
-) !Res {
-    const rctx: ReqCtx = .{
-        .handler = Handler,
-        .middlewares = &.{Mw},
-        .path = &.{},
-        .query = &.{},
-        .headers = &.{},
-        .middleware_contexts = &.{},
-        .idx = 0,
-        ._base_req_type = ReqT,
-    };
-    const ReqW = rctx.T();
-    const reqw: ReqW = .{
-        ._base = reqv,
-        .path = reqv.rawPath(),
-        .method = method,
-    };
-    return rctx.run(reqw);
-}
-
 test "request_id: adds header" {
     const Mw = RequestId(.{});
     const MwCtx = struct {};
@@ -138,8 +105,8 @@ test "request_id: adds header" {
     var reqv = ReqT.init(a, std.testing.io, line, mw_ctx);
     defer reqv.deinit(a);
 
-    const res = try runMiddlewareTest(Mw, ReqT, Next, &reqv, line.method);
-    const rid = headerValue(res.headers, "x-request-id") orelse return error.TestExpectedEqual;
+    const res = try test_helpers.runMiddlewareTest(Mw, ReqT, Next, &reqv, line.method);
+    const rid = test_helpers.headerValue(res.headers, "x-request-id") orelse return error.TestExpectedEqual;
     try std.testing.expect(rid.len == 32);
 }
 
@@ -175,7 +142,7 @@ test "request_id: check_then_add keeps existing header" {
     var reqv = ReqT.init(a, std.testing.io, line, mw_ctx);
     defer reqv.deinit(a);
 
-    const res = try runMiddlewareTest(Mw, ReqT, Next, &reqv, line.method);
+    const res = try test_helpers.runMiddlewareTest(Mw, ReqT, Next, &reqv, line.method);
     try std.testing.expectEqual(@as(usize, 1), res.headers.len);
     try std.testing.expectEqualStrings("fixed-id", res.headers[0].value);
 }

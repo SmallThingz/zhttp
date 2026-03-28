@@ -17,7 +17,7 @@ fn usage() void {
         \\  --help
         \\
         \\Endpoints:
-        \\  POST /echo   (echoes request body; up to 1MiB)
+        \\  POST /echo   (echoes request body; up to 1MiB; supports Expect: 100-continue)
         \\
     , .{});
 }
@@ -31,6 +31,9 @@ const Echo = struct {
 };
 
 const SrvT = zhttp.Server(.{
+    .middlewares = .{
+        zhttp.middleware.Expect(.{}),
+    },
     .routes = .{
         zhttp.post("/echo", Echo),
     },
@@ -92,11 +95,17 @@ pub fn main(init: std.process.Init) !void {
         const req =
             "POST /echo HTTP/1.1\r\n" ++
             "Host: x\r\n" ++
+            "Expect: 100-continue\r\n" ++
             "Content-Length: 5\r\n" ++
             "\r\n" ++
             "hello";
         try sw.interface.writeAll(req);
         try sw.interface.flush();
+
+        const interim = "HTTP/1.1 100 Continue\r\n\r\n";
+        var got_interim: [interim.len]u8 = undefined;
+        try sr.interface.readSliceAll(got_interim[0..]);
+        try std.testing.expectEqualStrings(interim, got_interim[0..]);
 
         const resp =
             "HTTP/1.1 200 OK\r\n" ++

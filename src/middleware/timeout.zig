@@ -3,6 +3,7 @@ const std = @import("std");
 const Res = @import("../response.zig").Res;
 const MiddlewareInfo = @import("../middleware.zig").MiddlewareInfo;
 const ReqCtx = @import("../req_ctx.zig").ReqCtx;
+const test_helpers = @import("test_helpers.zig");
 
 const Io = std.Io;
 
@@ -86,32 +87,6 @@ pub fn Timeout(comptime opts: TimeoutOptions) type {
     };
 }
 
-fn runMiddlewareTest(
-    comptime Mw: type,
-    comptime ReqT: type,
-    comptime Handler: type,
-    reqv: *ReqT,
-    method: []const u8,
-) !Res {
-    const rctx: ReqCtx = .{
-        .handler = Handler,
-        .middlewares = &.{Mw},
-        .path = &.{},
-        .query = &.{},
-        .headers = &.{},
-        .middleware_contexts = &.{},
-        .idx = 0,
-        ._base_req_type = ReqT,
-    };
-    const ReqW = rctx.T();
-    const reqw: ReqW = .{
-        ._base = reqv,
-        .path = reqv.rawPath(),
-        .method = method,
-    };
-    return rctx.run(reqw);
-}
-
 test "timeout: immediate timeout" {
     const Mw = Timeout(.{ .duration = std.Io.Duration.fromNanoseconds(-1) });
     const MwCtx = struct {};
@@ -138,6 +113,6 @@ test "timeout: immediate timeout" {
     var reqv = ReqT.init(gpa, std.testing.io, line, mw_ctx);
     defer reqv.deinit(gpa);
 
-    const res = try runMiddlewareTest(Mw, ReqT, Next, &reqv, line.method);
+    const res = try test_helpers.runMiddlewareTest(Mw, ReqT, Next, &reqv, line.method);
     try std.testing.expectEqual(@as(u16, 504), @intFromEnum(res.status));
 }

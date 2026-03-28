@@ -3,6 +3,7 @@ const std = @import("std");
 const Res = @import("../response.zig").Res;
 const MiddlewareInfo = @import("../middleware.zig").MiddlewareInfo;
 const ReqCtx = @import("../req_ctx.zig").ReqCtx;
+const test_helpers = @import("test_helpers.zig");
 
 const Io = std.Io;
 
@@ -24,32 +25,6 @@ fn testLog(method: []const u8, path: []const u8, status: u16, _: Io.Duration) vo
     log_state.method = method;
     log_state.path = path;
     log_state.status = status;
-}
-
-fn runMiddlewareTest(
-    comptime Mw: type,
-    comptime ReqT: type,
-    comptime Handler: type,
-    reqv: *ReqT,
-    method: []const u8,
-) !Res {
-    const rctx: ReqCtx = .{
-        .handler = Handler,
-        .middlewares = &.{Mw},
-        .path = &.{},
-        .query = &.{},
-        .headers = &.{},
-        .middleware_contexts = &.{},
-        .idx = 0,
-        ._base_req_type = ReqT,
-    };
-    const ReqW = rctx.T();
-    const reqw: ReqW = .{
-        ._base = reqv,
-        .path = reqv.rawPath(),
-        .method = method,
-    };
-    return rctx.run(reqw);
 }
 
 /// Configuration for `Logger`.
@@ -152,7 +127,7 @@ test "logger: invokes log function" {
     var reqv = ReqT.init(gpa, std.testing.io, line, mw_ctx);
     defer reqv.deinit(gpa);
 
-    const res = try runMiddlewareTest(Mw, ReqT, Next, &reqv, line.method);
+    const res = try test_helpers.runMiddlewareTest(Mw, ReqT, Next, &reqv, line.method);
     try std.testing.expectEqual(@as(u16, 201), @intFromEnum(res.status));
     try std.testing.expect(log_state.called);
     try std.testing.expectEqualStrings("GET", log_state.method);

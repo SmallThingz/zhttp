@@ -5,6 +5,7 @@ const Header = @import("../response.zig").Header;
 const MiddlewareInfo = @import("../middleware.zig").MiddlewareInfo;
 const ReqCtx = @import("../req_ctx.zig").ReqCtx;
 const parse = @import("../parse.zig");
+const test_helpers = @import("test_helpers.zig");
 const util = @import("util.zig");
 const zstd = @import("libzstd");
 const brotli = @import("libbrotli");
@@ -150,32 +151,6 @@ fn compressForScheme(
         .zstd => zstd.compress(allocator, body, opts.zstd_level),
         .gzip, .deflate => compressFlate(allocator, body, scheme, opts.level),
     };
-}
-
-fn runMiddlewareTest(
-    comptime Mw: type,
-    comptime ReqT: type,
-    comptime Handler: type,
-    reqv: *ReqT,
-    method: []const u8,
-) !Res {
-    const rctx: ReqCtx = .{
-        .handler = Handler,
-        .middlewares = &.{Mw},
-        .path = &.{},
-        .query = &.{},
-        .headers = &.{},
-        .middleware_contexts = &.{},
-        .idx = 0,
-        ._base_req_type = ReqT,
-    };
-    const ReqW = rctx.T();
-    const reqw: ReqW = .{
-        ._base = reqv,
-        .path = reqv.rawPath(),
-        .method = method,
-    };
-    return rctx.run(reqw);
 }
 
 /// Configuration for `Compression`.
@@ -332,7 +307,7 @@ test "compression: check_then_add skips when content-encoding exists" {
     var r = std.Io.Reader.fixed("Accept-Encoding: gzip\r\n\r\n");
     try reqv.parseHeaders(a, &r, 1024);
 
-    const res = try runMiddlewareTest(Mw, ReqT, Next, &reqv, line.method);
+    const res = try test_helpers.runMiddlewareTest(Mw, ReqT, Next, &reqv, line.method);
     try std.testing.expectEqual(@as(usize, 1), res.headers.len);
     try std.testing.expectEqualStrings("br", res.headers[0].value);
     try std.testing.expectEqualStrings("hello", res.body);
@@ -380,7 +355,7 @@ test "compression: check_then_add skips duplicate vary" {
     var r = std.Io.Reader.fixed("Accept-Encoding: gzip\r\n\r\n");
     try reqv.parseHeaders(a, &r, 1024);
 
-    const res = try runMiddlewareTest(Mw, ReqT, Next, &reqv, line.method);
+    const res = try test_helpers.runMiddlewareTest(Mw, ReqT, Next, &reqv, line.method);
     try std.testing.expectEqual(@as(usize, 2), res.headers.len);
     try std.testing.expectEqualStrings("content-encoding", res.headers[1].name);
 }
@@ -424,7 +399,7 @@ test "compression: selects deflate when preferred" {
     var r = std.Io.Reader.fixed("Accept-Encoding: gzip;q=0, deflate\r\n\r\n");
     try reqv.parseHeaders(a, &r, 1024);
 
-    const res = try runMiddlewareTest(Mw, ReqT, Next, &reqv, line.method);
+    const res = try test_helpers.runMiddlewareTest(Mw, ReqT, Next, &reqv, line.method);
     try std.testing.expectEqual(@as(usize, 2), res.headers.len);
     try std.testing.expectEqualStrings("content-encoding", res.headers[0].name);
     try std.testing.expectEqualStrings("deflate", res.headers[0].value);
@@ -472,7 +447,7 @@ test "compression: selects brotli when preferred" {
     var r = std.Io.Reader.fixed("Accept-Encoding: br, gzip;q=0.1\r\n\r\n");
     try reqv.parseHeaders(a, &r, 1024);
 
-    const res = try runMiddlewareTest(Mw, ReqT, Next, &reqv, line.method);
+    const res = try test_helpers.runMiddlewareTest(Mw, ReqT, Next, &reqv, line.method);
     try std.testing.expectEqualStrings("br", res.headers[0].value);
     const decoded = try brotli.decompress(a, res.body, payload.len * 2);
     try std.testing.expectEqualStrings(payload, decoded);
@@ -518,7 +493,7 @@ test "compression: selects zstd when preferred" {
     var r = std.Io.Reader.fixed("Accept-Encoding: zstd;q=1, br;q=0\r\n\r\n");
     try reqv.parseHeaders(a, &r, 1024);
 
-    const res = try runMiddlewareTest(Mw, ReqT, Next, &reqv, line.method);
+    const res = try test_helpers.runMiddlewareTest(Mw, ReqT, Next, &reqv, line.method);
     try std.testing.expectEqualStrings("zstd", res.headers[0].value);
     const decoded = try zstd.decompress(a, res.body, payload.len * 2);
     try std.testing.expectEqualStrings(payload, decoded);
@@ -567,7 +542,7 @@ test "compression: whitelist disables schemes not in list" {
     var r = std.Io.Reader.fixed("Accept-Encoding: br, gzip\r\n\r\n");
     try reqv.parseHeaders(a, &r, 1024);
 
-    const res = try runMiddlewareTest(Mw, ReqT, Next, &reqv, line.method);
+    const res = try test_helpers.runMiddlewareTest(Mw, ReqT, Next, &reqv, line.method);
     try std.testing.expectEqualStrings("gzip", res.headers[0].value);
 }
 
@@ -614,6 +589,6 @@ test "compression: whitelist order controls tie-break preference" {
     var r = std.Io.Reader.fixed("Accept-Encoding: br, gzip\r\n\r\n");
     try reqv.parseHeaders(a, &r, 1024);
 
-    const res = try runMiddlewareTest(Mw, ReqT, Next, &reqv, line.method);
+    const res = try test_helpers.runMiddlewareTest(Mw, ReqT, Next, &reqv, line.method);
     try std.testing.expectEqualStrings("gzip", res.headers[0].value);
 }

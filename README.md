@@ -1,4 +1,4 @@
-# 🚀 zhttp
+# zhttp
 
 Low-latency HTTP/1.1 server primitives for Zig with comptime routing, typed captures, and composable middleware.
 
@@ -7,17 +7,17 @@ Low-latency HTTP/1.1 server primitives for Zig with comptime routing, typed capt
 ![routing](https://img.shields.io/badge/routing-comptime-1d4ed8)
 ![core](https://img.shields.io/badge/core-pure%20zig-111827)
 
-## ⚡ Features
+## Features
 
-- 🧭 **Comptime route table**: define routes once with `zhttp.Server(.{ .routes = .{ ... } })`.
-- 🧠 **Typed request captures**: decode headers, query params, and path params with `zhttp.parse.*`.
-- 🪝 **Endpoint-first routes**: register middleware-shaped endpoint types per route (`pub fn call(comptime rctx, req)`).
-- 🧱 **Composable middleware**: mix global and per-route middleware with compile-time `Info` capture merging.
-- 📦 **Built-in middleware**: static files, CORS, logging, compression, timeout, ETag, request IDs, and security headers.
-- 🏎 **Tight hot path**: direct request parsing and response writing for low-overhead HTTP/1.1 servers.
-- 🧪 **Runnable examples + benchmarks**: example servers and a small benchmark harness live in-tree.
+- Comptime route table via `zhttp.Server(.{ .routes = .{ ... } })`.
+- Typed request captures for headers, query params, and path params (`zhttp.parse.*`).
+- Endpoint-first routes (`pub fn call(comptime rctx, req)`).
+- Composable middleware with compile-time `Info` capture merging.
+- Built-in middleware: static files, CORS, logging, compression, timeout, ETag, request IDs, Expect handling, and security headers.
+- Tight hot path with direct parse/write for HTTP/1.1.
+- In-tree examples and benchmark harness.
 
-## 🚀 Quick Start
+## Quick Start
 
 ```bash
 zig build examples
@@ -60,14 +60,14 @@ pub fn main(init: std.process.Init) !void {
 }
 ```
 
-## 📦 Installation
+## Installation
 
 Add as a dependency:
 
 ```bash
 <!-- README_FETCH:START -->
 
-zig fetch --save git+https://github.com/SmallThingz/zhttp?ref=71d52e452dbe5d09bdc518c5f49fbac4c849755b
+zig fetch --save git+https://github.com/SmallThingz/zhttp?ref=742db34d079f617ea8be4ebea45f6604a265309d
 <!-- README_FETCH:END -->
 ```
 
@@ -81,7 +81,7 @@ const zhttp_dep = b.dependency("zhttp", .{
 exe.root_module.addImport("zhttp", zhttp_dep.module("zhttp"));
 ```
 
-## 🧩 Library API (At a Glance)
+## Library API
 
 - `zhttp.Server(.{ ... })` accepts `.Context`, `.middlewares`, `.operations`, `.routes`, `.config`, `.error_handler`, and `.not_found_handler`. `.error_handler` is a writer-based hook for user handler/middleware errors with signature `fn(*Server, *std.Io.Writer, comptime ErrorSet: type, err: ErrorSet) zhttp.router.Action`. Server parse/validation errors stay on the built-in bad-request path. If no not-found handler is provided, a built-in `404 not found` endpoint is used.
 - Route helpers: `zhttp.get`, `post`, `put`, `delete`, `patch`, `head`, `options`, and `zhttp.route(...)` each take `(pattern, EndpointType)`.
@@ -96,7 +96,7 @@ exe.root_module.addImport("zhttp", zhttp_dep.module("zhttp"));
 - Route patterns support both segment params (`/users/{id}`) and trailing named globs (`/static/{*path}`).
 - Typed request accessors include `req.header(...)`, `req.queryParam(...)`, `req.paramValue(...)`, and `req.middlewareData(...)`.
 
-## 📨 Response Body Modes
+## Response Body Modes
 
 - `[]const u8` uses `Content-Length` (single contiguous body).
 - `[][]const u8` uses `Content-Length` (sum of segments, written via vectored I/O).
@@ -119,7 +119,7 @@ pub fn call(comptime rctx: zhttp.ReqCtx, req: rctx.T()) !rctx.Response(zhttp.res
 }
 ```
 
-## 🧱 Built-In Middleware
+## Built-In Middleware
 
 - `zhttp.middleware.Static`
 - `zhttp.middleware.Cors`
@@ -128,10 +128,11 @@ pub fn call(comptime rctx: zhttp.ReqCtx, req: rctx.T()) !rctx.Response(zhttp.res
 - `zhttp.middleware.Compression`
 - `zhttp.middleware.Timeout`
 - `zhttp.middleware.Etag`
+- `zhttp.middleware.Expect`
 - `zhttp.middleware.RequestId`
 - `zhttp.middleware.SecurityHeaders`
 
-## ⚙️ Built-In Operations
+## Built-In Operations
 
 - `zhttp.operations.Cors`
 - `zhttp.operations.Static`
@@ -146,7 +147,7 @@ Operations self-filter tagged routes via `opctx.filter(router)`.
 
 See [`examples/builtin_middlewares.zig`](./examples/builtin_middlewares.zig) for the full built-in stack in one server.
 
-## 📎 Examples
+## Examples
 
 - `examples/basic_server.zig`
 - `examples/middleware.zig`
@@ -154,29 +155,19 @@ See [`examples/builtin_middlewares.zig`](./examples/builtin_middlewares.zig) for
 - `examples/echo_body.zig`
 - `examples/fast_plaintext.zig`
 
-## 🏁 Benchmarking
+## Performance Snapshots
 
-Benchmark support lives under [`benchmark/`](./benchmark/).
-
-```bash
-zig build bench -Doptimize=ReleaseFast -- --mode=zhttp --conns=1 --iters=200000 --warmup=10000
-zig run benchmark/run_zhttp_external.zig
-BENCH_BIN=./zig-out/bin/zhttp-bench zig run benchmark/run_faf.zig
-zig run benchmark/run_compare.zig
-# or via build step:
-zig build bench
-zig build bench-compare
-```
+Benchmark commands and modes are documented in [`benchmark/README.md`](./benchmark/README.md).
 
 <!-- README_BENCHMARK:START -->
 
 Source: `benchmark/results/bench_latest.json`
 
-Config: host=`127.0.0.1` path=`/plaintext` conns=1 iters=1000 warmup=100 full_request=false
+Config: host=`127.0.0.1` path=`/plaintext` conns=1 iters=200000 warmup=10000 full_request=false
 
 | Target | req/s | ns/req |
 |---|---:|---:|
-| zhttp | 102410.74 | 9764.60 |
+| zhttp | 117824.83 | 8487.20 |
 
 No benchmark transport errors were reported.
 
@@ -191,17 +182,15 @@ Config: host=`127.0.0.1` path=`/plaintext` conns=16 iters=200000 warmup=10000 fu
 
 | Target | req/s | ns/req | relative |
 |---|---:|---:|---:|
-| zhttp | 885578.00 | 1129.20 | 1.168x vs faf |
-| faf | 758425.34 | 1318.50 | 0.856x vs zhttp |
+| zhttp | 879719.12 | 1136.70 | 1.049x vs faf |
+| faf | 838365.12 | 1192.80 | 0.953x vs zhttp |
 
 No benchmark transport errors were reported.
 
 Fairness notes: both targets use the same benchmark client settings (host/path/conns/iters/warmup/full_request), and fixed response bytes are discovered twice then pinned per target before timed runs
 <!-- README_COMPARISON:END -->
 
-For the full benchmark modes and notes, see [`benchmark/README.md`](./benchmark/README.md).
-
-## 🧪 Build and Validation
+## Build and Validation
 
 ```bash
 zig build test

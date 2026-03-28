@@ -262,6 +262,7 @@ fn writeStdout(io: std.Io, text: []const u8) !void {
     const file = std.Io.File.stdout();
     var out = file.writer(io, &buffer);
     try out.interface.writeAll(text);
+    try out.interface.flush();
 }
 
 fn writeStderr(io: std.Io, text: []const u8) !void {
@@ -269,6 +270,11 @@ fn writeStderr(io: std.Io, text: []const u8) !void {
     const file = std.Io.File.stderr();
     var out = file.writer(io, &buffer);
     try out.interface.writeAll(text);
+    try out.interface.flush();
+}
+
+fn ensureFixedBytesParity(zhttp: BenchResult, faf: BenchResult) !void {
+    if (zhttp.fixed_bytes != faf.fixed_bytes) return error.FixedBytesMismatch;
 }
 
 fn parseBenchOutput(
@@ -1401,6 +1407,14 @@ pub fn writeBenchmarkSnapshotAndSyncReadme(
 
     try syncReadmeBenchmarkSummary(io, allocator, root);
     try syncReadmeFetchCommand(io, allocator, root);
+
+    const summary = try std.fmt.allocPrint(
+        allocator,
+        "benchmark/results/bench_latest.json updated\nzhttp: req/s={d:.2} ns/req={d:.2} MiB/s={d:.2} fixed_bytes={d}\n",
+        .{ zhttp.req_per_s, zhttp.ns_per_req, zhttp.mib_per_s, zhttp.fixed_bytes },
+    );
+    defer allocator.free(summary);
+    try writeStdout(io, summary);
 }
 
 /// Writes benchmark comparison snapshot and refreshes README comparison/fetch sections.
@@ -1423,6 +1437,7 @@ pub fn writeCompareSnapshotAndSyncReadme(
         .zhttp = zhttp,
         .faf = faf,
     };
+    try ensureFixedBytesParity(snap.zhttp, snap.faf);
 
     var json_writer: std.Io.Writer.Allocating = .init(allocator);
     defer json_writer.deinit();
@@ -1444,4 +1459,13 @@ pub fn writeCompareSnapshotAndSyncReadme(
 
     try syncReadmeComparisonSummary(io, allocator, root);
     try syncReadmeFetchCommand(io, allocator, root);
+
+    const z_rel = if (faf.req_per_s == 0.0) 0.0 else zhttp.req_per_s / faf.req_per_s;
+    const summary = try std.fmt.allocPrint(
+        allocator,
+        "benchmark/results/latest.json updated\nzhttp: req/s={d:.2} ns/req={d:.2} MiB/s={d:.2} fixed_bytes={d}\nfaf: req/s={d:.2} ns/req={d:.2} MiB/s={d:.2} fixed_bytes={d}\nrelative: {d:.3}x (zhttp vs faf)\n",
+        .{ zhttp.req_per_s, zhttp.ns_per_req, zhttp.mib_per_s, zhttp.fixed_bytes, faf.req_per_s, faf.ns_per_req, faf.mib_per_s, faf.fixed_bytes, z_rel },
+    );
+    defer allocator.free(summary);
+    try writeStdout(io, summary);
 }

@@ -18,6 +18,8 @@ pub const Base = struct {
     arena: Allocator,
     /// Stores `reader`.
     reader: ?*Io.Reader = null,
+    /// Stores `writer`.
+    writer: ?*Io.Writer = null,
 
     /// Stores `version`.
     version: Version,
@@ -28,6 +30,10 @@ pub const Base = struct {
     /// Stores `body_kind`.
     body_kind: BodyKind = .none,
     body_remaining: usize = 0, // for content-length bodies
+    /// Stores `expect_continue_approved`.
+    expect_continue_approved: bool = false,
+    /// Stores `expect_continue_sent`.
+    expect_continue_sent: bool = false,
 };
 
 pub const ParseLineError = error{
@@ -377,6 +383,21 @@ fn RequestPWithPatternExt(
             self._base.reader = value;
         }
 
+        /// Implements writer.
+        pub fn writer(self: *const Self) ?*Io.Writer {
+            return self._base.writer;
+        }
+
+        /// Implements set writer.
+        pub fn setWriter(self: *Self, value: ?*Io.Writer) void {
+            self._base.writer = value;
+        }
+
+        /// Marks the request as approved for `Expect: 100-continue`.
+        pub fn approveExpectContinue(self: *Self) void {
+            self._base.expect_continue_approved = true;
+        }
+
         /// Implements mw ctx mut.
         pub fn mwCtxMut(self: *Self) *MwCtx {
             return &self._mw_ctx;
@@ -558,6 +579,8 @@ fn RequestPWithPatternExt(
         /// Implements parse headers.
         pub fn parseHeaders(self: *Self, a: Allocator, r: *Io.Reader, max_header_bytes: usize) ParseHeadersError!void {
             self._base.reader = r;
+            self._base.expect_continue_approved = false;
+            self._base.expect_continue_sent = false;
             if (HeaderLookup.count != 0) {
                 // reset captures each request
                 parse.destroyStruct(&self._headers, a);
@@ -704,6 +727,17 @@ fn RequestPWithPatternExt(
             try r.readSliceAll(buf);
         }
 
+        fn sendContinueIfNeeded(self: *Self) Io.Writer.Error!void {
+            if (!self._base.expect_continue_approved or self._base.expect_continue_sent) return;
+            if (self._base.body_kind == .none) return;
+            const w = self._base.writer orelse return;
+            try w.writeAll("HTTP/1.1 100 Continue\r\n\r\n");
+            if (w.buffered().len != 0) {
+                try w.flush();
+            }
+            self._base.expect_continue_sent = true;
+        }
+
         fn bodyAllFrom(self: *Self, a: Allocator, r: *Io.Reader, max_bytes: usize) ![]const u8 {
             return switch (self._base.body_kind) {
                 .none => "",
@@ -760,6 +794,7 @@ fn RequestPWithPatternExt(
         /// Requires headers to have been parsed for this request.
         pub fn bodyAll(self: *Self, max_bytes: usize) ![]const u8 {
             const r = self._base.reader orelse return error.BadRequest;
+            try self.sendContinueIfNeeded();
             return bodyAllFrom(self, self._base.arena, r, max_bytes);
         }
 
@@ -815,6 +850,7 @@ fn RequestPWithPatternExt(
         /// Requires headers to have been parsed for this request.
         pub fn discardUnreadBody(self: *Self) !void {
             const r = self._base.reader orelse return error.BadRequest;
+            try self.sendContinueIfNeeded();
             return discardUnreadBodyFrom(self, r);
         }
     };
@@ -1265,6 +1301,36 @@ test "bodyAll: content-length" {
     try std.testing.expectEqualStrings("hello", body);
 }
 
+test "bodyAll: approved expect emits interim 100-continue once" {
+    const ReqT = Request(struct {}, struct {}, &.{}, TestMwCtx);
+    const gpa = std.testing.allocator;
+    const path = try gpa.dupe(u8, "/");
+    defer gpa.free(path);
+    const query = try gpa.dupe(u8, "");
+    defer gpa.free(query);
+    const line: RequestLine = .{ .method = "POST", .version = .http11, .path = path, .query = query };
+    const mw_ctx: TestMwCtx = .{};
+    var reqv = ReqT.init(gpa, std.testing.io, line, mw_ctx);
+    defer reqv.deinit(gpa);
+
+    var r = Io.Reader.fixed("Content-Length: 5\r\n\r\nhello");
+    try reqv.parseHeaders(gpa, &r, 8 * 1024);
+    reqv.approveExpectContinue();
+
+    var out: [128]u8 = undefined;
+    var w = Io.Writer.fixed(out[0..]);
+    reqv.setWriter(&w);
+
+    const body = try reqv.bodyAll(16);
+    defer gpa.free(body);
+    try std.testing.expectEqualStrings("hello", body);
+    try std.testing.expectEqualStrings("HTTP/1.1 100 Continue\r\n\r\n", out[0..w.end]);
+
+    const empty = try reqv.bodyAll(16);
+    try std.testing.expectEqualStrings("", empty);
+    try std.testing.expectEqualStrings("HTTP/1.1 100 Continue\r\n\r\n", out[0..w.end]);
+}
+
 test "bodyAll: max_bytes enforced" {
     const ReqT = Request(struct {}, struct {}, &.{}, TestMwCtx);
     const gpa = std.testing.allocator;
@@ -1280,6 +1346,30 @@ test "bodyAll: max_bytes enforced" {
     var r = Io.Reader.fixed("Content-Length: 5\r\n\r\nhello");
     try reqv.parseHeaders(gpa, &r, 8 * 1024);
     try std.testing.expectError(error.PayloadTooLarge, reqv.bodyAll(4));
+}
+
+test "discardUnreadBody: approved expect emits interim 100-continue" {
+    const ReqT = Request(struct {}, struct {}, &.{}, TestMwCtx);
+    const gpa = std.testing.allocator;
+    const path = try gpa.dupe(u8, "/");
+    defer gpa.free(path);
+    const query = try gpa.dupe(u8, "");
+    defer gpa.free(query);
+    const line: RequestLine = .{ .method = "POST", .version = .http11, .path = path, .query = query };
+
+    const mw_ctx: TestMwCtx = .{};
+    var reqv = ReqT.init(gpa, std.testing.io, line, mw_ctx);
+    defer reqv.deinit(gpa);
+    var r = Io.Reader.fixed("Content-Length: 5\r\n\r\nhello");
+    try reqv.parseHeaders(gpa, &r, 8 * 1024);
+    reqv.approveExpectContinue();
+
+    var out: [128]u8 = undefined;
+    var w = Io.Writer.fixed(out[0..]);
+    reqv.setWriter(&w);
+
+    try reqv.discardUnreadBody();
+    try std.testing.expectEqualStrings("HTTP/1.1 100 Continue\r\n\r\n", out[0..w.end]);
 }
 
 test "query: required missing rejected" {

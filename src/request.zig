@@ -620,6 +620,9 @@ pub fn RequestPWithPatternExt(
         ) ParseHeadersError!void {
             self._base.reader = r;
             self._base.headers_parsed = false;
+            self._base.connection_close = false;
+            self._base.body_kind = .none;
+            self._base.body_remaining = 0;
             if (HeaderLookup.count != 0) {
                 // reset captures each request
                 parse.destroyStruct(&self._headers, a);
@@ -1401,6 +1404,38 @@ test "parseHeaders: repeated Content-Length same value accepted" {
     try std.testing.expectEqualStrings("ok", body);
 }
 
+test "parseHeaders: resets connection/body state between parses" {
+    const ReqT = Request(struct {}, struct {}, &.{}, TestMwCtx);
+    const gpa = std.testing.allocator;
+    const path = try gpa.dupe(u8, "/");
+    defer gpa.free(path);
+    const query = try gpa.dupe(u8, "");
+    defer gpa.free(query);
+    const line: RequestLine = .{ .method = "GET", .version = .http11, .path = path, .query = query };
+
+    const mw_ctx: TestMwCtx = .{};
+    var reqv = ReqT.init(gpa, std.testing.io, line, mw_ctx);
+    defer reqv.deinit(gpa);
+
+    {
+        var r = Io.Reader.fixed("Connection: close\r\nContent-Length: 4\r\n\r\ntest");
+        try reqv.parseHeaders(gpa, &r, 8 * 1024);
+        try std.testing.expect(!reqv.keepAlive());
+        try std.testing.expectEqual(BodyKind.content_length, reqv.baseConst().body_kind);
+        const body = try reqv.bodyAll(8);
+        defer gpa.free(body);
+        try std.testing.expectEqualStrings("test", body);
+    }
+
+    {
+        var r = Io.Reader.fixed("\r\n");
+        try reqv.parseHeaders(gpa, &r, 8 * 1024);
+        try std.testing.expect(reqv.keepAlive());
+        try std.testing.expectEqual(BodyKind.none, reqv.baseConst().body_kind);
+        try std.testing.expectEqual(@as(usize, 0), reqv.baseConst().body_remaining);
+    }
+}
+
 test "parseHeaders: invalid Content-Length rejected" {
     const ReqT = Request(struct {}, struct {}, &.{}, TestMwCtx);
     const gpa = std.testing.allocator;
@@ -1471,6 +1506,154 @@ test "parseQuery: key without '=' treated as empty value" {
     defer reqv.deinit(gpa);
     try reqv.parseQuery(gpa, line.query);
     try std.testing.expectEqualStrings("", reqv.queryParam(.k).?);
+}
+
+test "RequestPWithPatternExt: accessors, setters, middleware data, and typed captures" {
+    const AppCtx = struct {
+        value: u8,
+    };
+    const AuthData = struct {
+        value: u8 = 1,
+    };
+    const StaticData = struct {
+        value: u8 = 9,
+    };
+    const MwCtx = struct {
+        auth: AuthData = .{},
+    };
+    const Server = struct {
+        io: Io,
+        ctx: *AppCtx,
+        route_static_ctx: StaticData = .{},
+
+        pub fn RouteStaticType(comptime route_index: usize) type {
+            if (route_index != 0) @compileError("route index out of bounds");
+            return StaticData;
+        }
+
+        pub fn routeStatic(self: *@This(), comptime route_index: usize) *StaticData {
+            if (route_index != 0) @compileError("route index out of bounds");
+            return &self.route_static_ctx;
+        }
+
+        pub fn routeStaticConst(self: *const @This(), comptime route_index: usize) *const StaticData {
+            if (route_index != 0) @compileError("route index out of bounds");
+            return &self.route_static_ctx;
+        }
+    };
+    const Headers = struct {
+        content_length: parse.Optional(parse.Int(usize)),
+    };
+    const Query = struct {
+        page: parse.Optional(parse.Int(u16)),
+    };
+    const Params = struct {
+        id: parse.Int(u32),
+    };
+    const rd: route_decl.RouteDecl = .{
+        .method = "GET",
+        .pattern = "/items/{id}",
+        .endpoint = struct {},
+        .headers = Headers,
+        .query = Query,
+        .params = Params,
+        .middlewares = &.{},
+        .operations = &.{},
+    };
+    const ReqT = RequestPWithPatternExt(*Server, 0, rd, MwCtx);
+
+    const gpa = std.testing.allocator;
+    const path = try gpa.dupe(u8, "/items/7");
+    defer gpa.free(path);
+    const query = try gpa.dupe(u8, "page=42");
+    defer gpa.free(query);
+    const line: RequestLine = .{ .method = "GET", .version = .http11, .path = path, .query = query };
+
+    var app_ctx: AppCtx = .{ .value = 3 };
+    var server: Server = .{ .io = std.testing.io, .ctx = &app_ctx };
+    var reqv = ReqT.initWithServer(gpa, line, .{ .auth = .{ .value = 5 } }, &server);
+    defer reqv.deinit(gpa);
+
+    try std.testing.expect(reqv.server() == &server);
+    try std.testing.expectEqual(@as(u8, 3), reqv.ctx().value);
+    try std.testing.expectEqual(@as(u8, 3), reqv.ctxConst().value);
+    reqv.mwCtxMut().auth.value = 6;
+    try std.testing.expectEqual(@as(u8, 6), reqv.mwCtxConst().auth.value);
+    reqv.middlewareData(.auth).value = 7;
+    try std.testing.expectEqual(@as(u8, 7), reqv.middlewareDataConst("auth").value);
+    reqv.mwStaticCtxMut().value = 10;
+    try std.testing.expectEqual(@as(u8, 10), reqv.mwStaticCtxConst().value);
+    reqv.middlewareStatic(.value).* = 11;
+    try std.testing.expectEqual(@as(u8, 11), reqv.middlewareStaticConst("value").*);
+
+    var r = Io.Reader.fixed("Content-Length: 5\r\n\r\nhello");
+    var out_buf: [64]u8 = undefined;
+    var w = Io.Writer.fixed(out_buf[0..]);
+    reqv.setReader(&r);
+    reqv.setWriter(&w);
+    try std.testing.expect(reqv.reader() == &r);
+    try std.testing.expect(reqv.writer() == &w);
+    try std.testing.expectEqual(Version.http11, reqv.baseConst().version);
+    reqv.base().connection_close = true;
+    try std.testing.expect(!reqv.keepAlive());
+
+    const alt_base: Base = .{
+        .arena = gpa,
+        .reader = &r,
+        .writer = &w,
+        .version = .http11,
+    };
+    reqv.setBase(alt_base);
+    reqv.setArena(gpa);
+    try std.testing.expectEqual(Version.http11, reqv.baseConst().version);
+    _ = reqv.allocator();
+    _ = reqv.arena();
+    _ = reqv.io();
+
+    var app_ctx2: AppCtx = .{ .value = 8 };
+    reqv.setCtx(&app_ctx2);
+    try std.testing.expectEqual(@as(u8, 8), reqv.ctx().value);
+    reqv.setMwCtx(.{ .auth = .{ .value = 12 } });
+    try std.testing.expectEqual(@as(u8, 12), reqv.mwCtxConst().auth.value);
+    reqv.headersMut().content_length.present = false;
+    reqv.queryMut().page.present = false;
+    reqv.paramsMut().id.value = 99;
+    try std.testing.expect(reqv.headersConst().content_length.get() == null);
+    try std.testing.expect(reqv.queryConst().page.get() == null);
+    try std.testing.expectEqual(@as(u32, 99), reqv.paramsConst().id.get());
+
+    try reqv.parseQuery(gpa, line.query);
+    try std.testing.expectEqual(@as(u16, 42), reqv.queryParam(.page).?);
+
+    var params = [_][]u8{path[path.len - 1 ..]};
+    try reqv.parseParams(gpa, params[0..]);
+    try std.testing.expectEqual(@as(u32, 7), reqv.paramValue(.id));
+
+    try reqv.parseHeaders(gpa, &r, 8 * 1024);
+    try std.testing.expectEqual(@as(usize, 5), reqv.header(.content_length).?);
+
+    const headers_copy = reqv.headersConst().*;
+    const query_copy = reqv.queryConst().*;
+    const params_copy = reqv.paramsConst().*;
+    reqv.setHeaders(headers_copy);
+    reqv.setQuery(query_copy);
+    reqv.setParams(params_copy);
+    try std.testing.expectEqual(@as(usize, 5), reqv.header(.content_length).?);
+    try std.testing.expectEqual(@as(u16, 42), reqv.queryParam(.page).?);
+    try std.testing.expectEqual(@as(u32, 7), reqv.paramValue(.id));
+
+    const body = try reqv.bodyAll(8);
+    defer gpa.free(body);
+    try std.testing.expectEqualStrings("hello", body);
+
+    var server2: Server = .{ .io = std.testing.io, .ctx = &app_ctx2 };
+    reqv.setServer(&server2);
+    try std.testing.expect(reqv.server() == &server2);
+    reqv.setIo(std.testing.io);
+
+    var reqv2 = ReqT.initWithCtx(gpa, std.testing.io, line, .{ .auth = .{ .value = 2 } }, &app_ctx2);
+    defer reqv2.deinit(gpa);
+    try std.testing.expectEqual(@as(u8, 8), reqv2.ctx().value);
 }
 
 test "fuzz: parseRequestLineBorrowed" {

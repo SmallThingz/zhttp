@@ -536,7 +536,7 @@ pub fn Enum(comptime E: type) type {
         }
 
         /// Implements done parsing.
-        pub fn doneParsing(_: *@This(), was_present: bool) !@This() {
+        pub fn doneParsing(_: *@This(), was_present: bool) !void {
             if (!was_present) return error.MissingRequired;
         }
 
@@ -691,6 +691,90 @@ test "SliceOf(String): collects and owns entries" {
     try std.testing.expectEqual(@as(usize, 2), items.len);
     try std.testing.expectEqualStrings("one", items[0].get());
     try std.testing.expectEqualStrings("two", items[1].get());
+}
+
+test "struct helpers and scalar parsers" {
+    const testing = std.testing;
+
+    const Counter = struct {
+        value: u8 = 0,
+        destroyed: *usize,
+
+        pub const empty: @This() = .{ .destroyed = undefined };
+
+        pub fn parse(self: *@This(), _: Allocator, raw: []const u8) !void {
+            self.value = raw[0] - '0';
+        }
+
+        pub fn doneParsing(_: *@This(), was_present: bool) !void {
+            if (!was_present) return error.MissingRequired;
+        }
+
+        pub fn get(self: *const @This()) u8 {
+            return self.value;
+        }
+
+        pub fn destroy(self: *@This(), _: Allocator) void {
+            self.destroyed.* += 1;
+        }
+    };
+
+    const Capture = struct {
+        a: Counter,
+        b: Counter,
+    };
+
+    try testing.expectEqual(@as(usize, 2), structFields(Capture).len);
+
+    var destroy_count: usize = 0;
+    var cap = emptyStruct(Capture);
+    cap.a.destroyed = &destroy_count;
+    cap.b.destroyed = &destroy_count;
+    try cap.a.parse(testing.allocator, "1");
+    try cap.b.parse(testing.allocator, "2");
+    try doneParsingStruct(&cap, &.{ true, true });
+    try testing.expectEqual(@as(u8, 1), cap.a.get());
+    try testing.expectEqual(@as(u8, 2), cap.b.get());
+    destroyStruct(&cap, testing.allocator);
+    try testing.expectEqual(@as(usize, 2), destroy_count);
+
+    var intp: Int(i32) = .empty;
+    try intp.parse(testing.allocator, "-42");
+    try intp.doneParsing(true);
+    try testing.expectEqual(@as(i32, -42), intp.get());
+    intp.destroy(testing.allocator);
+
+    var floatp: Float(f64) = .empty;
+    try floatp.parse(testing.allocator, "3.5");
+    try floatp.doneParsing(true);
+    try testing.expectApproxEqAbs(@as(f64, 3.5), floatp.get(), 0.0001);
+    floatp.destroy(testing.allocator);
+
+    var boolp: Bool = .empty;
+    try boolp.parse(testing.allocator, "TrUe");
+    try boolp.doneParsing(true);
+    try testing.expect(boolp.get());
+    boolp.destroy(testing.allocator);
+
+    const Mode = enum { alpha, beta };
+    var enump: Enum(Mode) = .empty;
+    try enump.parse(testing.allocator, "beta");
+    _ = try enump.doneParsing(true);
+    try testing.expectEqual(Mode.beta, enump.get());
+    enump.destroy(testing.allocator);
+}
+
+test "mergeStructsMany: folds tuples left-to-right" {
+    const Merged = mergeStructsMany(.{
+        struct { a: String },
+        struct { b: Int(u8) },
+        struct { c: Optional(String) },
+    });
+
+    try std.testing.expect(@hasField(Merged, "a"));
+    try std.testing.expect(@hasField(Merged, "b"));
+    try std.testing.expect(@hasField(Merged, "c"));
+    try std.testing.expectEqual(@as(usize, 3), structFields(Merged).len);
 }
 
 test "fuzz: String/Optional/SliceOf/Int/Bool/Float" {

@@ -146,6 +146,24 @@ test "appendHeaders: concatenates in order" {
     try std.testing.expectEqualStrings("x-c", out[2].name);
 }
 
+test "copyHeaders and hasHeader: preserve entries and match case-insensitively" {
+    const src = [_]Header{
+        .{ .name = "X-A", .value = "1" },
+        .{ .name = "x-b", .value = "2" },
+    };
+
+    const copy = try copyHeaders(std.testing.allocator, src[0..]);
+    defer std.testing.allocator.free(copy);
+
+    try std.testing.expect(copy.ptr != src[0..].ptr);
+    try std.testing.expectEqual(@as(usize, 2), copy.len);
+    try std.testing.expectEqualStrings("X-A", copy[0].name);
+    try std.testing.expectEqualStrings("2", copy[1].value);
+    try std.testing.expect(hasHeader(copy, "x-a"));
+    try std.testing.expect(hasHeader(copy, "X-B"));
+    try std.testing.expect(!hasHeader(copy, "x-c"));
+}
+
 test "shouldAddHeader: check_then_add is case-insensitive" {
     const headers = [_]Header{
         .{ .name = "X-Token", .value = "abc" },
@@ -179,4 +197,17 @@ test "matchesIfNoneMatch: strong, weak and wildcard tags" {
     try std.testing.expect(matchesIfNoneMatch("W/\"abc\"", "\"abc\""));
     try std.testing.expect(matchesIfNoneMatch("*, W/\"nope\"", "\"abc\""));
     try std.testing.expect(!matchesIfNoneMatch("\"nope\"", "\"abc\""));
+}
+
+test "makeEtag: strong and weak tags are quoted" {
+    const strong = try makeEtag(std.testing.allocator, "hello", false);
+    defer std.testing.allocator.free(strong);
+    const weak = try makeEtag(std.testing.allocator, "hello", true);
+    defer std.testing.allocator.free(weak);
+
+    try std.testing.expect(strong.len == 18);
+    try std.testing.expect(strong[0] == '"' and strong[strong.len - 1] == '"');
+    try std.testing.expectEqualStrings("W/", weak[0..2]);
+    try std.testing.expect(weak[2] == '"' and weak[weak.len - 1] == '"');
+    try std.testing.expectEqualStrings(strong[1 .. strong.len - 1], weak[3 .. weak.len - 1]);
 }

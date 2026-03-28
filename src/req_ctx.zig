@@ -543,3 +543,182 @@ test "ReqCtx: run/next/override chain and server access work" {
     try testing.expectEqual(@as(usize, 4), base.trace_len);
     try testing.expectEqualStrings("12oh", base.call_trace[0..base.trace_len]);
 }
+
+test "ReqCtx: request wrapper forwards accessors and const forms" {
+    const testing = std.testing;
+    const Res = response.Res;
+
+    const FakeServer = struct {
+        tag: u8,
+    };
+    const AuthData = struct {
+        value: u8 = 7,
+    };
+    const CacheData = struct {
+        value: u8 = 11,
+    };
+    const FakeMwCtx = struct {
+        auth: AuthData = .{},
+    };
+    const FakeMwStaticCtx = struct {
+        cache: CacheData = .{},
+    };
+
+    const FakeBase = struct {
+        const InnerBase = struct {
+            touched: bool = false,
+        };
+        const AppCtx = struct {
+            value: u8 = 5,
+        };
+
+        allocator_value: std.mem.Allocator,
+        io_value: std.Io,
+        inner: InnerBase = .{},
+        app_ctx: AppCtx = .{},
+        mw_ctx: FakeMwCtx = .{},
+        mw_static_ctx: FakeMwStaticCtx = .{},
+        server_ptr: *FakeServer,
+        keep_alive_value: bool = true,
+        body_reads: usize = 0,
+        discarded: bool = false,
+
+        pub fn allocator(self: *@This()) std.mem.Allocator {
+            return self.allocator_value;
+        }
+        pub fn io(self: *@This()) std.Io {
+            return self.io_value;
+        }
+        pub fn base(self: *@This()) *InnerBase {
+            return &self.inner;
+        }
+        pub fn baseConst(self: *const @This()) *const InnerBase {
+            return &self.inner;
+        }
+        pub fn ctx(self: *@This()) *AppCtx {
+            return &self.app_ctx;
+        }
+        pub fn ctxConst(self: *const @This()) *const AppCtx {
+            return &self.app_ctx;
+        }
+        pub fn mwCtxMut(self: *@This()) *FakeMwCtx {
+            return &self.mw_ctx;
+        }
+        pub fn mwCtxConst(self: *const @This()) *const FakeMwCtx {
+            return &self.mw_ctx;
+        }
+        pub fn mwStaticCtxMut(self: *@This()) *FakeMwStaticCtx {
+            return &self.mw_static_ctx;
+        }
+        pub fn mwStaticCtxConst(self: *const @This()) *const FakeMwStaticCtx {
+            return &self.mw_static_ctx;
+        }
+        pub fn keepAlive(self: *const @This()) bool {
+            return self.keep_alive_value;
+        }
+        pub fn header(_: *const @This(), comptime field: anytype) ?[]const u8 {
+            return if (field == .host) "example.com" else null;
+        }
+        pub fn queryParam(_: *const @This(), comptime field: anytype) ?[]const u8 {
+            return if (field == .page) "42" else null;
+        }
+        pub fn paramValue(_: *const @This(), comptime field: anytype) ?[]const u8 {
+            return if (field == .id) "abc" else null;
+        }
+        pub fn middlewareData(self: *@This(), comptime name: anytype) *AuthData {
+            if (name != .auth) unreachable;
+            return &self.mw_ctx.auth;
+        }
+        pub fn middlewareDataConst(self: *const @This(), comptime name: anytype) *const AuthData {
+            if (name != .auth) unreachable;
+            return &self.mw_ctx.auth;
+        }
+        pub fn middlewareStatic(self: *@This(), comptime name: anytype) *CacheData {
+            if (name != .cache) unreachable;
+            return &self.mw_static_ctx.cache;
+        }
+        pub fn middlewareStaticConst(self: *const @This(), comptime name: anytype) *const CacheData {
+            if (name != .cache) unreachable;
+            return &self.mw_static_ctx.cache;
+        }
+        pub fn server(self: *@This()) *FakeServer {
+            return self.server_ptr;
+        }
+        pub fn bodyAll(self: *@This(), _: usize) error{Dummy}![]const u8 {
+            self.body_reads += 1;
+            return "body";
+        }
+        pub fn discardUnreadBody(self: *@This()) error{Dummy}!void {
+            self.discarded = true;
+        }
+    };
+
+    const Handler = struct {
+        pub const function = call;
+
+        pub fn call(comptime rctx: ReqCtx, req: rctx.T()) !Res {
+            const alloc = req.allocator();
+            const buf = try alloc.alloc(u8, 1);
+            alloc.free(buf);
+            _ = req.io();
+            try testing.expect(rctx.Response([]const u8) == Res);
+            try testing.expectEqual(@as(u8, 5), req.ctx().value);
+            try testing.expectEqual(@as(u8, 5), req.ctxConst().value);
+            req.baseMut().touched = true;
+            try testing.expect(req.base().touched);
+            req.mwCtxMut().auth.value = 8;
+            try testing.expectEqual(@as(u8, 8), req.mwCtxConst().auth.value);
+            req.mwStaticCtxMut().cache.value = 12;
+            try testing.expectEqual(@as(u8, 12), req.mwStaticCtxConst().cache.value);
+            try testing.expect(req.keepAlive());
+            try testing.expectEqualStrings("example.com", req.header(.host).?);
+            try testing.expectEqualStrings("42", req.queryParam(.page).?);
+            try testing.expectEqualStrings("abc", req.paramValue(.id).?);
+            req.middlewareData(.auth).value = 9;
+            try testing.expectEqual(@as(u8, 9), req.middlewareDataConst(.auth).value);
+            req.middlewareStatic(.cache).value = 13;
+            try testing.expectEqual(@as(u8, 13), req.middlewareStaticConst(.cache).value);
+            try testing.expectEqual(@as(u8, 4), req.server().tag);
+            try testing.expectEqual(@as(u8, 4), req.serverConst().tag);
+            const body = try req.bodyAll(64);
+            try testing.expectEqualStrings("body", body);
+            try req.discardUnreadBody();
+            return Res.text(200, "ok");
+        }
+    };
+
+    var server: FakeServer = .{ .tag = 4 };
+    var base: FakeBase = .{
+        .allocator_value = testing.allocator,
+        .io_value = testing.io,
+        .server_ptr = &server,
+    };
+
+    const rctx: ReqCtx = .{
+        .handler = Handler,
+        .middlewares = &.{},
+        .path = &.{.{ .name = "id", .T = []const u8 }},
+        .query = &.{.{ .name = "page", .T = []const u8 }},
+        .headers = &.{.{ .name = "host", .T = []const u8 }},
+        .middleware_contexts = &.{
+            .{ .name = "auth", .T = AuthData },
+            .{ .name = "cache", .T = CacheData },
+        },
+        .idx = 0,
+        ._base_req_type = FakeBase,
+        ._server_type = FakeServer,
+    };
+
+    const ReqT = rctx.T();
+    const req: ReqT = .{
+        ._base = &base,
+        .path = "/items/abc",
+        .method = "GET",
+    };
+
+    const res = try rctx.run(req);
+    try testing.expectEqual(@as(u16, 200), @intFromEnum(res.status));
+    try testing.expect(base.inner.touched);
+    try testing.expect(base.discarded);
+    try testing.expectEqual(@as(usize, 1), base.body_reads);
+}

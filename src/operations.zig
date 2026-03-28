@@ -568,3 +568,143 @@ test "operations: operation receives only routes tagged in endpoint Info.operati
     try std.testing.expectEqualStrings("/untagged", @field(out, f[0].name).pattern);
     try std.testing.expectEqualStrings("/tagged-replaced", @field(out, f[1].name).pattern);
 }
+
+test "operations router helpers: filters, grouping, mutation, and tuple export" {
+    const Res = @import("response.zig").Res;
+    const Sig = struct {};
+    const Op = struct {};
+    const GlobalMw = struct {
+        pub const Signature = Sig;
+        pub const Marker = true;
+        pub const Info: middleware.MiddlewareInfo = .{ .name = "global" };
+
+        pub fn call(comptime rctx: @import("req_ctx.zig").ReqCtx, req: rctx.T()) !Res {
+            _ = req;
+            unreachable;
+        }
+    };
+    const RouteMw = struct {
+        pub const Info: middleware.MiddlewareInfo = .{ .name = "route" };
+
+        pub fn call(comptime rctx: @import("req_ctx.zig").ReqCtx, req: rctx.T()) !Res {
+            _ = req;
+            unreachable;
+        }
+    };
+    const E1 = struct {
+        pub const Info: router_mod.EndpointInfo = .{
+            .middlewares = &.{RouteMw},
+            .operations = &.{Op},
+        };
+
+        pub fn call(comptime rctx: @import("req_ctx.zig").ReqCtx, req: rctx.T()) !Res {
+            _ = req;
+            return Res.text(200, "a");
+        }
+    };
+    const E2 = struct {
+        pub const Info: router_mod.EndpointInfo = .{};
+
+        pub fn call(comptime rctx: @import("req_ctx.zig").ReqCtx, req: rctx.T()) !Res {
+            _ = req;
+            return Res.text(200, "b");
+        }
+    };
+    const E3 = struct {
+        pub const Info: router_mod.EndpointInfo = .{
+            .operations = &.{Op},
+        };
+
+        pub fn call(comptime rctx: @import("req_ctx.zig").ReqCtx, req: rctx.T()) !Res {
+            _ = req;
+            return Res.text(200, "c");
+        }
+    };
+
+    const RouterT = Router(6, &.{GlobalMw});
+    const Result = comptime blk: {
+        var router = RouterT.init(.{
+            router_mod.get("/a", E1),
+            router_mod.post("/a", E2),
+            router_mod.get("/b", E3),
+        });
+
+        if (router.count() != 3) @compileError("bad initial count");
+        if (router.all().len != 3) @compileError("bad initial slice len");
+        if (!std.mem.eql(u8, router.routeConst(0).pattern, "/a")) @compileError("bad routeConst");
+        if (!std.mem.eql(u8, router.route(1).method, "POST")) @compileError("bad route");
+        if (!router.hasMiddleware(0, GlobalMw)) @compileError("missing global middleware");
+        if (!router.hasMiddleware(0, RouteMw)) @compileError("missing route middleware");
+        if (!router.hasSignature(0, Sig)) @compileError("missing signature");
+        if (!router.hasMiddlewareDecl(0, "Marker")) @compileError("missing decl");
+        if (!router.hasOperation(0, Op)) @compileError("missing op");
+        if (!router.hasMethodPath("GET", "/b")) @compileError("missing method/path");
+        if (router.firstMiddlewareWithDecl(0, "Marker") != GlobalMw) @compileError("bad first decl");
+        if (router.firstMiddlewareWithDeclValue(0, "Signature", Sig) != GlobalMw) @compileError("bad first decl value");
+        if (router.firstMiddlewareWithSignature(0, Sig) != GlobalMw) @compileError("bad first signature");
+        if (!std.mem.eql(usize, router.filterByMiddleware(RouteMw), &.{0})) @compileError("bad filterByMiddleware");
+        if (!std.mem.eql(usize, router.filterByOperation(Op), &.{ 0, 2 })) @compileError("bad filterByOperation");
+        if (!std.mem.eql(usize, router.filterBySignature(Sig), &.{ 0, 1, 2 })) @compileError("bad filterBySignature");
+        if (!std.mem.eql(usize, router.filterByMiddlewareDecl("Marker"), &.{ 0, 1, 2 })) @compileError("bad filterByMiddlewareDecl");
+
+        const GroupAll = struct {
+            fn collect(_: *RouterT, group: RouterT.PathGroup) void {
+                if (std.mem.eql(u8, group.path, "/a")) {
+                    if (!std.mem.eql(usize, group.indices, &.{ 0, 1 })) @compileError("bad /a group");
+                    return;
+                }
+                if (std.mem.eql(u8, group.path, "/b")) {
+                    if (!std.mem.eql(usize, group.indices, &.{2})) @compileError("bad /b group");
+                    return;
+                }
+                @compileError("unexpected group");
+            }
+        };
+        const GroupOne = struct {
+            fn collect(_: *RouterT, group: RouterT.PathGroup) void {
+                if (!std.mem.eql(u8, group.path, "/a")) @compileError("unexpected filtered group path");
+                if (!std.mem.eql(usize, group.indices, &.{0})) @compileError("unexpected filtered group indices");
+            }
+        };
+        const GroupSig = struct {
+            fn collect(_: *RouterT, group: RouterT.PathGroup) void {
+                if (std.mem.eql(u8, group.path, "/a")) {
+                    if (!std.mem.eql(usize, group.indices, &.{ 0, 1 })) @compileError("bad signature /a group");
+                    return;
+                }
+                if (std.mem.eql(u8, group.path, "/b")) {
+                    if (!std.mem.eql(usize, group.indices, &.{2})) @compileError("bad signature /b group");
+                    return;
+                }
+                @compileError("unexpected signature group");
+            }
+        };
+        router.forEachPathGroup(&.{ 0, 1, 2 }, GroupAll.collect);
+        router.forEachPathGroupByMiddleware(RouteMw, GroupOne.collect);
+        router.forEachPathGroupBySignature(Sig, GroupSig.collect);
+
+        router.insert(1, router_mod.head("/a", E2));
+        if (!std.mem.eql(u8, router.routeConst(1).method, "HEAD")) @compileError("bad insert");
+        const replaced_prev = router.replace(1, router_mod.options("/a", E2));
+        if (!std.mem.eql(u8, replaced_prev.method, "HEAD")) @compileError("bad replace");
+        const removed = router.remove(0);
+        if (!std.mem.eql(u8, removed.pattern, "/a")) @compileError("bad remove");
+        const swapped = router.swapRemove(2);
+        if (!std.mem.eql(u8, swapped.pattern, "/b")) @compileError("bad swapRemove");
+        if (router.count() != 2) @compileError("bad final count");
+
+        const tuple = router.toTuple(2);
+        const fields = @typeInfo(@TypeOf(tuple)).@"struct".fields;
+        if (!std.mem.eql(u8, router.routeConst(0).pattern, @field(tuple, fields[0].name).pattern)) @compileError("bad tuple 0");
+        if (!std.mem.eql(u8, router.routeConst(1).pattern, @field(tuple, fields[1].name).pattern)) @compileError("bad tuple 1");
+
+        router.clear();
+        break :blk .{
+            .cleared_count = router.count(),
+            .cleared_len = router.all().len,
+        };
+    };
+
+    try std.testing.expectEqual(@as(usize, 0), Result.cleared_count);
+    try std.testing.expectEqual(@as(usize, 0), Result.cleared_len);
+}

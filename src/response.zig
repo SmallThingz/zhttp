@@ -290,6 +290,20 @@ test "write: HEAD omits body but keeps content-length" {
     try std.testing.expectEqualStrings(expected, out[0..w.end]);
 }
 
+test "ChunkedWriter and Res.text: direct helpers work" {
+    const res = Res.text(201, "hello");
+    try std.testing.expectEqual(@as(u16, 201), @intFromEnum(res.status));
+    try std.testing.expectEqualStrings("text/plain; charset=utf-8", res.headers[0].value);
+
+    var out: [128]u8 = undefined;
+    var w = std.Io.Writer.fixed(out[0..]);
+    var cw: ChunkedWriter = .{ .w = &w };
+    try cw.writeAll("");
+    try cw.writeAll("hi");
+    try cw.finish();
+    try std.testing.expectEqualStrings("2\r\nhi\r\n0\r\n\r\n", out[0..w.end]);
+}
+
 test "Res.format: upgrade-like formatting omits injected headers" {
     var res: Res = .{
         .status = .switching_protocols,

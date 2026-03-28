@@ -65,3 +65,31 @@ test "test_helpers: header lookup and counting are case-insensitive" {
     try std.testing.expectEqual(@as(usize, 2), countHeader(headers[0..], "X-TEST"));
     try std.testing.expect(hasHeader(headers[0..], "x-test"));
 }
+
+test "test_helpers: runMiddlewareTest executes middleware and handler chain" {
+    const Mw = struct {
+        pub fn call(comptime rctx: ReqCtx, req: rctx.T()) !Res {
+            req.raw().touched = true;
+            return rctx.next(req);
+        }
+    };
+    const ReqT = struct {
+        touched: bool = false,
+        pub const path = "/x";
+    };
+    const Handler = struct {
+        pub const function = call;
+
+        pub fn call(comptime rctx: ReqCtx, req: rctx.T()) !Res {
+            return .{
+                .status = .ok,
+                .headers = &.{.{ .name = "x-touched", .value = if (req.raw().touched) "yes" else "no" }},
+            };
+        }
+    };
+
+    var reqv: ReqT = .{};
+    const res = try runMiddlewareTest(Mw, ReqT, Handler, &reqv, "GET");
+    try std.testing.expect(reqv.touched);
+    try std.testing.expectEqualStrings("yes", headerValue(res.headers, "x-touched").?);
+}

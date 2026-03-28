@@ -181,12 +181,14 @@ pub fn Router(comptime capacity: usize, comptime global_middlewares: []const typ
             self._len = 0;
         }
 
-        fn middlewareMatchesSignature(comptime Mw: type, comptime Signature: type) bool {
-            if (Mw == Signature) return true;
-            if (@hasDecl(Mw, "Signature")) {
-                return Mw.Signature == Signature;
-            }
-            return false;
+        fn middlewareHasDecl(comptime Mw: type, comptime decl_name: []const u8) bool {
+            return @hasDecl(Mw, decl_name);
+        }
+
+        fn middlewareDeclEquals(comptime Mw: type, comptime decl_name: []const u8, comptime decl_value: anytype) bool {
+            if (!@hasDecl(Mw, decl_name)) return false;
+            const got = @field(Mw, decl_name);
+            return @TypeOf(got) == @TypeOf(decl_value) and got == decl_value;
         }
 
         fn routeHasMiddleware(comptime route_decl: RouteDecl, comptime Mw: type) bool {
@@ -199,12 +201,12 @@ pub fn Router(comptime capacity: usize, comptime global_middlewares: []const typ
             return false;
         }
 
-        fn routeHasSignature(comptime route_decl: RouteDecl, comptime Signature: type) bool {
+        fn routeHasMiddlewareDecl(comptime route_decl: RouteDecl, comptime decl_name: []const u8) bool {
             inline for (global_middlewares) |GlobalMw| {
-                if (middlewareMatchesSignature(GlobalMw, Signature)) return true;
+                if (middlewareHasDecl(GlobalMw, decl_name)) return true;
             }
             inline for (route_decl.middlewares) |RouteMw| {
-                if (middlewareMatchesSignature(RouteMw, Signature)) return true;
+                if (middlewareHasDecl(RouteMw, decl_name)) return true;
             }
             return false;
         }
@@ -214,16 +216,35 @@ pub fn Router(comptime capacity: usize, comptime global_middlewares: []const typ
         }
 
         pub fn hasSignature(comptime self: *const Self, index: usize, comptime Signature: type) bool {
-            return routeHasSignature(self.routeConst(index).*, Signature);
+            return self.firstMiddlewareWithDeclValue(index, "Signature", Signature) != null;
+        }
+
+        pub fn hasMiddlewareDecl(comptime self: *const Self, index: usize, comptime decl_name: []const u8) bool {
+            return routeHasMiddlewareDecl(self.routeConst(index).*, decl_name);
         }
 
         pub fn firstMiddlewareWithSignature(comptime self: *const Self, index: usize, comptime Signature: type) ?type {
+            return self.firstMiddlewareWithDeclValue(index, "Signature", Signature);
+        }
+
+        pub fn firstMiddlewareWithDecl(comptime self: *const Self, index: usize, comptime decl_name: []const u8) ?type {
             const route_decl = self.routeConst(index).*;
             inline for (global_middlewares) |GlobalMw| {
-                if (middlewareMatchesSignature(GlobalMw, Signature)) return GlobalMw;
+                if (middlewareHasDecl(GlobalMw, decl_name)) return GlobalMw;
             }
             inline for (route_decl.middlewares) |RouteMw| {
-                if (middlewareMatchesSignature(RouteMw, Signature)) return RouteMw;
+                if (middlewareHasDecl(RouteMw, decl_name)) return RouteMw;
+            }
+            return null;
+        }
+
+        pub fn firstMiddlewareWithDeclValue(comptime self: *const Self, index: usize, comptime decl_name: []const u8, comptime decl_value: anytype) ?type {
+            const route_decl = self.routeConst(index).*;
+            inline for (global_middlewares) |GlobalMw| {
+                if (middlewareDeclEquals(GlobalMw, decl_name, decl_value)) return GlobalMw;
+            }
+            inline for (route_decl.middlewares) |RouteMw| {
+                if (middlewareDeclEquals(RouteMw, decl_name, decl_value)) return RouteMw;
             }
             return null;
         }
@@ -250,8 +271,19 @@ pub fn Router(comptime capacity: usize, comptime global_middlewares: []const typ
 
         pub fn filterBySignature(comptime self: *Self, comptime Signature: type) []const usize {
             comptime var n: usize = 0;
+            inline for (self.all(), 0..) |_, i| {
+                if (self.firstMiddlewareWithDeclValue(i, "Signature", Signature) != null) {
+                    self._index_buf[n] = i;
+                    n += 1;
+                }
+            }
+            return self._index_buf[0..n];
+        }
+
+        pub fn filterByMiddlewareDecl(comptime self: *Self, comptime decl_name: []const u8) []const usize {
+            comptime var n: usize = 0;
             inline for (self.all(), 0..) |route_decl, i| {
-                if (routeHasSignature(route_decl, Signature)) {
+                if (routeHasMiddlewareDecl(route_decl, decl_name)) {
                     self._index_buf[n] = i;
                     n += 1;
                 }

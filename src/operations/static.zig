@@ -1,9 +1,7 @@
-const StaticSignature = @import("../middleware/static.zig").StaticSignature;
-
 /// Built-in operation that auto-registers static middleware routes.
 ///
-/// For each route carrying a middleware with `StaticSignature`, this operation
-/// inspects the selected middleware type and imports its `operationRoutes()`
+/// For each route carrying a middleware exposing `operationRoutes()`, this
+/// operation inspects the selected middleware type and imports its routes
 /// (typically `GET` and `HEAD` mount routes) if missing.
 pub const Static = struct {
     /// Upper bound used by the operations planner.
@@ -29,10 +27,10 @@ pub const Static = struct {
 
     /// Applies the operation to the mutable compile-time route table.
     pub fn operation(comptime r: anytype) void {
-        const indices = r.filterBySignature(StaticSignature);
+        const indices = r.filterByMiddlewareDecl("operationRoutes");
         inline for (indices) |idx| {
-            const selected_mw = r.firstMiddlewareWithSignature(idx, StaticSignature) orelse
-                @compileError("operations.Static: expected at least one middleware matching signature " ++ @typeName(StaticSignature));
+            const selected_mw = r.firstMiddlewareWithDecl(idx, "operationRoutes") orelse
+                @compileError("operations.Static: expected at least one middleware exposing `operationRoutes()`");
             addRoutesForMiddleware(r, selected_mw);
         }
     }
@@ -58,8 +56,8 @@ test "static operation adds GET/HEAD mount routes" {
     var found_head: bool = false;
     inline for (fields) |f| {
         const rd = @field(out, f.name);
-        if (std.mem.eql(u8, rd.method, "GET") and std.mem.eql(u8, rd.pattern, "/assets/*")) found_get = true;
-        if (std.mem.eql(u8, rd.method, "HEAD") and std.mem.eql(u8, rd.pattern, "/assets/*")) found_head = true;
+        if (std.mem.eql(u8, rd.method, "GET") and std.mem.eql(u8, rd.pattern, "/assets/{*path}")) found_get = true;
+        if (std.mem.eql(u8, rd.method, "HEAD") and std.mem.eql(u8, rd.pattern, "/assets/{*path}")) found_head = true;
     }
     try std.testing.expect(found_get);
     try std.testing.expect(found_head);

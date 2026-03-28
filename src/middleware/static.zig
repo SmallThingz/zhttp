@@ -6,12 +6,8 @@ const MiddlewareInfo = @import("../middleware.zig").MiddlewareInfo;
 const ReqCtx = @import("../req_ctx.zig").ReqCtx;
 const parse = @import("../parse.zig");
 const router = @import("../router.zig");
-const urldecode = @import("../urldecode.zig");
-const util = @import("util.zig");
 
 const Io = std.Io;
-
-pub const StaticSignature = struct {};
 
 fn normalizeMount(comptime m: []const u8) []const u8 {
     if (m.len == 0 or m[0] != '/') @compileError("Static.mount must start with '/'");
@@ -186,8 +182,15 @@ pub const StaticOptions = struct {
     dir: []const u8,
     /// URL mount prefix for static files (must start with `/`).
     ///
-    /// `/` serves from root; `/assets` serves under `/assets/*`.
+    /// `/` serves from root; `/assets` serves under `/assets/{*path}`.
     mount: []const u8 = "/",
+    /// Named trailing-glob param used to resolve file path in directory mode.
+    ///
+    /// Example route pattern: `/{*path}` or `/static/{*path}`.
+    /// If null, static middleware inspects `req.raw().path`:
+    /// - exactly one path param: use that
+    /// - zero or multiple params: compile error
+    glob_param_name: ?[]const u8 = null,
     /// Optional middleware name used for metadata/signature identification.
     name: ?[]const u8 = null,
     /// Optional `cache-control` header value to include on served files.
@@ -220,6 +223,7 @@ pub fn Static(comptime opts: StaticOptions) type {
     if (dir_path.len == 0) @compileError("Static.dir must be non-empty");
 
     const mount = normalizeMount(opts.mount);
+    const glob_param_name_opt = opts.glob_param_name;
     const info_name = if (opts.name) |n| n else "static";
     const cache_control: ?[]const u8 = opts.cache_control;
     const index: ?[]const u8 = opts.index;
@@ -230,7 +234,8 @@ pub fn Static(comptime opts: StaticOptions) type {
     const watch_enabled: bool = cache_enabled and watch_opts.enabled;
     const watch_interval_ns: i96 = @as(i96, @intCast(watch_opts.poll_interval_ms)) * std.time.ns_per_ms;
 
-    const pattern = if (std.mem.eql(u8, mount, "/")) "/*" else mount ++ "/*";
+    const route_glob_name = glob_param_name_opt orelse "path";
+    const pattern = if (std.mem.eql(u8, mount, "/")) "/{*" ++ route_glob_name ++ "}" else mount ++ "/{*" ++ route_glob_name ++ "}";
     const StaticHeaders = if (etag_enabled) struct { if_none_match: parse.Optional(parse.String) } else struct {};
 
     return struct {
@@ -254,7 +259,6 @@ pub fn Static(comptime opts: StaticOptions) type {
             .name = info_name,
             .header = if (etag_enabled) StaticHeaders else null,
         };
-        pub const Signature = StaticSignature;
         const OperationRoutes = .{
             router.get(pattern, handler, .{ .headers = StaticHeaders }),
             router.head(pattern, handler, .{ .headers = StaticHeaders }),
@@ -271,6 +275,100 @@ pub fn Static(comptime opts: StaticOptions) type {
 
         fn handler(req: anytype) !Res {
             return serve(req);
+        }
+
+        fn resolveGlobParamName(comptime route_pattern: []const u8) []const u8 {
+            comptime var total_params: usize = 0;
+            comptime var glob_params: usize = 0;
+            comptime var only_name: []const u8 = "";
+            comptime var selected_found: bool = false;
+            comptime var selected_is_glob: bool = false;
+
+            comptime var s: usize = 1;
+            inline while (s <= route_pattern.len) : (s = blk: {
+                const e2 = std.mem.indexOfScalarPos(u8, route_pattern, s, '/') orelse route_pattern.len;
+                break :blk e2 + 1;
+            }) {
+                const e = std.mem.indexOfScalarPos(u8, route_pattern, s, '/') orelse route_pattern.len;
+                const seg = route_pattern[s..e];
+                if (seg.len != 0 and seg[0] == '{' and seg[seg.len - 1] == '}') {
+                    const inner = seg[1 .. seg.len - 1];
+                    const is_glob = inner.len != 0 and inner[0] == '*';
+                    const pname = if (is_glob) inner[1..] else inner;
+                    if (pname.len != 0) {
+                        total_params += 1;
+                        if (total_params == 1) only_name = pname;
+                        if (is_glob) glob_params += 1;
+                        if (glob_param_name_opt) |want| {
+                            if (std.mem.eql(u8, pname, want)) {
+                                selected_found = true;
+                                selected_is_glob = is_glob;
+                            }
+                        }
+                    }
+                }
+                if (e == route_pattern.len) break;
+            }
+
+            if (glob_param_name_opt) |want| {
+                if (!selected_found) {
+                    @compileError("Static.glob_param_name '" ++ want ++ "' is not present in route path '" ++ route_pattern ++ "'");
+                }
+                if (!selected_is_glob) {
+                    @compileError("Static.glob_param_name '" ++ want ++ "' must refer to a named glob segment '{*" ++ want ++ "}' in route path '" ++ route_pattern ++ "'");
+                }
+                return want;
+            }
+
+            if (total_params == 1) {
+                if (glob_params != 1) {
+                    @compileError("Static route path '" ++ route_pattern ++ "' must expose a named trailing glob '{*name}' when inferring glob param");
+                }
+                return only_name;
+            }
+            if (total_params == 0) {
+                @compileError("Static route path '" ++ route_pattern ++ "' has no path params; set Static.glob_param_name or use a '{*name}' route");
+            }
+            @compileError("Static route path '" ++ route_pattern ++ "' has multiple path params; set Static.glob_param_name");
+        }
+
+        fn BaseReqPtrType(comptime ReqT: type) type {
+            const info = @typeInfo(ReqT);
+            if (info == .pointer) {
+                const Child = info.pointer.child;
+                if (@hasDecl(Child, "paramsConst") and @hasDecl(Child, "ParamNames")) {
+                    return ReqT;
+                }
+                if (@hasDecl(Child, "raw")) {
+                    return @TypeOf(@as(Child, undefined).raw());
+                }
+                @compileError("Static.serve requires a request wrapper exposing raw() or a base request pointer");
+            }
+            if (@hasDecl(ReqT, "raw")) {
+                return @TypeOf(@as(ReqT, undefined).raw());
+            }
+            @compileError("Static.serve requires a request wrapper exposing raw() or a base request pointer");
+        }
+
+        fn baseReq(req: anytype) BaseReqPtrType(@TypeOf(req)) {
+            const ReqT = @TypeOf(req);
+            const info = @typeInfo(ReqT);
+            if (info == .pointer and @hasDecl(info.pointer.child, "raw")) return req.*.raw();
+            if (info != .pointer and @hasDecl(ReqT, "raw")) return req.raw();
+            return req;
+        }
+
+        fn subPathFromRequest(req: anytype) []const u8 {
+            const base = baseReq(req);
+            const BaseReq = @TypeOf(base.*);
+            const glob_name = comptime resolveGlobParamName(BaseReq.path);
+            const params = base.paramsConst().*;
+            const value = @field(params, glob_name).get();
+            const ti = @typeInfo(@TypeOf(value));
+            if (ti != .pointer or ti.pointer.size != .slice or ti.pointer.child != u8) {
+                @compileError("Static glob param '" ++ glob_name ++ "' must parse to []const u8");
+            }
+            return value;
         }
 
         fn nowNs(io: Io) i96 {
@@ -401,20 +499,13 @@ pub fn Static(comptime opts: StaticOptions) type {
         }
 
         fn serve(req: anytype) !Res {
-            var rel = req.rawPath();
-            if (!std.mem.startsWith(u8, rel, mount)) return Res.text(404, "not found");
-            rel = rel[mount.len..];
-            if (rel.len != 0 and rel[0] == '/') rel = rel[1..];
-
             const a = req.allocator();
-            const rel_buf = try a.dupe(u8, rel);
-            const decoded = urldecode.decodeInPlace(rel_buf, .path_param) catch return Res.text(400, "bad request");
-            var file_rel = decoded;
+            var file_rel = subPathFromRequest(req);
 
             if (file_rel.len == 0 or file_rel[file_rel.len - 1] == '/') {
                 const idx = index orelse return Res.text(404, "not found");
                 if (file_rel.len == 0) {
-                    file_rel = try a.dupe(u8, idx);
+                    file_rel = idx;
                 } else {
                     const joined = try std.fmt.allocPrint(a, "{s}{s}", .{ file_rel, idx });
                     file_rel = joined;
@@ -462,7 +553,7 @@ test "static: normalize mount and operation routes" {
     const S = Static(.{ .dir = "public", .mount = "/static/" });
     const routes = S.operationRoutes();
     const fields = @typeInfo(@TypeOf(routes)).@"struct".fields;
-    try std.testing.expect(std.mem.eql(u8, @field(routes, fields[0].name).pattern, "/static/*"));
+    try std.testing.expect(std.mem.eql(u8, @field(routes, fields[0].name).pattern, "/static/{*path}"));
 }
 
 test "static: helper functions handle edge cases" {
@@ -512,11 +603,12 @@ test "static: contentTypeFor covers common web/media types" {
 test "static: serves file and index, blocks traversal" {
     const S = Static(.{ .dir = "testdata/static", .mount = "/static" });
     const MwCtx = struct {};
-    const ReqT = @import("../request.zig").Request(
+    const ReqT = @import("../request.zig").RequestWithPattern(
         struct { if_none_match: parse.Optional(parse.String) },
         struct {},
-        &.{},
+        &.{"path"},
         MwCtx,
+        "/static/{*path}",
     );
 
     {
@@ -534,6 +626,8 @@ test "static: serves file and index, blocks traversal" {
         const mw_ctx: MwCtx = .{};
         var reqv = ReqT.init(a, std.testing.io, line, mw_ctx);
         defer reqv.deinit(a);
+        var rel0 = "hello.txt".*;
+        try reqv.parseParams(a, &.{rel0[0..]});
         const res = try S.serve(&reqv);
         try std.testing.expectEqual(@as(u16, 200), @intFromEnum(res.status));
         try std.testing.expectEqualStrings("hello\n", res.body);
@@ -555,6 +649,7 @@ test "static: serves file and index, blocks traversal" {
         const mw_ctx: MwCtx = .{};
         var reqv = ReqT.init(a, std.testing.io, line, mw_ctx);
         defer reqv.deinit(a);
+        try reqv.parseParams(a, &.{""});
         const res = try S.serve(&reqv);
         try std.testing.expectEqual(@as(u16, 200), @intFromEnum(res.status));
         try std.testing.expectEqualStrings("index\n", res.body);
@@ -575,19 +670,59 @@ test "static: serves file and index, blocks traversal" {
         const mw_ctx: MwCtx = .{};
         var reqv = ReqT.init(a, std.testing.io, line, mw_ctx);
         defer reqv.deinit(a);
+        var rel_bad = "../secret.txt".*;
+        try reqv.parseParams(a, &.{rel_bad[0..]});
         const res = try S.serve(&reqv);
         try std.testing.expectEqual(@as(u16, 404), @intFromEnum(res.status));
     }
 }
 
+test "static: explicit glob_param_name works with multiple path params" {
+    const S = Static(.{
+        .dir = "testdata/static",
+        .mount = "/static",
+        .glob_param_name = "rest",
+    });
+    const MwCtx = struct {};
+    const ReqT = @import("../request.zig").RequestWithPattern(
+        struct { if_none_match: parse.Optional(parse.String) },
+        struct {},
+        &.{ "prefix", "rest" },
+        MwCtx,
+        "/x/{prefix}/{*rest}",
+    );
+
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    const path_buf = "/x/prefix/hello.txt".*;
+    const query_buf: [0]u8 = .{};
+    const line: @import("../request.zig").RequestLine = .{
+        .method = "GET",
+        .version = .http11,
+        .path = @constCast(path_buf[0..]),
+        .query = @constCast(query_buf[0..]),
+    };
+    const mw_ctx: MwCtx = .{};
+    var reqv = ReqT.init(a, std.testing.io, line, mw_ctx);
+    defer reqv.deinit(a);
+    var p0 = "prefix".*;
+    var p1 = "hello.txt".*;
+    try reqv.parseParams(a, &.{ p0[0..], p1[0..] });
+    const res = try S.serve(&reqv);
+    try std.testing.expectEqual(@as(u16, 200), @intFromEnum(res.status));
+    try std.testing.expectEqualStrings("hello\n", res.body);
+}
+
 test "static: etag returns 304 on match" {
     const S = Static(.{ .dir = "testdata/static", .mount = "/static" });
     const MwCtx = struct {};
-    const ReqT = @import("../request.zig").Request(
+    const ReqT = @import("../request.zig").RequestWithPattern(
         struct { if_none_match: parse.Optional(parse.String) },
         struct {},
-        &.{},
+        &.{"path"},
         MwCtx,
+        "/static/{*path}",
     );
 
     const path_buf = "/static/hello.txt".*;
@@ -606,6 +741,8 @@ test "static: etag returns 304 on match" {
         const mw_ctx: MwCtx = .{};
         var reqv = ReqT.init(a, std.testing.io, line, mw_ctx);
         defer reqv.deinit(a);
+        var rel1 = "hello.txt".*;
+        try reqv.parseParams(a, &.{rel1[0..]});
         const res = try S.serve(&reqv);
         const tag = headerValue(res.headers, "etag") orelse return error.TestExpectedEqual;
         const header_line = try std.fmt.allocPrint(a, "If-None-Match: {s}\r\n\r\n", .{tag});
@@ -619,6 +756,8 @@ test "static: etag returns 304 on match" {
         const mw_ctx2: MwCtx = .{};
         var reqv2 = ReqT.init(a, std.testing.io, line2, mw_ctx2);
         defer reqv2.deinit(a);
+        var rel6 = "hello.txt".*;
+        try reqv2.parseParams(a, &.{rel6[0..]});
         var r = std.Io.Reader.fixed(header_line);
         try reqv2.parseHeaders(a, &r, 1024);
         const res2 = try S.serve(&reqv2);
@@ -637,11 +776,12 @@ test "static: in-memory cache serves stale bytes when fs watch is disabled" {
         .fs_watch = .{ .enabled = false },
     });
     const MwCtx = struct {};
-    const ReqT = @import("../request.zig").Request(
+    const ReqT = @import("../request.zig").RequestWithPattern(
         struct { if_none_match: parse.Optional(parse.String) },
         struct {},
-        &.{},
+        &.{"path"},
         MwCtx,
+        "/static/{*path}",
     );
 
     var cwd = Io.Dir.cwd();
@@ -665,6 +805,8 @@ test "static: in-memory cache serves stale bytes when fs watch is disabled" {
         const mw_ctx: MwCtx = .{};
         var reqv = ReqT.init(a, std.testing.io, line, mw_ctx);
         defer reqv.deinit(a);
+        var rel2 = "watch.txt".*;
+        try reqv.parseParams(a, &.{rel2[0..]});
         const res = try S.serve(&reqv);
         try std.testing.expectEqual(@as(u16, 200), @intFromEnum(res.status));
         try std.testing.expectEqualStrings("v1\n", res.body);
@@ -685,6 +827,8 @@ test "static: in-memory cache serves stale bytes when fs watch is disabled" {
         const mw_ctx: MwCtx = .{};
         var reqv = ReqT.init(a, std.testing.io, line, mw_ctx);
         defer reqv.deinit(a);
+        var rel3 = "watch.txt".*;
+        try reqv.parseParams(a, &.{rel3[0..]});
         const res = try S.serve(&reqv);
         try std.testing.expectEqual(@as(u16, 200), @intFromEnum(res.status));
         try std.testing.expectEqualStrings("v1\n", res.body);
@@ -704,11 +848,12 @@ test "static: in-memory cache refreshes when fs watch is enabled" {
         },
     });
     const MwCtx = struct {};
-    const ReqT = @import("../request.zig").Request(
+    const ReqT = @import("../request.zig").RequestWithPattern(
         struct { if_none_match: parse.Optional(parse.String) },
         struct {},
-        &.{},
+        &.{"path"},
         MwCtx,
+        "/static/{*path}",
     );
 
     var cwd = Io.Dir.cwd();
@@ -732,6 +877,8 @@ test "static: in-memory cache refreshes when fs watch is enabled" {
         const mw_ctx: MwCtx = .{};
         var reqv = ReqT.init(a, std.testing.io, line, mw_ctx);
         defer reqv.deinit(a);
+        var rel4 = "watch.txt".*;
+        try reqv.parseParams(a, &.{rel4[0..]});
         const res = try S.serve(&reqv);
         try std.testing.expectEqual(@as(u16, 200), @intFromEnum(res.status));
         try std.testing.expectEqualStrings("v1\n", res.body);
@@ -752,6 +899,8 @@ test "static: in-memory cache refreshes when fs watch is enabled" {
         const mw_ctx: MwCtx = .{};
         var reqv = ReqT.init(a, std.testing.io, line, mw_ctx);
         defer reqv.deinit(a);
+        var rel5 = "watch.txt".*;
+        try reqv.parseParams(a, &.{rel5[0..]});
         const res = try S.serve(&reqv);
         try std.testing.expectEqual(@as(u16, 200), @intFromEnum(res.status));
         try std.testing.expectEqualStrings("v2\n", res.body);

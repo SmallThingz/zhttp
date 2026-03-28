@@ -5,7 +5,6 @@ pub const MiddlewareInfo = middleware.MiddlewareInfo;
 pub const HeaderSetBehavior = middleware.HeaderSetBehavior;
 pub const Static = middleware.Static;
 pub const StaticOptions = middleware.StaticOptions;
-pub const StaticSignature = middleware.StaticSignature;
 pub const staticContentTypeFor = middleware.staticContentTypeFor;
 pub const Cors = middleware.Cors;
 pub const CorsOptions = middleware.CorsOptions;
@@ -32,7 +31,6 @@ test "mod forwards canonical middleware exports" {
     try std.testing.expect(HeaderSetBehavior == middleware.HeaderSetBehavior);
     try std.testing.expect(Static == middleware.Static);
     try std.testing.expect(StaticOptions == middleware.StaticOptions);
-    try std.testing.expect(StaticSignature == middleware.StaticSignature);
     try std.testing.expect(staticContentTypeFor == middleware.staticContentTypeFor);
     try std.testing.expect(Cors == middleware.Cors);
     try std.testing.expect(CorsOptions == middleware.CorsOptions);

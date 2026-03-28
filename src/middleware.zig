@@ -312,7 +312,6 @@ pub fn concatTypeLists(comptime a: []const type, comptime b: []const type) []con
 
 pub const Static = @import("middleware/static.zig").Static;
 pub const StaticOptions = @import("middleware/static.zig").StaticOptions;
-pub const StaticSignature = @import("middleware/static.zig").StaticSignature;
 pub const HeaderSetBehavior = @import("middleware/util.zig").HeaderSetBehavior;
 pub const Cors = @import("middleware/cors.zig").Cors;
 pub const CorsOptions = @import("middleware/cors.zig").CorsOptions;

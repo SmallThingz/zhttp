@@ -259,8 +259,8 @@ fn RequestPWithPatternExt(
     };
 
     return struct {
-        comptime path: []const u8 = route_pattern,
-        comptime method: []const u8 = method_name,
+        pub const path: []const u8 = route_pattern;
+        pub const method: []const u8 = method_name;
         /// Stores internal `_base` state.
         _base: Base,
         /// Stores internal `_path` state.

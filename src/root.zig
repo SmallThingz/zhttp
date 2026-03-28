@@ -37,7 +37,7 @@
 //!
 //! When `.Context` is configured, it is available only via `req.ctx()`.
 //! Standard middleware signature types are exported at top-level:
-//! `zhttp.CorsSignature` and `zhttp.StaticSignature`.
+//! `zhttp.CorsSignature`.
 //!
 const std = @import("std");
 const builtin = @import("builtin");
@@ -50,7 +50,6 @@ pub const Res = response.Res;
 pub const Server = @import("server.zig").Server;
 pub const middleware = @import("middleware.zig");
 pub const operations = @import("operations.zig");
-pub const StaticSignature = middleware.StaticSignature;
 pub const CorsSignature = middleware.CorsSignature;
 
 pub const route = router.route;

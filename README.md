@@ -81,7 +81,7 @@ exe.root_module.addImport("zhttp", zhttp_dep.module("zhttp"));
 - Route helpers: `zhttp.get`, `post`, `put`, `delete`, `patch`, `head`, `options`, and `zhttp.route(...)`.
 - Route options: `.headers`, `.query`, `.params`, `.middlewares`, `.upgrade_handler`.
 - `.upgrade_handler` is route-local and optional (`null` by default). If present and the route returns `101 Switching Protocols`, zhttp writes the upgrade response and calls `fn(server, stream, r, w, line, res) void`; that path returns `zhttp.router.Action.upgraded` and the upgrade handler owns connection close/lifecycle.
-- Standard middleware signatures are available at top-level as `zhttp.CorsSignature` and `zhttp.StaticSignature`.
+- Standard middleware signatures are available at top-level as `zhttp.CorsSignature`.
 - Header capture keys match case-insensitively, and `_` in field names matches `-` in incoming headers.
 - If `.params` is omitted, path params default to strings.
 - Route patterns support both segment params (`/users/{id}`) and trailing named globs (`/static/{*path}`).
@@ -104,8 +104,10 @@ exe.root_module.addImport("zhttp", zhttp_dep.module("zhttp"));
 - `zhttp.operations.Cors`
 - `zhttp.operations.Static`
 
-Both built-ins are zero-configuration operation types. They discover matching
-middlewares by signature (`zhttp.CorsSignature`, `zhttp.StaticSignature`).
+Both built-ins are zero-configuration operation types. `zhttp.operations.Cors`
+discovers matching middlewares by `zhttp.CorsSignature`, and
+`zhttp.operations.Static` discovers middlewares that expose
+`operationRoutes()`.
 
 See [`examples/builtin_middlewares.zig`](./examples/builtin_middlewares.zig) for the full built-in stack in one server.
 

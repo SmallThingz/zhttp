@@ -386,13 +386,22 @@ pub fn typeList(comptime t: anytype) []const type {
 }
 
 pub const Static = @import("middleware/static.zig").Static;
+pub const StaticOptions = @import("middleware/static.zig").StaticOptions;
 pub const Cors = @import("middleware/cors.zig").Cors;
+pub const CorsOptions = @import("middleware/cors.zig").CorsOptions;
 pub const Logger = @import("middleware/logger.zig").Logger;
+pub const LoggerOptions = @import("middleware/logger.zig").LoggerOptions;
 pub const Compression = @import("middleware/compression.zig").Compression;
+pub const CompressionOptions = @import("middleware/compression.zig").CompressionOptions;
 pub const Origin = @import("middleware/origin.zig").Origin;
+pub const OriginOptions = @import("middleware/origin.zig").OriginOptions;
 pub const OriginDecisionTree = @import("middleware/origin.zig").DecisionTree;
 pub const OriginHashMatcher = @import("middleware/origin.zig").HashMatcher;
 pub const Timeout = @import("middleware/timeout.zig").Timeout;
+pub const TimeoutOptions = @import("middleware/timeout.zig").TimeoutOptions;
 pub const Etag = @import("middleware/etag.zig").Etag;
+pub const EtagOptions = @import("middleware/etag.zig").EtagOptions;
 pub const RequestId = @import("middleware/request_id.zig").RequestId;
+pub const RequestIdOptions = @import("middleware/request_id.zig").RequestIdOptions;
 pub const SecurityHeaders = @import("middleware/security_headers.zig").SecurityHeaders;
+pub const SecurityHeadersOptions = @import("middleware/security_headers.zig").SecurityHeadersOptions;

@@ -6,18 +6,26 @@ const ReqCtx = @import("../req_ctx.zig").ReqCtx;
 
 const Io = std.Io;
 
-pub fn Timeout(comptime opts: anytype) type {
-    const clock: Io.Clock = if (@hasField(@TypeOf(opts), "clock")) opts.clock else .awake;
-    const timeout: Io.Duration = if (@hasField(@TypeOf(opts), "duration"))
-        opts.duration
-    else if (@hasField(@TypeOf(opts), "ms"))
-        Io.Duration.fromMilliseconds(opts.ms)
-    else if (@hasField(@TypeOf(opts), "timeout_ms"))
-        Io.Duration.fromMilliseconds(opts.timeout_ms)
+pub const TimeoutOptions = struct {
+    name: ?[]const u8 = null,
+    clock: Io.Clock = .awake,
+    duration: ?Io.Duration = null,
+    ms: ?i64 = null,
+    timeout_ms: ?i64 = null,
+};
+
+pub fn Timeout(comptime opts: TimeoutOptions) type {
+    const clock: Io.Clock = opts.clock;
+    const timeout: Io.Duration = if (opts.duration) |d|
+        d
+    else if (opts.ms) |ms|
+        Io.Duration.fromMilliseconds(ms)
+    else if (opts.timeout_ms) |ms|
+        Io.Duration.fromMilliseconds(ms)
     else
         @compileError("Timeout requires .duration or .ms/.timeout_ms");
 
-    const store: bool = @hasField(@TypeOf(opts), "name");
+    const store: bool = opts.name != null;
     const DataT = if (store) struct {
         deadline: Io.Timestamp = .zero,
         timeout: Io.Duration = .zero,
@@ -27,7 +35,7 @@ pub fn Timeout(comptime opts: anytype) type {
 
     const Common = struct {
         pub const Data = DataT;
-        pub const info_name: []const u8 = if (store) opts.name else "timeout";
+        pub const info_name: []const u8 = if (store) opts.name.? else "timeout";
         pub const Info = MiddlewareInfo{
             .name = info_name,
             .data = if (store) DataT else null,

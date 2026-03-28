@@ -6,10 +6,16 @@ const MiddlewareInfo = @import("../middleware.zig").MiddlewareInfo;
 const ReqCtx = @import("../req_ctx.zig").ReqCtx;
 const util = @import("util.zig");
 
-pub fn RequestId(comptime opts: anytype) type {
-    const header_name: []const u8 = if (@hasField(@TypeOf(opts), "header")) opts.header else "x-request-id";
-    const bytes: usize = if (@hasField(@TypeOf(opts), "bytes")) opts.bytes else 16;
-    const store: bool = @hasField(@TypeOf(opts), "name");
+pub const RequestIdOptions = struct {
+    header: []const u8 = "x-request-id",
+    bytes: usize = 16,
+    name: ?[]const u8 = null,
+};
+
+pub fn RequestId(comptime opts: RequestIdOptions) type {
+    const header_name: []const u8 = opts.header;
+    const bytes: usize = opts.bytes;
+    const store: bool = opts.name != null;
     const hex_len: usize = bytes * 2;
 
     const DataT = if (store) struct {
@@ -18,7 +24,7 @@ pub fn RequestId(comptime opts: anytype) type {
 
     const Common = struct {
         pub const Data = DataT;
-        pub const info_name: []const u8 = if (store) opts.name else "request_id";
+        pub const info_name: []const u8 = if (store) opts.name.? else "request_id";
         pub const Info = MiddlewareInfo{
             .name = info_name,
             .data = if (store) DataT else null,

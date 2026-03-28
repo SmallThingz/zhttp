@@ -38,8 +38,12 @@ fn matchesIfNoneMatch(header_value: []const u8, tag: []const u8) bool {
     return false;
 }
 
-pub fn Etag(comptime opts: anytype) type {
-    const weak: bool = if (@hasField(@TypeOf(opts), "weak")) opts.weak else false;
+pub const EtagOptions = struct {
+    weak: bool = false,
+};
+
+pub fn Etag(comptime opts: EtagOptions) type {
+    const weak: bool = opts.weak;
 
     return struct {
         pub const Info = MiddlewareInfo{

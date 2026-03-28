@@ -9,46 +9,30 @@ comptime {
     @setEvalBranchQuota(200_000);
 }
 
-fn validateOrigins(comptime origins: anytype) void {
+fn validateOrigins(comptime origins: []const []const u8) void {
     comptime {
         @setEvalBranchQuota(200_000);
     }
-    const info = @typeInfo(@TypeOf(origins));
-    if (info != .@"struct" or !info.@"struct".is_tuple) {
-        @compileError("Origin middleware requires `.origins = .{ \"https://example.com\", ... }`");
-    }
-    if (info.@"struct".fields.len == 0) {
+    if (origins.len == 0) {
         @compileError("Origin middleware requires at least one allowed origin");
     }
 
-    inline for (info.@"struct".fields, 0..) |f, i| {
-        const origin: []const u8 = @field(origins, f.name);
+    inline for (origins, 0..) |origin, i| {
         if (origin.len == 0) @compileError("allowed origins must not be empty");
-
-        inline for (info.@"struct".fields[0..i]) |prev| {
-            const existing: []const u8 = @field(origins, prev.name);
-            if (std.mem.eql(u8, origin, existing)) {
-                @compileError("duplicate allowed origin: " ++ origin);
-            }
+        inline for (origins[0..i]) |existing| {
+            if (std.mem.eql(u8, origin, existing)) @compileError("duplicate allowed origin: " ++ origin);
         }
     }
 }
 
-pub fn DecisionTree(comptime origins: anytype) type {
+pub fn DecisionTree(comptime origins: []const []const u8) type {
     comptime {
         @setEvalBranchQuota(200_000);
     }
     validateOrigins(origins);
 
-    const fields = @typeInfo(@TypeOf(origins)).@"struct".fields;
-    const count = fields.len;
-    const allowed: [count][]const u8 = comptime blk: {
-        var out: [count][]const u8 = undefined;
-        for (fields, 0..) |f, i| {
-            out[i] = @field(origins, f.name);
-        }
-        break :blk out;
-    };
+    const count = origins.len;
+    const allowed: [count][]const u8 = origins[0..count].*;
     const all_ids: [count]usize = comptime blk: {
         var out: [count]usize = undefined;
         for (0..count) |i| out[i] = i;
@@ -157,21 +141,14 @@ pub fn DecisionTree(comptime origins: anytype) type {
     };
 }
 
-pub fn HashMatcher(comptime origins: anytype) type {
+pub fn HashMatcher(comptime origins: []const []const u8) type {
     comptime {
         @setEvalBranchQuota(200_000);
     }
     validateOrigins(origins);
 
-    const fields = @typeInfo(@TypeOf(origins)).@"struct".fields;
-    const count = fields.len;
-    const allowed: [count][]const u8 = comptime blk: {
-        var out: [count][]const u8 = undefined;
-        for (fields, 0..) |f, i| {
-            out[i] = @field(origins, f.name);
-        }
-        break :blk out;
-    };
+    const count = origins.len;
+    const allowed: [count][]const u8 = origins[0..count].*;
     const cap = comptime std.math.ceilPowerOfTwo(usize, @max(16, count * 2)) catch 16;
     const table = comptime blk: {
         var keys: [cap][]const u8 = undefined;
@@ -214,18 +191,22 @@ pub fn HashMatcher(comptime origins: anytype) type {
     };
 }
 
-pub fn Origin(comptime opts: anytype) type {
-    if (!@hasField(@TypeOf(opts), "origins")) {
-        @compileError("Origin middleware requires `.origins = .{ \"https://example.com\", ... }`");
-    }
+pub const OriginOptions = struct {
+    origins: []const []const u8,
+    allow_missing: bool = false,
+    status: u16 = 403,
+    body: []const u8 = "forbidden origin\n",
+    name: ?[]const u8 = null,
+};
 
+pub fn Origin(comptime opts: OriginOptions) type {
     const origins = opts.origins;
     validateOrigins(origins);
 
-    const allow_missing: bool = if (@hasField(@TypeOf(opts), "allow_missing")) opts.allow_missing else false;
-    const reject_status: u16 = if (@hasField(@TypeOf(opts), "status")) opts.status else 403;
-    const reject_body: []const u8 = if (@hasField(@TypeOf(opts), "body")) opts.body else "forbidden origin\n";
-    const store: bool = @hasField(@TypeOf(opts), "name");
+    const allow_missing: bool = opts.allow_missing;
+    const reject_status: u16 = opts.status;
+    const reject_body: []const u8 = opts.body;
+    const store: bool = opts.name != null;
     const Matcher = HashMatcher(origins);
 
     const DataT = if (store) struct {
@@ -234,7 +215,7 @@ pub fn Origin(comptime opts: anytype) type {
     } else struct {};
 
     const Common = struct {
-        pub const info_name: []const u8 = if (store) opts.name else "origin";
+        pub const info_name: []const u8 = if (store) opts.name.? else "origin";
         pub const Info = MiddlewareInfo{
             .name = info_name,
             .data = if (store) DataT else null,
@@ -271,7 +252,7 @@ pub fn Origin(comptime opts: anytype) type {
 }
 
 test "origin decision tree matches exact origins" {
-    const Matcher = DecisionTree(.{
+    const Matcher = DecisionTree(&.{
         "https://app.example.com",
         "https://admin.example.com:8443",
         "http://localhost:3000",
@@ -285,7 +266,7 @@ test "origin decision tree matches exact origins" {
 }
 
 test "origin hash matcher matches exact origins" {
-    const Matcher = HashMatcher(.{
+    const Matcher = HashMatcher(&.{
         "https://app.example.com",
         "https://admin.example.com:8443",
         "http://localhost:3000",
@@ -300,7 +281,7 @@ test "origin hash matcher matches exact origins" {
 
 test "origin middleware allows configured origin" {
     const Mw = Origin(.{
-        .origins = .{ "https://app.example.com", "http://localhost:3000" },
+        .origins = &.{ "https://app.example.com", "http://localhost:3000" },
     });
     const MwCtx = struct {};
     const ReqT = @import("../request.zig").Request(struct {
@@ -335,7 +316,7 @@ test "origin middleware allows configured origin" {
 }
 
 test "origin middleware rejects missing origin by default" {
-    const Mw = Origin(.{ .origins = .{"https://app.example.com"} });
+    const Mw = Origin(.{ .origins = &.{"https://app.example.com"} });
     const MwCtx = struct {};
     const ReqT = @import("../request.zig").Request(struct {
         origin: parse.Optional(parse.String),
@@ -367,11 +348,13 @@ test "origin middleware rejects missing origin by default" {
 
 test "origin middleware can allow missing origin and store decision" {
     const Mw = Origin(.{
-        .origins = .{"https://app.example.com"},
+        .origins = &.{"https://app.example.com"},
         .allow_missing = true,
-        .name = .origin,
+        .name = "origin",
     });
-    const MwCtx = struct {};
+    const MwCtx = struct {
+        origin: Mw.Data = .{},
+    };
     const ReqT = @import("../request.zig").Request(struct {
         origin: parse.Optional(parse.String),
     }, struct {}, &.{}, MwCtx);
@@ -395,15 +378,14 @@ test "origin middleware can allow missing origin and store decision" {
     var reqv = ReqT.init(gpa, std.testing.io, line, mw_ctx);
     defer reqv.deinit(gpa);
 
-    var data: Mw.Data = .{};
-    const res = try Mw.call(Next, Next{}, &reqv, &data);
+    const res = try Mw.call(Next, Next{}, &reqv);
     try std.testing.expectEqual(@as(u16, 200), @intFromEnum(res.status));
-    try std.testing.expect(data.allowed);
-    try std.testing.expect(data.missing);
+    try std.testing.expect(reqv.mwCtxConst().origin.allowed);
+    try std.testing.expect(reqv.mwCtxConst().origin.missing);
 }
 
 test "origin matcher has expected decisions for mixed probes" {
-    const Matcher = DecisionTree(.{
+    const Matcher = DecisionTree(&.{
         "https://app.example.com",
         "https://admin.example.com",
         "https://api.example.com",
@@ -425,7 +407,7 @@ test "origin matcher has expected decisions for mixed probes" {
 }
 
 test "origin decision tree and hash matcher agree" {
-    const origins = .{
+    const origins = &.{
         "https://app.example.com",
         "https://admin.example.com",
         "https://api.example.com",

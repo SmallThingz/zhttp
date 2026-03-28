@@ -6,16 +6,28 @@ const MiddlewareInfo = @import("../middleware.zig").MiddlewareInfo;
 const ReqCtx = @import("../req_ctx.zig").ReqCtx;
 const util = @import("util.zig");
 
-pub fn SecurityHeaders(comptime opts: anytype) type {
-    const x_content_type_options: ?[]const u8 = if (@hasField(@TypeOf(opts), "x_content_type_options")) opts.x_content_type_options else "nosniff";
-    const x_frame_options: ?[]const u8 = if (@hasField(@TypeOf(opts), "x_frame_options")) opts.x_frame_options else "DENY";
-    const referrer_policy: ?[]const u8 = if (@hasField(@TypeOf(opts), "referrer_policy")) opts.referrer_policy else "no-referrer";
-    const csp: ?[]const u8 = if (@hasField(@TypeOf(opts), "content_security_policy")) opts.content_security_policy else null;
-    const permissions_policy: ?[]const u8 = if (@hasField(@TypeOf(opts), "permissions_policy")) opts.permissions_policy else null;
-    const hsts: ?[]const u8 = if (@hasField(@TypeOf(opts), "strict_transport_security")) opts.strict_transport_security else null;
-    const coep: ?[]const u8 = if (@hasField(@TypeOf(opts), "cross_origin_embedder_policy")) opts.cross_origin_embedder_policy else null;
-    const coop: ?[]const u8 = if (@hasField(@TypeOf(opts), "cross_origin_opener_policy")) opts.cross_origin_opener_policy else null;
-    const corp: ?[]const u8 = if (@hasField(@TypeOf(opts), "cross_origin_resource_policy")) opts.cross_origin_resource_policy else null;
+pub const SecurityHeadersOptions = struct {
+    x_content_type_options: ?[]const u8 = "nosniff",
+    x_frame_options: ?[]const u8 = "DENY",
+    referrer_policy: ?[]const u8 = "no-referrer",
+    content_security_policy: ?[]const u8 = null,
+    permissions_policy: ?[]const u8 = null,
+    strict_transport_security: ?[]const u8 = null,
+    cross_origin_embedder_policy: ?[]const u8 = null,
+    cross_origin_opener_policy: ?[]const u8 = null,
+    cross_origin_resource_policy: ?[]const u8 = null,
+};
+
+pub fn SecurityHeaders(comptime opts: SecurityHeadersOptions) type {
+    const x_content_type_options: ?[]const u8 = opts.x_content_type_options;
+    const x_frame_options: ?[]const u8 = opts.x_frame_options;
+    const referrer_policy: ?[]const u8 = opts.referrer_policy;
+    const csp: ?[]const u8 = opts.content_security_policy;
+    const permissions_policy: ?[]const u8 = opts.permissions_policy;
+    const hsts: ?[]const u8 = opts.strict_transport_security;
+    const coep: ?[]const u8 = opts.cross_origin_embedder_policy;
+    const coop: ?[]const u8 = opts.cross_origin_opener_policy;
+    const corp: ?[]const u8 = opts.cross_origin_resource_policy;
 
     return struct {
         pub const Info = MiddlewareInfo{

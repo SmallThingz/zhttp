@@ -32,17 +32,30 @@ fn allocHeaders(allocator: std.mem.Allocator, src: []const Header) ![]const Head
     return out;
 }
 
-pub fn Cors(comptime opts: anytype) type {
-    const origins: []const []const u8 = if (@hasField(@TypeOf(opts), "origins")) opts.origins else &.{};
-    const methods: []const []const u8 = if (@hasField(@TypeOf(opts), "methods")) opts.methods else &.{ "GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS" };
-    const allow_headers_opt: ?[]const []const u8 = if (@hasField(@TypeOf(opts), "headers")) opts.headers else null;
-    const expose_headers: []const []const u8 = if (@hasField(@TypeOf(opts), "expose")) opts.expose else &.{};
-    const allow_credentials: bool = if (@hasField(@TypeOf(opts), "credentials")) opts.credentials else false;
-    const max_age: ?u32 = if (@hasField(@TypeOf(opts), "max_age")) opts.max_age else null;
-    const enforce: bool = if (@hasField(@TypeOf(opts), "enforce")) opts.enforce else false;
-    const register_routes_opt: bool = if (@hasField(@TypeOf(opts), "register_routes")) opts.register_routes else true;
-    const store: bool = @hasField(@TypeOf(opts), "name");
-    const origin_is_allowed = if (@hasField(@TypeOf(opts), "origin_is_allowed")) opts.origin_is_allowed else null;
+pub const CorsOptions = struct {
+    origins: []const []const u8 = &.{},
+    methods: []const []const u8 = &.{ "GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS" },
+    headers: ?[]const []const u8 = null,
+    expose: []const []const u8 = &.{},
+    credentials: bool = false,
+    max_age: ?u32 = null,
+    enforce: bool = false,
+    register_routes: bool = true,
+    name: ?[]const u8 = null,
+    origin_is_allowed: ?*const fn ([]const u8) bool = null,
+};
+
+pub fn Cors(comptime opts: CorsOptions) type {
+    const origins: []const []const u8 = opts.origins;
+    const methods: []const []const u8 = opts.methods;
+    const allow_headers_opt: ?[]const []const u8 = opts.headers;
+    const expose_headers: []const []const u8 = opts.expose;
+    const allow_credentials: bool = opts.credentials;
+    const max_age: ?u32 = opts.max_age;
+    const enforce: bool = opts.enforce;
+    const register_routes_opt: bool = opts.register_routes;
+    const store: bool = opts.name != null;
+    const origin_is_allowed = opts.origin_is_allowed;
 
     const allow_any_origin: bool = comptime blk: {
         for (origins) |o| {
@@ -74,7 +87,7 @@ pub fn Cors(comptime opts: anytype) type {
     } else struct {};
 
     const Common = struct {
-        pub const info_name: []const u8 = if (store) opts.name else "cors";
+        pub const info_name: []const u8 = if (store) opts.name.? else "cors";
         pub const Info = MiddlewareInfo{
             .name = info_name,
             .data = if (store) DataT else null,

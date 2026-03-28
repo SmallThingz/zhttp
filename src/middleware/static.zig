@@ -79,17 +79,26 @@ fn allocHeaders(allocator: std.mem.Allocator, src: []const Header) ![]const Head
     return out;
 }
 
-pub fn Static(comptime opts: anytype) type {
-    if (!@hasField(@TypeOf(opts), "dir")) @compileError("Static requires .dir");
+pub const StaticOptions = struct {
+    dir: []const u8,
+    mount: []const u8 = "/",
+    register_routes: bool = true,
+    cache_control: ?[]const u8 = null,
+    index: ?[]const u8 = "index.html",
+    etag: bool = true,
+    max_bytes: usize = std.math.maxInt(usize),
+};
+
+pub fn Static(comptime opts: StaticOptions) type {
     const dir_path: []const u8 = opts.dir;
     if (dir_path.len == 0) @compileError("Static.dir must be non-empty");
 
-    const mount = normalizeMount(if (@hasField(@TypeOf(opts), "mount")) opts.mount else "/");
-    const register_routes_opt = if (@hasField(@TypeOf(opts), "register_routes")) opts.register_routes else true;
-    const cache_control: ?[]const u8 = if (@hasField(@TypeOf(opts), "cache_control")) opts.cache_control else null;
-    const index: ?[]const u8 = if (@hasField(@TypeOf(opts), "index")) opts.index else "index.html";
-    const etag_enabled: bool = if (@hasField(@TypeOf(opts), "etag")) opts.etag else true;
-    const max_bytes: usize = if (@hasField(@TypeOf(opts), "max_bytes")) opts.max_bytes else std.math.maxInt(usize);
+    const mount = normalizeMount(opts.mount);
+    const register_routes_opt = opts.register_routes;
+    const cache_control: ?[]const u8 = opts.cache_control;
+    const index: ?[]const u8 = opts.index;
+    const etag_enabled: bool = opts.etag;
+    const max_bytes: usize = opts.max_bytes;
 
     const pattern = if (std.mem.eql(u8, mount, "/")) "/*" else mount ++ "/*";
     const StaticHeaders = if (etag_enabled) struct { if_none_match: parse.Optional(parse.String) } else struct {};

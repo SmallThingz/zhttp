@@ -39,9 +39,14 @@ fn acceptsGzip(header_value: []const u8) bool {
     return false;
 }
 
-pub fn Compression(comptime opts: anytype) type {
-    const min_size: usize = if (@hasField(@TypeOf(opts), "min_size")) opts.min_size else 256;
-    const level: flate.Compress.Options = if (@hasField(@TypeOf(opts), "level")) opts.level else flate.Compress.Options.default;
+pub const CompressionOptions = struct {
+    min_size: usize = 256,
+    level: flate.Compress.Options = flate.Compress.Options.default,
+};
+
+pub fn Compression(comptime opts: CompressionOptions) type {
+    const min_size: usize = opts.min_size;
+    const level: flate.Compress.Options = opts.level;
 
     return struct {
         pub const Info = MiddlewareInfo{

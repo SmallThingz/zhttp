@@ -3,28 +3,46 @@ const std = @import("std");
 
 pub const MiddlewareInfo = middleware.MiddlewareInfo;
 pub const Static = middleware.Static;
+pub const StaticOptions = middleware.StaticOptions;
 pub const Cors = middleware.Cors;
+pub const CorsOptions = middleware.CorsOptions;
 pub const Logger = middleware.Logger;
+pub const LoggerOptions = middleware.LoggerOptions;
 pub const Compression = middleware.Compression;
+pub const CompressionOptions = middleware.CompressionOptions;
 pub const Origin = middleware.Origin;
+pub const OriginOptions = middleware.OriginOptions;
 pub const OriginDecisionTree = middleware.OriginDecisionTree;
 pub const OriginHashMatcher = middleware.OriginHashMatcher;
 pub const Timeout = middleware.Timeout;
+pub const TimeoutOptions = middleware.TimeoutOptions;
 pub const Etag = middleware.Etag;
+pub const EtagOptions = middleware.EtagOptions;
 pub const RequestId = middleware.RequestId;
+pub const RequestIdOptions = middleware.RequestIdOptions;
 pub const SecurityHeaders = middleware.SecurityHeaders;
+pub const SecurityHeadersOptions = middleware.SecurityHeadersOptions;
 
 test "mod forwards canonical middleware exports" {
     try std.testing.expect(MiddlewareInfo == middleware.MiddlewareInfo);
     try std.testing.expect(Static == middleware.Static);
+    try std.testing.expect(StaticOptions == middleware.StaticOptions);
     try std.testing.expect(Cors == middleware.Cors);
+    try std.testing.expect(CorsOptions == middleware.CorsOptions);
     try std.testing.expect(Logger == middleware.Logger);
+    try std.testing.expect(LoggerOptions == middleware.LoggerOptions);
     try std.testing.expect(Compression == middleware.Compression);
+    try std.testing.expect(CompressionOptions == middleware.CompressionOptions);
     try std.testing.expect(Origin == middleware.Origin);
+    try std.testing.expect(OriginOptions == middleware.OriginOptions);
     try std.testing.expect(OriginDecisionTree == middleware.OriginDecisionTree);
     try std.testing.expect(OriginHashMatcher == middleware.OriginHashMatcher);
     try std.testing.expect(Timeout == middleware.Timeout);
+    try std.testing.expect(TimeoutOptions == middleware.TimeoutOptions);
     try std.testing.expect(Etag == middleware.Etag);
+    try std.testing.expect(EtagOptions == middleware.EtagOptions);
     try std.testing.expect(RequestId == middleware.RequestId);
+    try std.testing.expect(RequestIdOptions == middleware.RequestIdOptions);
     try std.testing.expect(SecurityHeaders == middleware.SecurityHeaders);
+    try std.testing.expect(SecurityHeadersOptions == middleware.SecurityHeadersOptions);
 }

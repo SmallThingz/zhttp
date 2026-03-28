@@ -35,7 +35,7 @@ Global middlewares/operations are configured in `Server(.{ ... })`.
 A middleware is a `type` that exposes:
 
 - `pub const Info: zhttp.middleware.MiddlewareInfo`
-- `pub fn call(comptime rctx: zhttp.ReqCtx, req: rctx.T()) !zhttp.Res` (or compatible response type for your routes)
+- `pub fn call(comptime rctx: zhttp.ReqCtx, req: rctx.T()) !rctx.Response([]const u8)`
 
 Minimal example:
 
@@ -51,7 +51,7 @@ const Auth = struct {
         },
     };
 
-    pub fn call(comptime rctx: zhttp.ReqCtx, req: rctx.T()) !zhttp.Res {
+    pub fn call(comptime rctx: zhttp.ReqCtx, req: rctx.T()) !rctx.Response([]const u8) {
         const auth = req.header(.authorization) orelse
             return zhttp.Res.text(401, "missing auth\n");
 
@@ -160,6 +160,15 @@ Important constraints:
 
 Use `Override` only for cross-cutting request behavior changes.
 
+## 2.9 Middleware and Response Body Limitation
+
+Current constraint in zhttp:
+
+- routes that include middleware currently require endpoint return type
+  `!rctx.Response([]const u8)`.
+
+`[][]const u8` and `BodyStream` endpoint response bodies currently require routes with no middleware.
+
 ## 2.8 Middleware checklist
 
 Before shipping a middleware:
@@ -242,7 +251,7 @@ const Endpoint = struct {
     pub const Info: zhttp.router.EndpointInfo = .{
         .operations = &.{AutoHead},
     };
-    pub fn call(comptime rctx: zhttp.ReqCtx, req: rctx.T()) !zhttp.Res { ... }
+    pub fn call(comptime rctx: zhttp.ReqCtx, req: rctx.T()) !rctx.Response([]const u8) { ... }
 };
 
 const App = zhttp.Server(.{
@@ -319,6 +328,35 @@ For middleware/operation contributions, add tests that cover:
 - startup init errors (for `static_context`)
 - operation idempotency and budget assumptions
 
+## 6. Endpoint Response Body Types
+
+Endpoints select response serialization mode via `rctx.Response(Body)`:
+
+- `Body = []const u8`: normal `Content-Length` response.
+- `Body = [][]const u8`: vectored body, still `Content-Length`.
+- `Body = zhttp.response.BodyStream`: chunked response (`transfer-encoding: chunked`).
+
+Chunked example:
+
+```zig
+const StreamEp = struct {
+    pub const Info: zhttp.router.EndpointInfo = .{};
+
+    pub fn call(comptime rctx: zhttp.ReqCtx, req: rctx.T()) !rctx.Response(zhttp.response.BodyStream) {
+        _ = req;
+        return .{
+            .status = .ok,
+            .body = .{ .writeFn = struct {
+                fn write(cw: *zhttp.response.ChunkedWriter) std.Io.Writer.Error!void {
+                    try cw.writeAll("part-a");
+                    try cw.writeAll("part-b");
+                }
+            }.write },
+        };
+    }
+};
+```
+
 Recommended validation commands:
 
 ```sh
@@ -327,4 +365,3 @@ zig build examples-check
 zig build -Doptimize=ReleaseFast test
 zig build -Doptimize=ReleaseFast examples-check
 ```
-

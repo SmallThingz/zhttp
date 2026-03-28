@@ -93,6 +93,29 @@ exe.root_module.addImport("zhttp", zhttp_dep.module("zhttp"));
 - Route patterns support both segment params (`/users/{id}`) and trailing named globs (`/static/{*path}`).
 - Typed request accessors include `req.header(...)`, `req.queryParam(...)`, `req.paramValue(...)`, and `req.middlewareData(...)`.
 
+## 📨 Response Body Modes
+
+- `[]const u8` uses `Content-Length` (single contiguous body).
+- `[][]const u8` uses `Content-Length` (sum of segments, written via vectored I/O).
+- `zhttp.response.BodyStream` uses `Transfer-Encoding: chunked`.
+
+Chunked example shape:
+
+```zig
+pub fn call(comptime rctx: zhttp.ReqCtx, req: rctx.T()) !rctx.Response(zhttp.response.BodyStream) {
+    _ = req;
+    return .{
+        .status = .ok,
+        .body = .{ .writeFn = struct {
+            fn write(cw: *zhttp.response.ChunkedWriter) std.Io.Writer.Error!void {
+                try cw.writeAll("hello ");
+                try cw.writeAll("world");
+            }
+        }.write },
+    };
+}
+```
+
 ## 🧱 Built-In Middleware
 
 - `zhttp.middleware.Static`
@@ -155,6 +178,5 @@ zig build bench-server
 `zhttp` is intentionally focused on a small HTTP/1.1 server core.
 
 - Request parsing covers HTTP/1.0 and HTTP/1.1.
-- Responses are written as HTTP/1.1 with `Content-Length`.
+- Responses are written as HTTP/1.1 with either `Content-Length` or `Transfer-Encoding: chunked`.
 - Keep-alive and HEAD response semantics are handled.
-- Chunked responses are not implemented yet.

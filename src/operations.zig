@@ -4,6 +4,7 @@ const middleware = @import("middleware.zig");
 const router_mod = @import("router.zig");
 const util = @import("util.zig");
 
+/// Canonical route declaration type used by operation routers.
 pub const RouteDecl = router_mod.RouteDecl;
 
 fn routeTupleType(comptime n: usize) type {
@@ -66,6 +67,9 @@ fn totalAddedBudget(comptime ops: []const type, comptime base_route_count: usize
     return total;
 }
 
+/// Mutable compile-time route table helper used by operations.
+///
+/// `capacity` must cover base routes plus all routes an operations tuple may add.
 pub fn Router(comptime capacity: usize, comptime global_middlewares: []const type) type {
     return struct {
         const Self = @This();
@@ -365,7 +369,9 @@ pub fn apply(
     return comptime applyWithLen(out_len, routes_tuple, global_middlewares_tuple, operations_tuple);
 }
 
+/// Built-in operation that synthesizes CORS preflight `OPTIONS` routes.
 pub const Cors = @import("operations/cors.zig").Cors;
+/// Built-in operation that synthesizes static middleware mount routes.
 pub const Static = @import("operations/static.zig").Static;
 
 test "operations: add and remove routes" {

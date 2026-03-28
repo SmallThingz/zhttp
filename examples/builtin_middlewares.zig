@@ -73,8 +73,8 @@ const SrvT = zhttp.Server(.{
         StaticMw,
     },
     .operations = .{
-        zhttp.operations.Cors(CorsMw),
-        zhttp.operations.Static(StaticMw),
+        zhttp.operations.Cors,
+        zhttp.operations.Static,
     },
     .routes = .{
         zhttp.get("/public", public, .{}),

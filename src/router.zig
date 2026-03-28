@@ -28,7 +28,7 @@ pub const Action = enum {
 /// Any struct with a subset of these fields is accepted:
 /// - `headers: type`  Request header captures (see `zhttp.parse.*` parsers)
 /// - `query: type`    Query-string captures
-/// - `params: type`   Path param captures (parsed from `{name}` segments)
+/// - `params: type`   Path param captures (parsed from `{name}` and `{*name}` segments)
 /// - `middlewares: tuple` Per-route middleware types (same `call(...)` interface as global middlewares)
 ///
 /// Notes:
@@ -263,7 +263,7 @@ fn structFieldsToST(comptime T: type) []const req_ctx.ST {
     return out[0..];
 }
 
-const SegmentKind = enum { lit, param, glob };
+const SegmentKind = enum { lit, param, glob, glob_param };
 const Segment = struct {
     /// Stores `kind`.
     kind: SegmentKind,
@@ -306,7 +306,15 @@ fn compilePattern(comptime pattern: []const u8) Pattern {
                 glob = true;
             } else if (seg[0] == '{') {
                 if (seg[seg.len - 1] != '}') @compileError("param segment must end with '}'");
-                if (seg.len < 3) @compileError("param name cannot be empty");
+                const inner = seg[1 .. seg.len - 1];
+                if (inner.len == 0) @compileError("param name cannot be empty");
+                if (inner[0] == '*') {
+                    if (inner.len < 2) @compileError("glob param name cannot be empty");
+                    if (end != pattern.len) @compileError("named glob '{*name}' is only allowed as the last segment");
+                    glob = true;
+                } else if (std.mem.indexOfScalar(u8, inner, '*') != null) {
+                    @compileError("'*' is only allowed as '{*name}' for named trailing globs");
+                }
                 param_count += 1;
             } else {
                 if (std.mem.indexOfScalar(u8, seg, '*') != null) @compileError("'*' is only allowed as a full segment at the end");
@@ -327,7 +335,12 @@ fn compilePattern(comptime pattern: []const u8) Pattern {
             if (std.mem.eql(u8, seg, "*")) {
                 segs[si] = .{ .kind = .glob };
             } else if (seg[0] == '{') {
-                segs[si] = .{ .kind = .param, .param_index = pi };
+                const inner = seg[1 .. seg.len - 1];
+                if (inner[0] == '*') {
+                    segs[si] = .{ .kind = .glob_param, .param_index = pi };
+                } else {
+                    segs[si] = .{ .kind = .param, .param_index = pi };
+                }
                 pi += 1;
             } else {
                 segs[si] = .{ .kind = .lit, .lit = seg };
@@ -347,7 +360,12 @@ fn compilePattern(comptime pattern: []const u8) Pattern {
             const e = std.mem.indexOfScalarPos(u8, pattern, s, '/') orelse pattern.len;
             const seg = pattern[s..e];
             if (seg.len != 0 and seg[0] == '{') {
-                names[pi] = seg[1 .. seg.len - 1];
+                const inner = seg[1 .. seg.len - 1];
+                if (inner[0] == '*') {
+                    names[pi] = inner[1..];
+                } else {
+                    names[pi] = inner;
+                }
                 pi += 1;
             }
             s = e + 1;
@@ -382,6 +400,10 @@ fn matchPattern(p: Pattern, path: []u8, params_out: [][]u8) bool {
         if (seg.kind == .glob) {
             return true;
         }
+        if (seg.kind == .glob_param) {
+            params_out[seg.param_index] = if (path_i <= path.len) path[path_i..] else path[path.len..path.len];
+            return true;
+        }
 
         if (path_i > path.len) return false;
         const next_slash = std.mem.indexOfScalarPos(u8, path, path_i, '/') orelse path.len;
@@ -396,6 +418,7 @@ fn matchPattern(p: Pattern, path: []u8, params_out: [][]u8) bool {
                 params_out[seg.param_index] = part;
             },
             .glob => unreachable,
+            .glob_param => unreachable,
         }
 
         path_i = if (next_slash == path.len) path.len + 1 else next_slash + 1;
@@ -414,7 +437,7 @@ fn matchPatternNoCapture(p: Pattern, path: []u8) bool {
     var seg_index: usize = 0;
     while (seg_index < p.segments.len) : (seg_index += 1) {
         const seg = p.segments[seg_index];
-        if (seg.kind == .glob) {
+        if (seg.kind == .glob or seg.kind == .glob_param) {
             return true;
         }
 
@@ -429,6 +452,7 @@ fn matchPatternNoCapture(p: Pattern, path: []u8) bool {
             },
             .param => {},
             .glob => unreachable,
+            .glob_param => unreachable,
         }
 
         path_i = next_slash + 1;
@@ -1013,6 +1037,7 @@ pub fn Compiled(
 
 test "compilePattern glob only at end" {
     _ = compilePattern("/a/*");
+    _ = compilePattern("/a/{*rest}");
 }
 
 fn dispatchForTest(
@@ -1064,6 +1089,11 @@ test "router: exact + param + glob" {
                 return Res.text(200, "g");
             }
         }.h, .{}),
+        get("/ng/{*rest}", struct {
+            fn h() !Res {
+                return Res.text(200, "ng");
+            }
+        }.h, .{}),
     }, .{});
 
     var p0 = "/a".*;
@@ -1074,6 +1104,12 @@ test "router: exact + param + glob" {
 
     var p2 = "/g/anything/here".*;
     try std.testing.expectEqual(@as(?u16, 2), S.match("GET", p2[0..]));
+
+    var p3 = "/ng/a/b/c".*;
+    try std.testing.expectEqual(@as(?u16, 3), S.match("GET", p3[0..]));
+
+    var p4 = "/ng".*;
+    try std.testing.expectEqual(@as(?u16, 3), S.match("GET", p4[0..]));
 }
 
 test "router: trailing slash does not match exact literal" {
@@ -1288,6 +1324,30 @@ test "dispatch: path param percent-decodes" {
     var out: [256]u8 = undefined;
     const res = try dispatchForTest(S, {}, a, &r, line, out[0..]);
     try std.testing.expect(std.mem.endsWith(u8, out[0..res.len], "\r\n\r\na/b"));
+}
+
+test "dispatch: named glob captures and percent-decodes" {
+    const S = Compiled(void, .{
+        get("/g/{*rest}", struct {
+            fn h(req: anytype) !Res {
+                return Res.text(200, req.paramValue(.rest));
+            }
+        }.h, .{}),
+    }, .{});
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    var r = Io.Reader.fixed(
+        "GET /g/a%2Fb/c HTTP/1.1\r\n" ++
+            "\r\n",
+    );
+
+    const line = try request.parseRequestLineBorrowed(&r, 8 * 1024);
+    var out: [256]u8 = undefined;
+    const res = try dispatchForTest(S, {}, a, &r, line, out[0..]);
+    try std.testing.expect(std.mem.endsWith(u8, out[0..res.len], "\r\n\r\na/b/c"));
 }
 
 test "dispatch: typed path params via opts.params" {

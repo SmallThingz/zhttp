@@ -11,7 +11,7 @@
 //! Supported route option fields (all optional):
 //! - `.headers: type`    Header capture schema (header keys match case-insensitively; `_` matches `-`)
 //! - `.query: type`      Query capture schema (keys match exactly)
-//! - `.params: type`     Path param capture schema (for `{name}` segments; defaults to strings)
+//! - `.params: type`     Path param capture schema (for `{name}` / `{*name}` segments; defaults to strings)
 //! - `.middlewares: tuple` Per-route middleware types
 //! - `.upgrade_handler: fn(server, stream, r, w, line, res) void` (or `null`)
 //!   If set and the handler returns `101 Switching Protocols`, zhttp writes an upgrade response,
@@ -22,6 +22,7 @@
 //! - `.middlewares: tuple` (optional) global middleware types
 //! - `.routes: struct` (required) route registrations
 //! - `.operations: tuple` (optional) route operation types run at comptime in tuple order
+//!   Built-ins are `zhttp.operations.Cors` and `zhttp.operations.Static`.
 //! - `.config: struct` (optional) server config overrides
 //! - `.error_handler: fn(*Server, *std.Io.Writer, comptime ErrorSet: type, err: ErrorSet) router.Action` (optional)
 //!   fallback error handler for user handler/middleware errors; server parse/validation errors stay on the built-in `400`/`414`/`431` path
@@ -35,6 +36,8 @@
 //! - `fn(req: anytype) !zhttp.Res`
 //!
 //! When `.Context` is configured, it is available only via `req.ctx()`.
+//! Standard middleware signature types are exported at top-level:
+//! `zhttp.CorsSignature` and `zhttp.StaticSignature`.
 //!
 const std = @import("std");
 const builtin = @import("builtin");
@@ -47,6 +50,8 @@ pub const Res = response.Res;
 pub const Server = @import("server.zig").Server;
 pub const middleware = @import("middleware.zig");
 pub const operations = @import("operations.zig");
+pub const StaticSignature = middleware.StaticSignature;
+pub const CorsSignature = middleware.CorsSignature;
 
 pub const route = router.route;
 pub const get = router.get;

@@ -1,41 +1,42 @@
 const std = @import("std");
 const router = @import("../router.zig");
 const response = @import("../response.zig");
+const CorsSignature = @import("../middleware/cors.zig").CorsSignature;
 
-/// Auto-registers CORS preflight `OPTIONS` routes for each path that carries `Mw.Signature`.
-pub fn Cors(comptime Mw: type) type {
-    if (!@hasDecl(Mw, "Signature")) {
-        @compileError("operations.Cors(Mw) requires middleware type " ++ @typeName(Mw) ++ " to expose `pub const Signature = ...`");
+/// Built-in operation that auto-registers CORS preflight `OPTIONS` routes.
+///
+/// Any route path that is protected by a middleware exposing `CorsSignature`
+/// gets one synthetic `OPTIONS` route (if missing) with that middleware attached.
+pub const Cors = struct {
+    /// Upper bound used by the operations planner.
+    ///
+    /// In the worst case every base route can contribute one synthetic OPTIONS route.
+    pub fn maxAddedRoutes(comptime base_route_count: usize) usize {
+        return base_route_count;
     }
-    const Signature = Mw.Signature;
 
-    return struct {
-        pub fn maxAddedRoutes(comptime base_route_count: usize) usize {
-            return base_route_count;
-        }
+    fn defaultOptionsHandler(_: anytype) !response.Res {
+        return response.Res.text(404, "not found");
+    }
 
-        fn defaultOptionsHandler(_: anytype) !response.Res {
-            return response.Res.text(404, "not found");
-        }
+    fn onGroup(comptime r: anytype, group: anytype) void {
+        if (group.indices.len == 0) return;
+        if (r.hasMethodPath("OPTIONS", group.path)) return;
 
-        fn onGroup(comptime r: anytype, group: anytype) void {
-            if (group.indices.len == 0) return;
-            if (r.hasMethodPath("OPTIONS", group.path)) return;
+        const selected_mw = r.firstMiddlewareWithSignature(group.indices[0], CorsSignature) orelse
+            @compileError("operations.Cors: expected at least one middleware matching signature " ++ @typeName(CorsSignature));
 
-            const selected_mw = r.firstMiddlewareWithSignature(group.indices[0], Signature) orelse
-                @compileError("operations.Cors: expected at least one middleware matching signature " ++ @typeName(Signature));
+        r.add(router.options(group.path, defaultOptionsHandler, .{
+            .middlewares = .{selected_mw},
+        }));
+    }
 
-            r.add(router.options(group.path, defaultOptionsHandler, .{
-                .middlewares = .{selected_mw},
-            }));
-        }
-
-        pub fn operation(comptime r: anytype) void {
-            const indices = r.filterBySignature(Signature);
-            r.forEachPathGroup(indices, onGroup);
-        }
-    };
-}
+    /// Applies the operation to the mutable compile-time route table.
+    pub fn operation(comptime r: anytype) void {
+        const indices = r.filterBySignature(CorsSignature);
+        r.forEachPathGroup(indices, onGroup);
+    }
+};
 
 test "cors operation adds one OPTIONS route per matched path" {
     const ops = @import("../operations.zig");
@@ -58,7 +59,7 @@ test "cors operation adds one OPTIONS route per matched path" {
                 return Res.text(200, "ok");
             }
         }.h, .{}),
-    }, .{}, .{Cors(Mw)});
+    }, .{}, .{Cors});
 
     const fields = @typeInfo(@TypeOf(out)).@"struct".fields;
     var options_a: usize = 0;

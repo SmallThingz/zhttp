@@ -332,7 +332,7 @@ pub fn Server(comptime def: anytype) type {
             blk: switch (Action.@"continue") {
                 .@"continue" => {
                     const a = arena.allocator();
-                    defer arena.reset(.{ .retain_with_limit = config.arena_reset_limit });
+                    defer _ = arena.reset(.{ .retain_with_limit = config.arena_reset_limit });
 
                     const line = request.parseRequestLineBorrowed(&sr.interface, Conf.max_request_line) catch |err| {
                         continue :blk switch (err) {

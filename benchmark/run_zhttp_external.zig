@@ -97,5 +97,5 @@ pub fn main(init: std.process.Init) !void {
         .warmup = cfg.warmup,
         .full_request = cfg.full_request,
     };
-    try scripts.writeBenchmarkSnapshotAndSyncReadme(init.io, allocator, root, readme_cfg, result);
+    try scripts.writeBenchmarkSnapshotAndSyncFetch(init.io, allocator, root, readme_cfg, result);
 }

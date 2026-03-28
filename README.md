@@ -67,7 +67,7 @@ Add as a dependency:
 ```bash
 <!-- README_FETCH:START -->
 
-zig fetch --save git+https://github.com/SmallThingz/zhttp?ref=9e770185ea8e5c18efc37a95651434a0a12d6e89
+zig fetch --save git+https://github.com/SmallThingz/zhttp?ref=b375cd105e63e5127fd93d1fc8625b7cee4b0d61
 <!-- README_FETCH:END -->
 ```
 

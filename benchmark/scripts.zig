@@ -1328,7 +1328,7 @@ fn syncReadmeComparisonSummary(io: std.Io, allocator: std.mem.Allocator, root: [
 }
 
 /// Writes benchmark snapshot and refreshes README fetch section.
-pub fn writeBenchmarkSnapshotAndSyncReadme(
+pub fn writeBenchmarkSnapshotAndSyncFetch(
     io: std.Io,
     allocator: std.mem.Allocator,
     root: []const u8,

@@ -57,6 +57,15 @@ pub fn Expect(comptime opts: ExpectOptions) type {
             },
         };
 
+        fn reject(comptime ReqT: type, req: ReqT) Res {
+            const base = req.baseMut();
+            base.body_kind = .none;
+            base.body_remaining = 0;
+            var res = Res.text(reject_status, reject_body);
+            res.close = true;
+            return res;
+        }
+
         /// Executes Expect-header validation for the current request.
         pub fn call(comptime rctx: ReqCtx, req: rctx.T()) !Res {
             const state = req.middlewareData(info_name);
@@ -66,21 +75,13 @@ pub fn Expect(comptime opts: ExpectOptions) type {
             const base = req.baseMut();
             if (is100Continue(expect_value)) {
                 if (!allow_without_body and base.body_kind == .none) {
-                    base.body_kind = .none;
-                    base.body_remaining = 0;
-                    var res = Res.text(reject_status, reject_body);
-                    res.close = true;
-                    return res;
+                    return reject(@TypeOf(req), req);
                 }
                 state.approved = true;
                 return rctx.next(req);
             }
 
-            base.body_kind = .none;
-            base.body_remaining = 0;
-            var res = Res.text(reject_status, reject_body);
-            res.close = true;
-            return res;
+            return reject(@TypeOf(req), req);
         }
 
         /// Overrides request body readers to emit interim `100 Continue` once.

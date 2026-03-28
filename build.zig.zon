@@ -5,14 +5,12 @@
     .minimum_zig_version = "0.16.0-dev.2736+3b515fbed",
     .dependencies = .{
         .libzstd = .{
-            .url = "git+https://github.com/SmallThingz/libzstd.zig?ref=main#c3e66e93999f4f4535038929a86a2d989f21590e",
-            .hash = "libzstd-0.0.0-PLY9QDBZAAD41i_FA348lzH4UXbmUkbwX2iaqdJmrL1E",
-            .lazy = true,
+            .url = "git+https://github.com/SmallThingz/libzstd.zig#8b9001aec24a0fe56b21a43e12748550db15a867",
+            .hash = "libzstd-0.0.0-PLY9QAZZAABES4IxVp539V9gbapWIllLH3ATHJ0TM8G_",
         },
         .libbrotli = .{
-            .url = "git+https://github.com/SmallThingz/libbrotli.zig?ref=main#d0656e076d4876b70f752072ff66234b0849bae9",
-            .hash = "libbrotli-0.0.0-JbJ8NUN0AADS1EkFPK9Qli1b5zip2C-66PVAdtgJUyez",
-            .lazy = true,
+            .url = "git+https://github.com/SmallThingz/libbrotli.zig#29644d78a9e91250123c1f97c9d946308ea04f48",
+            .hash = "libbrotli-0.0.0-JbJ8NRZ0AABZq0a6UGj9DlojkBsicF0oEoGW79Jlr5mh",
         },
         .zwebsocket = .{
             .url = "git+https://github.com/SmallThingz/zws?ref=main#5156f86baeabd8047d506cd2a5a9530a39d6169a",

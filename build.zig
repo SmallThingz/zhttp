@@ -58,6 +58,7 @@ fn discoverExamples(b: *std.Build, allocator: std.mem.Allocator) ![]Example {
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
+    const static_libc = b.option(bool, "static_libc", "Link libc statically (default: true)") orelse true;
     const mod = b.addModule("zhttp", .{
         .root_source_file = b.path("src/root.zig"),
         .target = target,
@@ -66,25 +67,19 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
-    const zstd_dep = b.lazyDependency("libzstd", .{
+    const zstd_dep = b.dependency("libzstd", .{
         .target = target,
         .optimize = optimize,
-        .static_libc = false,
+        .static_libc = static_libc,
     });
-    const brotli_dep = b.lazyDependency("libbrotli", .{
+    const brotli_dep = b.dependency("libbrotli", .{
         .target = target,
         .optimize = optimize,
-        .static_libc = false,
+        .static_libc = static_libc,
     });
 
-    const zstd_mod = if (zstd_dep) |dep|
-        dep.module("libzstd")
-    else
-        @panic("missing 'libzstd' dependency; run `zig fetch --save git+https://github.com/SmallThingz/libzstd.zig?ref=main`");
-    const brotli_mod = if (brotli_dep) |dep|
-        dep.module("libbrotli")
-    else
-        @panic("missing 'libbrotli' dependency; run `zig fetch --save git+https://github.com/SmallThingz/libbrotli.zig?ref=main`");
+    const zstd_mod = zstd_dep.module("libzstd");
+    const brotli_mod = brotli_dep.module("libbrotli");
     mod.addImport("libzstd", zstd_mod);
     mod.addImport("libbrotli", brotli_mod);
 

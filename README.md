@@ -67,7 +67,7 @@ Add as a dependency:
 ```bash
 <!-- README_FETCH:START -->
 
-zig fetch --save git+https://github.com/SmallThingz/zhttp?ref=e30d0f12abaa2376f4297512382dffd0e6e41799
+zig fetch --save git+https://github.com/SmallThingz/zhttp?ref=17f882def2f462b71eb8bc2d18bb0ccede3d6793
 <!-- README_FETCH:END -->
 ```
 
@@ -171,8 +171,8 @@ Config: host=`127.0.0.1` path=`/plaintext` conns=16 iters=200000 warmup=10000 fu
 
 | Target | req/s | ns/req | relative |
 |---|---:|---:|---:|
-| zhttp | 708098.87 | 1412.20 | 0.984x vs faf |
-| faf | 719266.03 | 1390.30 | 1.016x vs zhttp |
+| zhttp | 662053.84 | 1510.50 | 1.144x vs faf |
+| faf | 578520.64 | 1728.50 | 0.874x vs zhttp |
 
 No benchmark transport errors were reported.
 

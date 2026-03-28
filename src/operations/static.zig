@@ -45,10 +45,11 @@ test "static operation adds GET/HEAD mount routes" {
 
     const out = ops.apply(.{
         router.get("/x", struct {
-            fn h() !Res {
+            pub fn call(comptime _: @import("../req_ctx.zig").ReqCtx, req: anytype) !Res {
+                _ = req;
                 return Res.text(200, "ok");
             }
-        }.h, .{}),
+        }, .{}),
     }, .{Mw}, .{Static});
 
     const fields = @typeInfo(@TypeOf(out)).@"struct".fields;

@@ -16,6 +16,7 @@
 //! - `.upgrade_handler: fn(server, stream, r, w, line, res) void` (or `null`)
 //!   If set and the handler returns `101 Switching Protocols`, zhttp writes an upgrade response,
 //!   calls this function, and returns `.upgraded` (the upgrade handler owns connection lifecycle).
+//!   Use `zhttp.upgrade.responseFor` / `zhttp.upgrade.websocketResponse` to build 101 responses.
 //!
 //! Server definition fields (for `Server(.{ ... })`):
 //! - `.Context: type` (optional) user context exposed through `req.ctx()`
@@ -26,15 +27,13 @@
 //! - `.config: struct` (optional) server config overrides
 //! - `.error_handler: fn(*Server, *std.Io.Writer, comptime ErrorSet: type, err: ErrorSet) router.Action` (optional)
 //!   fallback error handler for user handler/middleware errors; server parse/validation errors stay on the built-in `400`/`414`/`431` path
-//! - `.not_found_handler: fn(...) !Res` (optional) fallback-handler override for route misses
+//! - `.not_found_handler: type` (optional) fallback endpoint type override for route misses
 //! - `.not_found_options: struct` (optional) request options for the fallback handler
 //!
 //! ## Endpoint Shape
 //!
 //! Preferred route endpoint shape:
 //! - `type` exposing `pub fn call(comptime rctx: zhttp.ReqCtx, req: rctx.T()) !zhttp.Res`
-//!
-//! Legacy function handlers are still accepted for compatibility.
 //!
 //! When `.Context` is configured, it is available only via `req.ctx()`.
 //! Standard middleware signature types are exported at top-level:
@@ -45,6 +44,7 @@ const builtin = @import("builtin");
 pub const parse = @import("parse.zig");
 pub const request = @import("request.zig");
 pub const response = @import("response.zig");
+pub const upgrade = @import("upgrade.zig");
 pub const router = @import("router.zig");
 
 pub const Res = response.Res;
@@ -133,6 +133,7 @@ test {
     _ = @import("parse.zig");
     _ = @import("request.zig");
     _ = @import("response.zig");
+    _ = @import("upgrade.zig");
     _ = @import("router.zig");
     _ = @import("server.zig");
     _ = @import("middleware.zig");

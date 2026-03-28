@@ -22,14 +22,16 @@ fn usage() void {
     , .{});
 }
 
-fn echo(comptime rctx: ReqCtx, req: rctx.T()) !zhttp.Res {
-    const body = try req.bodyAll(1024 * 1024);
-    return zhttp.Res.text(200, body);
-}
+const Echo = struct {
+    pub fn call(comptime rctx: ReqCtx, req: rctx.T()) !zhttp.Res {
+        const body = try req.bodyAll(1024 * 1024);
+        return zhttp.Res.text(200, body);
+    }
+};
 
 const SrvT = zhttp.Server(.{
     .routes = .{
-        zhttp.post("/echo", echo, .{}),
+        zhttp.post("/echo", Echo, .{}),
     },
 });
 

@@ -411,20 +411,22 @@ test "operations: add and remove routes" {
         pub const MaxAddedRoutes: usize = 1;
         pub fn operation(comptime r: anytype) void {
             r.add(router_mod.get("/b", struct {
-                fn h() !@import("response.zig").Res {
+                pub fn call(comptime _: @import("req_ctx.zig").ReqCtx, req: anytype) !@import("response.zig").Res {
+                    _ = req;
                     return @import("response.zig").Res.text(200, "b");
                 }
-            }.h, .{}));
+            }, .{}));
             _ = r.remove(0);
         }
     };
 
     const out = apply(.{
         router_mod.get("/a", struct {
-            fn h() !@import("response.zig").Res {
+            pub fn call(comptime _: @import("req_ctx.zig").ReqCtx, req: anytype) !@import("response.zig").Res {
+                _ = req;
                 return @import("response.zig").Res.text(200, "a");
             }
-        }.h, .{}),
+        }, .{}),
     }, .{}, .{Ops});
 
     const fields = @typeInfo(@TypeOf(out)).@"struct".fields;
@@ -438,30 +440,33 @@ test "operations: order is tuple order and later ops see latest table" {
         pub const MaxAddedRoutes: usize = 1;
         pub fn operation(comptime r: anytype) void {
             r.add(router_mod.get("/later", struct {
-                fn h() !Res {
+                pub fn call(comptime _: @import("req_ctx.zig").ReqCtx, req: anytype) !Res {
+                    _ = req;
                     return Res.text(200, "later");
                 }
-            }.h, .{}));
+            }, .{}));
         }
     };
     const OpB = struct {
         pub fn operation(comptime r: anytype) void {
             if (r.hasMethodPath("GET", "/later")) {
                 _ = r.replace(0, router_mod.get("/first-replaced", struct {
-                    fn h() !Res {
+                    pub fn call(comptime _: @import("req_ctx.zig").ReqCtx, req: anytype) !Res {
+                        _ = req;
                         return Res.text(200, "first");
                     }
-                }.h, .{}));
+                }, .{}));
             }
         }
     };
 
     const out = apply(.{
         router_mod.get("/first", struct {
-            fn h() !Res {
+            pub fn call(comptime _: @import("req_ctx.zig").ReqCtx, req: anytype) !Res {
+                _ = req;
                 return Res.text(200, "first");
             }
-        }.h, .{}),
+        }, .{}),
     }, .{}, .{ OpA, OpB });
 
     const fields = @typeInfo(@TypeOf(out)).@"struct".fields;

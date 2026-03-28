@@ -259,9 +259,14 @@ pub fn Static(comptime opts: StaticOptions) type {
             .name = info_name,
             .header = if (etag_enabled) StaticHeaders else null,
         };
+        const Endpoint = struct {
+            pub fn call(comptime _: ReqCtx, req: anytype) !Res {
+                return serve(req);
+            }
+        };
         const OperationRoutes = .{
-            router.get(pattern, handler, .{ .headers = StaticHeaders }),
-            router.head(pattern, handler, .{ .headers = StaticHeaders }),
+            router.get(pattern, Endpoint, .{ .headers = StaticHeaders }),
+            router.head(pattern, Endpoint, .{ .headers = StaticHeaders }),
         };
 
         pub fn operationRoutes() @TypeOf(OperationRoutes) {
@@ -271,10 +276,6 @@ pub fn Static(comptime opts: StaticOptions) type {
         /// Handles a middleware invocation for the current request context.
         pub fn call(comptime rctx: ReqCtx, req: rctx.T()) !Res {
             return rctx.next(req);
-        }
-
-        fn handler(req: anytype) !Res {
-            return serve(req);
         }
 
         fn resolveGlobParamName(comptime route_pattern: []const u8) []const u8 {

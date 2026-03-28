@@ -15,9 +15,12 @@ pub const Cors = struct {
         return base_route_count;
     }
 
-    fn defaultOptionsHandler(_: anytype) !response.Res {
-        return response.Res.text(404, "not found");
-    }
+    const DefaultOptionsEndpoint = struct {
+        pub fn call(comptime _: @import("../req_ctx.zig").ReqCtx, req: anytype) !response.Res {
+            _ = req;
+            return response.Res.text(404, "not found");
+        }
+    };
 
     fn onGroup(comptime r: anytype, group: anytype) void {
         if (group.indices.len == 0) return;
@@ -26,7 +29,7 @@ pub const Cors = struct {
         const selected_mw = r.firstMiddlewareWithSignature(group.indices[0], CorsSignature) orelse
             @compileError("operations.Cors: expected at least one middleware matching signature " ++ @typeName(CorsSignature));
 
-        r.add(router.options(group.path, defaultOptionsHandler, .{
+        r.add(router.options(group.path, DefaultOptionsEndpoint, .{
             .middlewares = .{selected_mw},
         }));
     }
@@ -45,20 +48,23 @@ test "cors operation adds one OPTIONS route per matched path" {
 
     const out = ops.apply(.{
         router.get("/a", struct {
-            fn h() !Res {
+            pub fn call(comptime _: @import("../req_ctx.zig").ReqCtx, req: anytype) !Res {
+                _ = req;
                 return Res.text(200, "ok");
             }
-        }.h, .{ .middlewares = .{Mw} }),
+        }, .{ .middlewares = .{Mw} }),
         router.post("/a", struct {
-            fn h() !Res {
+            pub fn call(comptime _: @import("../req_ctx.zig").ReqCtx, req: anytype) !Res {
+                _ = req;
                 return Res.text(200, "ok");
             }
-        }.h, .{ .middlewares = .{Mw} }),
+        }, .{ .middlewares = .{Mw} }),
         router.get("/b", struct {
-            fn h() !Res {
+            pub fn call(comptime _: @import("../req_ctx.zig").ReqCtx, req: anytype) !Res {
+                _ = req;
                 return Res.text(200, "ok");
             }
-        }.h, .{}),
+        }, .{}),
     }, .{}, .{Cors});
 
     const fields = @typeInfo(@TypeOf(out)).@"struct".fields;

@@ -24,7 +24,8 @@ fn usage() void {
         \\
         \\Notes:
         \\  - HTTP handshake validation is done in userspace via zwebsocket.
-        \\  - The connection is upgraded manually using route .upgrade_handler.
+        \\  - `zhttp.upgrade.websocketResponse(...)` builds the 101 websocket response.
+        \\  - route .upgrade_handler owns upgraded connection lifecycle.
         \\
     , .{});
 }
@@ -50,62 +51,40 @@ const WsHeaders = struct {
     x_auth: zhttp.parse.Optional(zhttp.parse.String),
 };
 
-fn handshakeResponse(comptime rctx: ReqCtx, req: rctx.T()) !zhttp.Res {
-    const auth = req.header(.x_auth) orelse return zhttp.Res.text(401, "missing x-auth\n");
-    if (!std.mem.eql(u8, auth, "secret")) return zhttp.Res.text(403, "bad x-auth\n");
+const Handshake = struct {
+    pub fn call(comptime rctx: ReqCtx, req: rctx.T()) !zhttp.Res {
+        const auth = req.header(.x_auth) orelse return zhttp.Res.text(401, "missing x-auth\n");
+        if (!std.mem.eql(u8, auth, "secret")) return zhttp.Res.text(403, "bad x-auth\n");
 
-    const hs_req: zws.ServerHandshakeRequest = .{
-        .method = req.method,
-        .is_http_11 = req.baseConst().version == .http11,
-        .connection = req.header(.connection),
-        .upgrade = req.header(.upgrade),
-        .sec_websocket_key = req.header(.sec_websocket_key),
-        .sec_websocket_version = req.header(.sec_websocket_version),
-        .sec_websocket_protocol = req.header(.sec_websocket_protocol),
-        .sec_websocket_extensions = req.header(.sec_websocket_extensions),
-        .origin = req.header(.origin),
-        .host = req.header(.host),
-    };
+        const hs_req: zws.ServerHandshakeRequest = .{
+            .method = req.method,
+            .is_http_11 = req.baseConst().version == .http11,
+            .connection = req.header(.connection),
+            .upgrade = req.header(.upgrade),
+            .sec_websocket_key = req.header(.sec_websocket_key),
+            .sec_websocket_version = req.header(.sec_websocket_version),
+            .sec_websocket_protocol = req.header(.sec_websocket_protocol),
+            .sec_websocket_extensions = req.header(.sec_websocket_extensions),
+            .origin = req.header(.origin),
+            .host = req.header(.host),
+        };
 
-    const accepted = zws.acceptServerHandshake(hs_req, .{}) catch |err| switch (err) {
-        error.UnsupportedWebSocketVersion => return .{
-            .status = @enumFromInt(426),
-            .headers = &.{.{ .name = "sec-websocket-version", .value = "13" }},
-            .body = "unsupported websocket version\n",
-        },
-        else => return zhttp.Res.text(400, "bad websocket handshake\n"),
-    };
+        const accepted = zws.acceptServerHandshake(hs_req, .{}) catch |err| switch (err) {
+            error.UnsupportedWebSocketVersion => return .{
+                .status = @enumFromInt(426),
+                .headers = &.{.{ .name = "sec-websocket-version", .value = "13" }},
+                .body = "unsupported websocket version\n",
+            },
+            else => return zhttp.Res.text(400, "bad websocket handshake\n"),
+        };
 
-    const a = req.allocator();
-    const accept_key = try a.dupe(u8, accepted.accept_key[0..]);
-
-    var header_count: usize = 3;
-    if (accepted.selected_subprotocol != null) header_count += 1;
-    if (accepted.selected_extensions != null) header_count += 1;
-
-    const headers = try a.alloc(zhttp.response.Header, header_count);
-    var n: usize = 0;
-    headers[n] = .{ .name = "connection", .value = "Upgrade" };
-    n += 1;
-    headers[n] = .{ .name = "upgrade", .value = "websocket" };
-    n += 1;
-    headers[n] = .{ .name = "sec-websocket-accept", .value = accept_key };
-    n += 1;
-    if (accepted.selected_subprotocol) |sp| {
-        headers[n] = .{ .name = "sec-websocket-protocol", .value = sp };
-        n += 1;
+        const client_key = req.header(.sec_websocket_key) orelse unreachable;
+        return zhttp.upgrade.websocketResponse(req.allocator(), client_key, .{
+            .subprotocol = accepted.selected_subprotocol,
+            .extensions = accepted.selected_extensions,
+        });
     }
-    if (accepted.selected_extensions) |ext| {
-        headers[n] = .{ .name = "sec-websocket-extensions", .value = ext };
-        n += 1;
-    }
-
-    return .{
-        .status = .switching_protocols,
-        .headers = headers[0..n],
-        .body = "",
-    };
-}
+};
 
 fn closeForProtocolError(conn: *zws.ServerConn, w: *Io.Writer, err: anyerror) void {
     const code: ?u16 = switch (err) {
@@ -158,7 +137,7 @@ fn onUpgrade(
 
 const Server = zhttp.Server(.{
     .routes = .{
-        zhttp.get("/ws", handshakeResponse, .{
+        zhttp.get("/ws", Handshake, .{
             .headers = WsHeaders,
             .upgrade_handler = onUpgrade,
         }),

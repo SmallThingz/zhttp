@@ -22,21 +22,23 @@ fn usage() void {
     , .{});
 }
 
-fn plaintext(comptime rctx: ReqCtx, req: rctx.T()) !zhttp.Res {
-    _ = req;
-    return .{
-        .status = .ok,
-        .headers = &.{
-            .{ .name = "Server", .value = "zhttp" },
-            .{ .name = "Content-Type", .value = "text/plain" },
-        },
-        .body = "Hello, World!",
-    };
-}
+const Plaintext = struct {
+    pub fn call(comptime rctx: ReqCtx, req: rctx.T()) !zhttp.Res {
+        _ = req;
+        return .{
+            .status = .ok,
+            .headers = &.{
+                .{ .name = "Server", .value = "zhttp" },
+                .{ .name = "Content-Type", .value = "text/plain" },
+            },
+            .body = "Hello, World!",
+        };
+    }
+};
 
 const SrvT = zhttp.Server(.{
     .routes = .{
-        zhttp.get("/plaintext", plaintext, .{}),
+        zhttp.get("/plaintext", Plaintext, .{}),
     },
 });
 

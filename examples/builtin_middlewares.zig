@@ -23,11 +23,13 @@ fn usage() void {
     , .{});
 }
 
-fn public(comptime rctx: ReqCtx, req: rctx.T()) !zhttp.Res {
-    const rid = req.middlewareDataConst("rid").value[0..];
-    const body = try std.fmt.allocPrint(req.allocator(), "public rid={s}\n", .{rid});
-    return zhttp.Res.text(200, body);
-}
+const Public = struct {
+    pub fn call(comptime rctx: ReqCtx, req: rctx.T()) !zhttp.Res {
+        const rid = req.middlewareDataConst("rid").value[0..];
+        const body = try std.fmt.allocPrint(req.allocator(), "public rid={s}\n", .{rid});
+        return zhttp.Res.text(200, body);
+    }
+};
 
 fn readResponse(r: *std.Io.Reader, allocator: std.mem.Allocator) !struct { head: []u8, body: []u8 } {
     var header_buf: std.ArrayList(u8) = .empty;
@@ -77,7 +79,7 @@ const SrvT = zhttp.Server(.{
         zhttp.operations.Static,
     },
     .routes = .{
-        zhttp.get("/public", public, .{}),
+        zhttp.get("/public", Public, .{}),
     },
 });
 

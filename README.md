@@ -82,7 +82,6 @@ exe.root_module.addImport("zhttp", zhttp_dep.module("zhttp"));
 - Route helpers: `zhttp.get`, `post`, `put`, `delete`, `patch`, `head`, `options`, and `zhttp.route(...)`.
 - Route options: `.headers`, `.query`, `.params`, `.middlewares`, `.upgrade_handler`.
 - Preferred route endpoint shape: `type` exposing `pub fn call(comptime rctx: zhttp.ReqCtx, req: rctx.T()) !zhttp.Res`.
-- Legacy function handlers are still accepted for compatibility.
 - `.upgrade_handler` is route-local and optional (`null` by default). If present and the route returns `101 Switching Protocols`, zhttp writes the upgrade response and calls `fn(server, stream, r, w, line, res) void`; that path returns `zhttp.router.Action.upgraded` and the upgrade handler owns connection close/lifecycle.
 - Standard middleware signatures are available at top-level as `zhttp.CorsSignature`.
 - Header capture keys match case-insensitively, and `_` in field names matches `-` in incoming headers.

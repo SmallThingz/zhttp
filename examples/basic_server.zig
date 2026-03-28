@@ -19,33 +19,39 @@ fn usage() void {
     , .{});
 }
 
-fn health(comptime rctx: ReqCtx, req: rctx.T()) !zhttp.Res {
-    _ = req;
-    return zhttp.Res.text(200, "ok");
-}
+const Health = struct {
+    pub fn call(comptime rctx: ReqCtx, req: rctx.T()) !zhttp.Res {
+        _ = req;
+        return zhttp.Res.text(200, "ok");
+    }
+};
 
-fn hello(comptime rctx: ReqCtx, req: rctx.T()) !zhttp.Res {
-    const name_opt = req.queryParam(.name) orelse "world";
-    const body = try std.fmt.allocPrint(req.allocator(), "hello {s}\n", .{name_opt});
-    return zhttp.Res.text(200, body);
-}
+const Hello = struct {
+    pub fn call(comptime rctx: ReqCtx, req: rctx.T()) !zhttp.Res {
+        const name_opt = req.queryParam(.name) orelse "world";
+        const body = try std.fmt.allocPrint(req.allocator(), "hello {s}\n", .{name_opt});
+        return zhttp.Res.text(200, body);
+    }
+};
 
-fn user(comptime rctx: ReqCtx, req: rctx.T()) !zhttp.Res {
-    const id = req.paramValue(.id);
-    const host = req.header(.host) orelse "(no host)";
-    const body = try std.fmt.allocPrint(req.allocator(), "id={d} host={s}\n", .{ id, host });
-    return zhttp.Res.text(200, body);
-}
+const User = struct {
+    pub fn call(comptime rctx: ReqCtx, req: rctx.T()) !zhttp.Res {
+        const id = req.paramValue(.id);
+        const host = req.header(.host) orelse "(no host)";
+        const body = try std.fmt.allocPrint(req.allocator(), "id={d} host={s}\n", .{ id, host });
+        return zhttp.Res.text(200, body);
+    }
+};
 
 const SrvT = zhttp.Server(.{
     .routes = .{
-        zhttp.get("/health", health, .{}),
-        zhttp.get("/hello", hello, .{
+        zhttp.get("/health", Health, .{}),
+        zhttp.get("/hello", Hello, .{
             .query = struct {
                 name: zhttp.parse.Optional(zhttp.parse.String),
             },
         }),
-        zhttp.get("/users/{id}", user, .{
+        zhttp.get("/users/{id}", User, .{
             .headers = struct {
                 host: zhttp.parse.Optional(zhttp.parse.String),
             },

@@ -14,16 +14,12 @@ pub const TimeoutOptions = struct {
     clock: Io.Clock = .awake,
     /// Absolute timeout duration.
     ///
-    /// If provided, this takes precedence over `ms` and `timeout_ms`.
+    /// If provided, this takes precedence over `ms`.
     duration: ?Io.Duration = null,
     /// Timeout in milliseconds.
     ///
     /// Used only when `duration` is null.
     ms: ?i64 = null,
-    /// Backward-compatible alias for `ms`.
-    ///
-    /// Used only when both `duration` and `ms` are null.
-    timeout_ms: ?i64 = null,
 };
 
 /// Enforces a wall-clock request timeout around downstream middleware/handler execution.
@@ -35,10 +31,8 @@ pub fn Timeout(comptime opts: TimeoutOptions) type {
         d
     else if (opts.ms) |ms|
         Io.Duration.fromMilliseconds(ms)
-    else if (opts.timeout_ms) |ms|
-        Io.Duration.fromMilliseconds(ms)
     else
-        @compileError("Timeout requires .duration or .ms/.timeout_ms");
+        @compileError("Timeout requires .duration or .ms");
 
     const store: bool = opts.name != null;
     const DataT = if (store) struct {

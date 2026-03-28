@@ -65,27 +65,10 @@ fn asciiLower(c: u8) u8 {
     return if (c >= 'A' and c <= 'Z') c + 32 else c;
 }
 
-fn asciiEqIgnoreCase(a: []const u8, b: []const u8) bool {
-    if (a.len != b.len) return false;
-    for (a, b) |ac, bc| {
-        if (asciiLower(ac) != asciiLower(bc)) return false;
-    }
-    return true;
-}
-
 fn fnv1a64(bytes: []const u8) u64 {
     var h: u64 = 0xcbf29ce484222325;
     for (bytes) |b| {
         h ^= b;
-        h *%= 0x100000001b3;
-    }
-    return h;
-}
-
-fn fnv1a64Lower(bytes: []const u8) u64 {
-    var h: u64 = 0xcbf29ce484222325;
-    for (bytes) |b| {
-        h ^= asciiLower(b);
         h *%= 0x100000001b3;
     }
     return h;
@@ -222,13 +205,6 @@ pub fn Lookup(comptime T: type, comptime kind: LookupKind) type {
             return null;
         }
     };
-}
-
-fn structFieldIndex(comptime T: type, comptime name: []const u8) usize {
-    inline for (structFields(T), 0..) |f, i| {
-        if (std.mem.eql(u8, f.name, name)) return i;
-    }
-    @compileError("no field named '" ++ name ++ "' in " ++ @typeName(T));
 }
 
 pub fn mergeStructs(comptime A: type, comptime B: type) type {

@@ -21,11 +21,6 @@ pub const Action = enum {
     upgraded,
 };
 
-pub const ST = struct {
-    name: []const u8,
-    T: type,
-};
-
 /// Route options passed at comptime to `route`, `get`, `post`, etc.
 ///
 /// Any struct with a subset of these fields is accepted:
@@ -289,33 +284,6 @@ fn optionsField(
 ) @TypeOf(if (@hasField(@TypeOf(opts), name)) @field(opts, name) else default) {
     if (@hasField(@TypeOf(opts), name)) return @field(opts, name);
     return default;
-}
-
-fn tupleTypesSlice(comptime tuple: anytype) []const type {
-    const fields = comptime @typeInfo(@TypeOf(tuple)).@"struct".fields;
-    const arr: [fields.len]type = comptime blk: {
-        var out: [fields.len]type = undefined;
-        for (fields, 0..) |f, i| {
-            out[i] = @field(tuple, f.name);
-        }
-        break :blk out;
-    };
-    return arr[0..];
-}
-
-fn structTypeToST(comptime T: type) []const ST {
-    const fields = comptime parse.structFields(T);
-    const arr: [fields.len]ST = comptime blk: {
-        var out: [fields.len]ST = undefined;
-        for (fields, 0..) |f, i| {
-            out[i] = .{
-                .name = f.name,
-                .T = f.type,
-            };
-        }
-        break :blk out;
-    };
-    return arr[0..];
 }
 
 fn middlewareInfo(comptime Mw: type) MiddlewareInfo {
@@ -790,284 +758,6 @@ fn ExactMap(comptime entries: anytype, comptime n: usize) type {
                 pos = (pos + 1) & mask;
             }
             return null;
-        }
-    };
-}
-
-fn RequestContext(
-    comptime BaseReq: type,
-    comptime handler_fn: anytype,
-    comptime middlewares: []const type,
-    comptime path_specs: []const ST,
-    comptime query_specs: []const ST,
-    comptime header_specs: []const ST,
-    comptime middleware_context_specs: []const ST,
-) type {
-    return struct {
-        const Self = @This();
-        const HandlerFn = @TypeOf(handler_fn);
-
-        comptime {
-            _ = path_specs;
-            _ = query_specs;
-            _ = header_specs;
-            _ = middleware_context_specs;
-            const info = @typeInfo(HandlerFn);
-            if (info != .@"fn") {
-                @compileError("handler must be a function");
-            }
-            const params = info.@"fn".params;
-            if (params.len > 2) {
-                @compileError("handler must be fn(req) !Res, fn(ctx, req) !Res, or fn(comptime rctx, req) !Res");
-            }
-        }
-
-        idx: usize,
-
-        fn withIdx(comptime self: Self, comptime new_idx: usize) Self {
-            _ = self;
-            return .{ .idx = new_idx };
-        }
-
-        fn mwFieldName(comptime name: @EnumLiteral()) []const u8 {
-            const field_name = @tagName(name);
-            const CtxT = @TypeOf(@as(*BaseReq, undefined).mwCtxConst().*);
-            if (!@hasField(CtxT, field_name)) {
-                @compileError("unknown middleware context field '" ++ field_name ++ "'");
-            }
-            return field_name;
-        }
-
-        fn mwFieldType(comptime name: @EnumLiteral()) type {
-            const CtxT = @TypeOf(@as(*BaseReq, undefined).mwCtxConst().*);
-            return @FieldType(CtxT, mwFieldName(name));
-        }
-
-        pub fn T(comptime rctx: Self) type {
-            const Ctx = rctx;
-            return struct {
-                _req: *BaseReq,
-
-                const Req = @This();
-                pub const method: []const u8 = BaseReq.method;
-                pub const path: []const u8 = BaseReq.path;
-
-                pub fn fromBase(req: *BaseReq) Req {
-                    return .{ ._req = req };
-                }
-
-                pub fn allocator(self: Req) Allocator {
-                    return Ctx.call("allocator", .{self});
-                }
-
-                pub fn io(self: Req) Io {
-                    return Ctx.call("io", .{self});
-                }
-
-                pub fn arena(self: Req) Allocator {
-                    return Ctx.call("arena", .{self});
-                }
-
-                pub fn reader(self: Req) ?*Io.Reader {
-                    return Ctx.call("reader", .{self});
-                }
-
-                pub fn base(self: Req) *request.Base {
-                    return Ctx.call("base", .{self});
-                }
-
-                pub fn baseConst(self: Req) *const request.Base {
-                    return Ctx.call("baseConst", .{self});
-                }
-
-                pub fn header(self: Req, comptime field: @EnumLiteral()) @TypeOf(@as(*BaseReq, undefined).header(field)) {
-                    return Ctx.call("header", .{ self, field });
-                }
-
-                pub fn queryParam(self: Req, comptime field: @EnumLiteral()) @TypeOf(@as(*BaseReq, undefined).queryParam(field)) {
-                    return Ctx.call("queryParam", .{ self, field });
-                }
-
-                pub fn paramValue(self: Req, comptime field: @EnumLiteral()) @TypeOf(@as(*BaseReq, undefined).paramValue(field)) {
-                    return Ctx.call("paramValue", .{ self, field });
-                }
-
-                pub fn mwCtxMut(self: Req, comptime name: @EnumLiteral()) *Ctx.mwFieldType(name) {
-                    return Ctx.call("mwCtxMut", .{ self, name });
-                }
-
-                pub fn mwCtxConst(self: Req, comptime name: @EnumLiteral()) *const Ctx.mwFieldType(name) {
-                    return Ctx.call("mwCtxConst", .{ self, name });
-                }
-
-                pub fn middlewareData(self: Req, comptime name: @EnumLiteral()) *Ctx.mwFieldType(name) {
-                    return Ctx.call("middlewareData", .{ self, name });
-                }
-
-                pub fn middlewareDataConst(self: Req, comptime name: @EnumLiteral()) *const Ctx.mwFieldType(name) {
-                    return Ctx.call("middlewareDataConst", .{ self, name });
-                }
-
-                pub fn bodyAll(self: Req, max_bytes: usize) ![]const u8 {
-                    return Ctx.call("bodyAll", .{ self, max_bytes });
-                }
-
-                pub fn body(self: Req, max_bytes: usize) ![]const u8 {
-                    return Ctx.call("body", .{ self, max_bytes });
-                }
-
-                pub fn discardUnreadBody(self: Req) !void {
-                    return Ctx.call("discardUnreadBody", .{self});
-                }
-
-                pub fn keepAlive(self: Req) bool {
-                    return Ctx.call("keepAlive", .{self});
-                }
-            };
-        }
-
-        fn reqBasePtr(req_any: anytype) *BaseReq {
-            return switch (@typeInfo(@TypeOf(req_any))) {
-                .pointer => req_any.*._req,
-                else => req_any._req,
-            };
-        }
-
-        fn rebindReq(comptime self: Self, req_any: anytype) self.T() {
-            return self.T().fromBase(reqBasePtr(req_any));
-        }
-
-        fn callBaseImpl(comptime self: Self, comptime func_name: []const u8, params: anytype) @TypeOf(blk: {
-            _ = self;
-            if (comptime std.mem.eql(u8, func_name, "allocator")) break :blk params[0]._req.allocator();
-            if (comptime std.mem.eql(u8, func_name, "io")) break :blk params[0]._req.io();
-            if (comptime std.mem.eql(u8, func_name, "arena")) break :blk params[0]._req.arena();
-            if (comptime std.mem.eql(u8, func_name, "reader")) break :blk params[0]._req.reader();
-            if (comptime std.mem.eql(u8, func_name, "base")) break :blk params[0]._req.base();
-            if (comptime std.mem.eql(u8, func_name, "baseConst")) break :blk params[0]._req.baseConst();
-            if (comptime std.mem.eql(u8, func_name, "header")) break :blk params[0]._req.header(params[1]);
-            if (comptime std.mem.eql(u8, func_name, "queryParam")) break :blk params[0]._req.queryParam(params[1]);
-            if (comptime std.mem.eql(u8, func_name, "paramValue")) break :blk params[0]._req.paramValue(params[1]);
-            if (comptime std.mem.eql(u8, func_name, "mwCtxMut") or std.mem.eql(u8, func_name, "middlewareData")) {
-                const field_name = mwFieldName(params[1]);
-                break :blk &@field(params[0]._req.mwCtxMut().*, field_name);
-            }
-            if (comptime std.mem.eql(u8, func_name, "mwCtxConst") or std.mem.eql(u8, func_name, "middlewareDataConst")) {
-                const field_name = mwFieldName(params[1]);
-                break :blk &@field(params[0]._req.mwCtxConst().*, field_name);
-            }
-            if (comptime std.mem.eql(u8, func_name, "bodyAll") or std.mem.eql(u8, func_name, "body")) {
-                break :blk params[0]._req.bodyAll(params[1]);
-            }
-            if (comptime std.mem.eql(u8, func_name, "discardUnreadBody")) break :blk params[0]._req.discardUnreadBody();
-            if (comptime std.mem.eql(u8, func_name, "keepAlive")) break :blk params[0]._req.keepAlive();
-            @compileError("unknown request function '" ++ func_name ++ "'");
-        }) {
-            _ = self;
-            if (comptime std.mem.eql(u8, func_name, "allocator")) return params[0]._req.allocator();
-            if (comptime std.mem.eql(u8, func_name, "io")) return params[0]._req.io();
-            if (comptime std.mem.eql(u8, func_name, "arena")) return params[0]._req.arena();
-            if (comptime std.mem.eql(u8, func_name, "reader")) return params[0]._req.reader();
-            if (comptime std.mem.eql(u8, func_name, "base")) return params[0]._req.base();
-            if (comptime std.mem.eql(u8, func_name, "baseConst")) return params[0]._req.baseConst();
-            if (comptime std.mem.eql(u8, func_name, "header")) return params[0]._req.header(params[1]);
-            if (comptime std.mem.eql(u8, func_name, "queryParam")) return params[0]._req.queryParam(params[1]);
-            if (comptime std.mem.eql(u8, func_name, "paramValue")) return params[0]._req.paramValue(params[1]);
-            if (comptime std.mem.eql(u8, func_name, "mwCtxMut") or std.mem.eql(u8, func_name, "middlewareData")) {
-                const field_name = mwFieldName(params[1]);
-                return &@field(params[0]._req.mwCtxMut().*, field_name);
-            }
-            if (comptime std.mem.eql(u8, func_name, "mwCtxConst") or std.mem.eql(u8, func_name, "middlewareDataConst")) {
-                const field_name = mwFieldName(params[1]);
-                return &@field(params[0]._req.mwCtxConst().*, field_name);
-            }
-            if (comptime std.mem.eql(u8, func_name, "bodyAll") or std.mem.eql(u8, func_name, "body")) {
-                return params[0]._req.bodyAll(params[1]);
-            }
-            if (comptime std.mem.eql(u8, func_name, "discardUnreadBody")) return params[0]._req.discardUnreadBody();
-            if (comptime std.mem.eql(u8, func_name, "keepAlive")) return params[0]._req.keepAlive();
-            @compileError("unknown request function '" ++ func_name ++ "'");
-        }
-
-        fn callBase(comptime self: Self, comptime func_name: []const u8, params: anytype) @TypeOf(callBaseImpl(self, func_name, params)) {
-            return callBaseImpl(self, func_name, params);
-        }
-
-        fn call(comptime self: Self, comptime func_name: []const u8, params: anytype) @TypeOf(callBase(self, func_name, params)) {
-            return callBase(self, func_name, params);
-        }
-
-        fn callHandler(comptime self: Self, req: self.T()) !Res {
-            const info = @typeInfo(HandlerFn).@"fn";
-            const params = info.params;
-            if (params.len == 2) {
-                if (params[0].type) |pt| {
-                    if (pt == @TypeOf(self)) return @call(.auto, handler_fn, .{ self, req });
-                    if (pt == void) return @call(.auto, handler_fn, .{ {}, req });
-                }
-                @compileError("unsupported 2-arg handler signature");
-            }
-            if (params.len == 1) {
-                if (params[0].type) |pt| {
-                    if (pt == @TypeOf(req)) return @call(.auto, handler_fn, .{req});
-                }
-                @compileError("1-arg handler must accept req");
-            }
-            if (params.len == 0) return @call(.auto, handler_fn, .{});
-            @compileError("handler must be fn(), fn(req), fn(ctx), fn(ctx, req), or fn(comptime rctx, req)");
-        }
-
-        fn callMiddleware(comptime self: Self, comptime Mw: type, req: self.T()) !Res {
-            if (!@hasDecl(Mw, "call")) {
-                @compileError("middleware " ++ @typeName(Mw) ++ " missing call");
-            }
-            const fn_info = @typeInfo(@TypeOf(Mw.call));
-            if (fn_info != .@"fn") @compileError("middleware call must be a function");
-            const params = fn_info.@"fn".params;
-            if (params.len == 2) {
-                return @call(.auto, Mw.call, .{ self, req });
-            }
-            if (params.len == 4 or params.len == 5) {
-                const Next = struct {
-                    pub fn call(_: @This(), _: anytype, next_req: anytype) !Res {
-                        return self.next(self.rebindReq(next_req));
-                    }
-                };
-                if (params.len == 4) {
-                    return Mw.call(Next, Next{}, {}, req);
-                }
-                if (middlewareHasStoredData(Mw)) {
-                    const field_name = comptime middlewareName(Mw);
-                    const data_ptr = &@field(req._req.mwCtxMut().*, field_name);
-                    return Mw.call(Next, Next{}, {}, req, data_ptr);
-                }
-                var temp = initMiddlewareData(Mw);
-                return Mw.call(Next, Next{}, {}, req, &temp);
-            }
-            @compileError("middleware call must be new-style (rctx, req) or legacy-style (Next, next, ctx, req[, data])");
-        }
-
-        fn invoke(comptime self: Self, req_any: anytype) !Res {
-            const req = self.rebindReq(req_any);
-            if (self.idx < middlewares.len) {
-                const Mw = middlewares[self.idx];
-                return callMiddleware(self, Mw, req);
-            }
-            if (self.idx == middlewares.len) {
-                return callHandler(self, req);
-            }
-            @compileError("ReqCtx idx out of range");
-        }
-
-        pub fn run(comptime self: Self, req: self.T()) !Res {
-            return self.invoke(req);
-        }
-
-        pub fn next(comptime self: Self, req: self.T()) !Res {
-            if (self.idx >= middlewares.len) {
-                @compileError("ReqCtx.next can only be used by middleware");
-            }
-            return self.withIdx(self.idx + 1).invoke(req);
         }
     };
 }
@@ -1715,6 +1405,55 @@ test "middleware Needs: supports 'headers: type = ...' form" {
             }
         }.h, .{}),
     }, .{Mw});
+}
+
+test "middleware Info: supports header/query/path/data captures" {
+    const Mw = struct {
+        pub const Data = struct {
+            seen: bool = false,
+        };
+        pub const Info = @import("middleware.zig").MiddlewareInfo{
+            .name = .auth,
+            .data = Data,
+            .path = struct {
+                id: parse.Int(u32),
+            },
+            .query = struct {
+                q: parse.String,
+            },
+            .header = struct {
+                x_token: parse.String,
+            },
+        };
+
+        pub fn call(comptime Next: type, next: Next, _: void, req: anytype, data: *Data) !Res {
+            if (req.paramValue(.id) != 7) return Res.text(500, "bad-id");
+            if (!std.mem.eql(u8, req.queryParam(.q), "ok")) return Res.text(500, "bad-q");
+            if (!std.mem.eql(u8, req.header(.x_token), "token")) return Res.text(500, "bad-header");
+            data.seen = true;
+            return next.call({}, req);
+        }
+    };
+
+    const S = Compiled(void, .{
+        get("/u/{id}", struct {
+            fn h(_: void, req: anytype) !Res {
+                const auth = req.middlewareDataConst(.auth);
+                return Res.text(200, if (auth.seen) "ok" else "bad-data");
+            }
+        }.h, .{}),
+    }, .{Mw});
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    var r = Io.Reader.fixed("GET /u/7?q=ok HTTP/1.1\r\nX-Token: token\r\n\r\n");
+    const line = try request.parseRequestLineBorrowed(&r, 8 * 1024);
+    var out: [256]u8 = undefined;
+    const res = try dispatchForTest(S, {}, a, &r, line, out[0..]);
+    try std.testing.expectEqual(.@"continue", res.action);
+    try std.testing.expect(std.mem.endsWith(u8, out[0..res.len], "\r\n\r\nok"));
 }
 
 test "dispatch: pipelined request discards unread content-length body" {

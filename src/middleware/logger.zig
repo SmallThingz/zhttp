@@ -55,7 +55,6 @@ pub fn Logger(comptime opts: LoggerOptions) type {
     } else struct {};
 
     const Common = struct {
-        pub const Data = DataT;
         pub const info_name: []const u8 = if (store) opts.name.? else "logger";
         pub const Info = MiddlewareInfo{
             .name = info_name,
@@ -86,7 +85,6 @@ pub fn Logger(comptime opts: LoggerOptions) type {
 
     return struct {
         pub const Info = Common.Info;
-        pub const Data = Common.Data;
         pub fn call(comptime rctx: ReqCtx, req: rctx.T()) !Res {
             return Common.handle(rctx, req);
         }

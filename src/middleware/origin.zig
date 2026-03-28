@@ -237,8 +237,6 @@ pub fn Origin(comptime opts: OriginOptions) type {
             },
         };
 
-        pub const Data = DataT;
-
         fn handle(comptime rctx: ReqCtx, req: rctx.T()) !Res {
             const origin = req.header(.origin);
             const allowed = if (origin) |value| Matcher.contains(value) else allow_missing;
@@ -256,7 +254,6 @@ pub fn Origin(comptime opts: OriginOptions) type {
 
     return struct {
         pub const Info = Common.Info;
-        pub const Data = Common.Data;
 
         pub fn call(comptime rctx: ReqCtx, req: rctx.T()) !Res {
             return Common.handle(rctx, req);
@@ -366,7 +363,10 @@ test "origin middleware can allow missing origin and store decision" {
         .name = "origin",
     });
     const MwCtx = struct {
-        origin: Mw.Data = .{},
+        origin: struct {
+            allowed: bool = false,
+            missing: bool = false,
+        } = .{},
     };
     const ReqT = @import("../request.zig").Request(struct {
         origin: parse.Optional(parse.String),

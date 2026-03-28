@@ -146,8 +146,6 @@ pub fn Cors(comptime opts: CorsOptions) type {
             router.options("/*", defaultOptionsHandler, .{}),
         };
 
-        pub const Data = DataT;
-
         fn defaultOptionsHandler(req: anytype) !Res {
             _ = req;
             return Res.text(404, "not found");
@@ -319,7 +317,6 @@ pub fn Cors(comptime opts: CorsOptions) type {
         pub const Info = Common.Info;
         pub const register_routes = Common.register_routes;
         pub const Routes = Common.Routes;
-        pub const Data = Common.Data;
         pub fn call(comptime rctx: ReqCtx, req: rctx.T()) !Res {
             return Common.handle(rctx, req);
         }

@@ -49,7 +49,6 @@ pub fn Timeout(comptime opts: TimeoutOptions) type {
     } else struct {};
 
     const Common = struct {
-        pub const Data = DataT;
         pub const info_name: []const u8 = if (store) opts.name.? else "timeout";
         pub const Info = MiddlewareInfo{
             .name = info_name,
@@ -82,7 +81,6 @@ pub fn Timeout(comptime opts: TimeoutOptions) type {
 
     return struct {
         pub const Info = Common.Info;
-        pub const Data = Common.Data;
         pub fn call(comptime rctx: ReqCtx, req: rctx.T()) !Res {
             return Common.handle(rctx, req);
         }

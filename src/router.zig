@@ -74,6 +74,15 @@ fn validateRouteOptions(comptime opts: anytype) void {
     }
 }
 
+pub fn RouteDecl(comptime Handler: type, comptime Options: type) type {
+    return struct {
+        method: []const u8,
+        pattern: []const u8,
+        options: Options,
+        handler: Handler,
+    };
+}
+
 pub fn route(
     /// HTTP method enum literal, e.g. `.GET`.
     comptime method_lit: @EnumLiteral(),
@@ -82,7 +91,7 @@ pub fn route(
     comptime handler: anytype,
     /// Route options (see `zhttp/root.zig` docs). Use `.{}` for none.
     comptime opts: anytype,
-) @TypeOf(.{ .method = @tagName(method_lit), .pattern = pattern, .options = opts, .handler = handler }) {
+) RouteDecl(@TypeOf(handler), @TypeOf(opts)) {
     validateRouteOptions(opts);
     return .{
         .method = @tagName(method_lit),
@@ -92,25 +101,25 @@ pub fn route(
     };
 }
 
-pub fn get(comptime pattern: []const u8, comptime handler: anytype, comptime opts: anytype) @TypeOf(route(.GET, pattern, handler, opts)) {
+pub fn get(comptime pattern: []const u8, comptime handler: anytype, comptime opts: anytype) RouteDecl(@TypeOf(handler), @TypeOf(opts)) {
     return route(.GET, pattern, handler, opts);
 }
-pub fn post(comptime pattern: []const u8, comptime handler: anytype, comptime opts: anytype) @TypeOf(route(.POST, pattern, handler, opts)) {
+pub fn post(comptime pattern: []const u8, comptime handler: anytype, comptime opts: anytype) RouteDecl(@TypeOf(handler), @TypeOf(opts)) {
     return route(.POST, pattern, handler, opts);
 }
-pub fn put(comptime pattern: []const u8, comptime handler: anytype, comptime opts: anytype) @TypeOf(route(.PUT, pattern, handler, opts)) {
+pub fn put(comptime pattern: []const u8, comptime handler: anytype, comptime opts: anytype) RouteDecl(@TypeOf(handler), @TypeOf(opts)) {
     return route(.PUT, pattern, handler, opts);
 }
-pub fn delete(comptime pattern: []const u8, comptime handler: anytype, comptime opts: anytype) @TypeOf(route(.DELETE, pattern, handler, opts)) {
+pub fn delete(comptime pattern: []const u8, comptime handler: anytype, comptime opts: anytype) RouteDecl(@TypeOf(handler), @TypeOf(opts)) {
     return route(.DELETE, pattern, handler, opts);
 }
-pub fn patch(comptime pattern: []const u8, comptime handler: anytype, comptime opts: anytype) @TypeOf(route(.PATCH, pattern, handler, opts)) {
+pub fn patch(comptime pattern: []const u8, comptime handler: anytype, comptime opts: anytype) RouteDecl(@TypeOf(handler), @TypeOf(opts)) {
     return route(.PATCH, pattern, handler, opts);
 }
-pub fn head(comptime pattern: []const u8, comptime handler: anytype, comptime opts: anytype) @TypeOf(route(.HEAD, pattern, handler, opts)) {
+pub fn head(comptime pattern: []const u8, comptime handler: anytype, comptime opts: anytype) RouteDecl(@TypeOf(handler), @TypeOf(opts)) {
     return route(.HEAD, pattern, handler, opts);
 }
-pub fn options(comptime pattern: []const u8, comptime handler: anytype, comptime opts: anytype) @TypeOf(route(.OPTIONS, pattern, handler, opts)) {
+pub fn options(comptime pattern: []const u8, comptime handler: anytype, comptime opts: anytype) RouteDecl(@TypeOf(handler), @TypeOf(opts)) {
     return route(.OPTIONS, pattern, handler, opts);
 }
 
@@ -1037,7 +1046,7 @@ test "router: HEAD falls back to GET handler" {
     try std.testing.expectEqual(@as(?u16, 0), S.match("HEAD", p[0..]));
 }
 
-test "middleware Needs: supports 'headers: type = ...' form" {
+test "middleware Info: supports 'header: type = ...' form" {
     const Mw = struct {
         pub const Info = @import("middleware.zig").MiddlewareInfo{
             .name = "mw_needs",
@@ -1063,12 +1072,12 @@ test "middleware Needs: supports 'headers: type = ...' form" {
 
 test "middleware Info: supports header/query/path/data captures" {
     const Mw = struct {
-        pub const Data = struct {
+        const AuthData = struct {
             seen: bool = false,
         };
         pub const Info = @import("middleware.zig").MiddlewareInfo{
             .name = "auth",
-            .data = Data,
+            .data = AuthData,
             .path = struct {
                 id: parse.Int(u32),
             },
@@ -1357,7 +1366,7 @@ test "dispatch: typed path params with non-string parsers allocate zero" {
     try std.testing.expectEqual(@as(usize, 0), ca.alloc_calls);
 }
 
-test "dispatch: middleware Needs.params works" {
+test "dispatch: middleware Info.path works" {
     const RequireId = struct {
         pub const Info = @import("middleware.zig").MiddlewareInfo{
             .name = "require_id",
@@ -1394,10 +1403,10 @@ test "dispatch: middleware Needs.params works" {
 
 test "middleware data: set in middleware and handler access" {
     const Auth = struct {
-        pub const Data = struct { user_id: u32 = 0 };
+        const AuthData = struct { user_id: u32 = 0 };
         pub const Info = @import("middleware.zig").MiddlewareInfo{
             .name = "auth",
-            .data = Data,
+            .data = AuthData,
         };
 
         pub fn call(comptime rctx: ReqCtx, req: rctx.T()) !Res {

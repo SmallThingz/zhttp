@@ -39,7 +39,6 @@ pub fn RequestId(comptime opts: RequestIdOptions) type {
     } else struct {};
 
     const Common = struct {
-        pub const Data = DataT;
         pub const info_name: []const u8 = if (store) opts.name.? else "request_id";
         pub const Info = MiddlewareInfo{
             .name = info_name,
@@ -70,7 +69,6 @@ pub fn RequestId(comptime opts: RequestIdOptions) type {
 
     return struct {
         pub const Info = Common.Info;
-        pub const Data = Common.Data;
         pub fn call(comptime rctx: ReqCtx, req: rctx.T()) !Res {
             return Common.handle(rctx, req);
         }

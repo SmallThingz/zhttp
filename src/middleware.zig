@@ -15,6 +15,8 @@ pub const MiddlewareInfo = struct {
     header: ?type = null,
 };
 
+const EmptyTuple = std.meta.Tuple(&.{});
+
 fn tupleConcatValuesType(comptime a: anytype, comptime b: anytype) type {
     const la: usize = comptime util.tupleLen(a);
     const lb: usize = comptime util.tupleLen(b);
@@ -54,7 +56,7 @@ fn tupleConcatValues(comptime a: anytype, comptime b: anytype) tupleConcatValues
 
 fn tupleTailType(comptime t: anytype) type {
     const fields = @typeInfo(@TypeOf(t)).@"struct".fields;
-    if (fields.len <= 1) return @TypeOf(.{});
+    if (fields.len <= 1) return EmptyTuple;
     const OutFieldTypes = comptime blk: {
         var out: [fields.len - 1]type = undefined;
         for (fields[1..], 0..) |f, i| {
@@ -85,14 +87,14 @@ pub fn routesType(comptime mws: anytype) type {
     const info0 = @typeInfo(@TypeOf(mws));
     if (info0 != .@"struct" or !info0.@"struct".is_tuple) @compileError("middlewares must be a tuple");
     const fields = info0.@"struct".fields;
-    if (fields.len == 0) return @TypeOf(.{});
+    if (fields.len == 0) return EmptyTuple;
 
     const First = @field(mws, fields[0].name);
     const Rest = tupleTail(mws);
 
     const FirstRoutesT = comptime blk: {
-        if (!@hasDecl(First, "Routes")) break :blk @TypeOf(.{});
-        if (@hasDecl(First, "register_routes") and !First.register_routes) break :blk @TypeOf(.{});
+        if (!@hasDecl(First, "Routes")) break :blk EmptyTuple;
+        if (@hasDecl(First, "register_routes") and !First.register_routes) break :blk EmptyTuple;
         break :blk @TypeOf(First.Routes);
     };
     const RestRoutesT = routesType(Rest);
@@ -125,6 +127,12 @@ pub fn info(comptime Mw: type) MiddlewareInfo {
     }
     if (!@hasDecl(Mw, "call")) {
         @compileError("middleware " ++ @typeName(Mw) ++ " must expose `pub fn call(comptime rctx: ReqCtx, req: rctx.T()) !Res`");
+    }
+    if (@hasDecl(Mw, "Data")) {
+        @compileError("middleware " ++ @typeName(Mw) ++ " must not expose `Data`; use `Info.data` instead");
+    }
+    if (@hasDecl(Mw, "Needs")) {
+        @compileError("middleware " ++ @typeName(Mw) ++ " must not expose `Needs`; use `Info.path/query/header` instead");
     }
     const out = Mw.Info;
 

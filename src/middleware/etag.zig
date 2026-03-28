@@ -1,6 +1,7 @@
 const std = @import("std");
 
 const Res = @import("../response.zig").Res;
+const MiddlewareInfo = @import("../middleware.zig").MiddlewareInfo;
 const parse = @import("../parse.zig");
 const util = @import("util.zig");
 
@@ -40,14 +41,15 @@ pub fn Etag(comptime opts: anytype) type {
     const weak: bool = if (@hasField(@TypeOf(opts), "weak")) opts.weak else false;
 
     return struct {
-        pub const Needs = struct {
-            pub const headers = struct {
+        pub const Info = MiddlewareInfo{
+            .name = "etag",
+            .header = struct {
                 if_none_match: parse.Optional(parse.String),
-            };
+            },
         };
 
-        pub fn call(comptime Next: type, next: Next, req: anytype) !Res {
-            var res = try next.call(req);
+        pub fn call(comptime rctx: anytype, req: rctx.T()) !Res {
+            var res = try rctx.next(req);
             if (res.body.len == 0) return res;
             if (util.hasHeader(res.headers, "etag")) return res;
 
@@ -60,6 +62,10 @@ pub fn Etag(comptime opts: anytype) type {
 
             res.headers = try util.appendHeaders(req.allocator(), res.headers, &.{.{ .name = "etag", .value = tag }});
             return res;
+        }
+
+        pub fn Override(comptime _: anytype) type {
+            return struct {};
         }
     };
 }

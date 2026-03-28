@@ -22,8 +22,8 @@ fn usage() void {
     , .{});
 }
 
-fn public(req: anytype) !zhttp.Res {
-    const rid = req.middlewareDataConst(.rid).value[0..];
+fn public(comptime rctx: anytype, req: rctx.T()) !zhttp.Res {
+    const rid = req.middlewareDataConst("rid").value[0..];
     const body = try std.fmt.allocPrint(req.allocator(), "public rid={s}\n", .{rid});
     return zhttp.Res.text(200, body);
 }
@@ -59,7 +59,7 @@ const SrvT = zhttp.Server(.{
         zhttp.middleware.SecurityHeaders(.{}),
         zhttp.middleware.Cors(.{ .origins = &.{"http://example.com"} }),
         zhttp.middleware.Etag(.{}),
-        zhttp.middleware.RequestId(.{ .name = .rid }),
+        zhttp.middleware.RequestId(.{ .name = "rid" }),
         zhttp.middleware.Timeout(.{ .ms = 5000 }),
         zhttp.middleware.Compression(.{ .min_size = 999999 }),
         zhttp.middleware.Static(.{ .dir = "examples/static", .mount = "/static" }),

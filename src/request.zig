@@ -17,10 +17,6 @@ pub const Base = struct {
     reader: ?*Io.Reader = null,
 
     version: Version,
-    path_raw: []u8,
-    // Backing storage for query parsing. Values may be percent-decoded in place,
-    // so this is not guaranteed to remain identical to the original wire bytes.
-    query_raw: []u8,
 
     connection_close: bool = false,
 
@@ -52,13 +48,38 @@ fn trimSpaces(s: []const u8) []const u8 {
     return s[a..b];
 }
 
-fn middlewareContextFieldName(comptime Ctx: type, comptime name: @EnumLiteral()) []const u8 {
-    const wanted = @tagName(name);
+fn middlewareNameString(comptime name: anytype) []const u8 {
+    return switch (@typeInfo(@TypeOf(name))) {
+        .enum_literal => @tagName(name),
+        .pointer => |p| switch (p.size) {
+            .slice => blk: {
+                if (p.child != u8) @compileError("middleware name slice must be []const u8");
+                break :blk name;
+            },
+            .one => blk: {
+                const cinfo = @typeInfo(p.child);
+                if (cinfo != .array or cinfo.array.child != u8) {
+                    @compileError("middleware name pointer must point to a byte array/string literal");
+                }
+                break :blk name[0..cinfo.array.len];
+            },
+            else => @compileError("unsupported middleware name type"),
+        },
+        .array => |a| blk: {
+            if (a.child != u8) @compileError("middleware name array must be [N]u8");
+            break :blk name[0..a.len];
+        },
+        else => @compileError("middleware name must be enum literal or string"),
+    };
+}
+
+fn middlewareContextFieldName(comptime Ctx: type, comptime name: anytype) []const u8 {
+    const wanted = middlewareNameString(name);
     if (!@hasField(Ctx, wanted)) @compileError("unknown middleware name '" ++ wanted ++ "'");
     return wanted;
 }
 
-fn middlewareContextFieldType(comptime Ctx: type, comptime name: @EnumLiteral()) type {
+fn middlewareContextFieldType(comptime Ctx: type, comptime name: anytype) type {
     return @FieldType(Ctx, middlewareContextFieldName(Ctx, name));
 }
 
@@ -229,6 +250,7 @@ fn RequestPWithPatternExt(
         comptime path: []const u8 = route_pattern,
         comptime method: []const u8 = method_name,
         _base: Base,
+        _path: []u8,
         _ctx: CtxPtr,
         _mw_ctx: MwCtx,
         _headers: Headers = parse.emptyStruct(Headers),
@@ -245,9 +267,8 @@ fn RequestPWithPatternExt(
                     .io = init_io,
                     .arena = init_arena,
                     .version = line.version,
-                    .path_raw = line.path,
-                    .query_raw = line.query,
                 },
+                ._path = line.path,
                 ._ctx = app_ctx,
                 ._mw_ctx = mw_ctx,
             };
@@ -383,12 +404,12 @@ fn RequestPWithPatternExt(
         }
 
         /// Get a pointer to middleware data by name, e.g. `req.middlewareData(.auth)`.
-        pub fn middlewareData(self: *Self, comptime name: @EnumLiteral()) *middlewareContextFieldType(MwCtx, name) {
+        pub fn middlewareData(self: *Self, comptime name: anytype) *middlewareContextFieldType(MwCtx, name) {
             return &@field(self._mw_ctx, middlewareContextFieldName(MwCtx, name));
         }
 
         /// Get a const pointer to middleware data by name, e.g. `req.middlewareDataConst(.auth)`.
-        pub fn middlewareDataConst(self: *const Self, comptime name: @EnumLiteral()) *const middlewareContextFieldType(MwCtx, name) {
+        pub fn middlewareDataConst(self: *const Self, comptime name: anytype) *const middlewareContextFieldType(MwCtx, name) {
             return &@field(self._mw_ctx, middlewareContextFieldName(MwCtx, name));
         }
 
@@ -396,10 +417,15 @@ fn RequestPWithPatternExt(
             return self._base.version == .http11 and !self._base.connection_close;
         }
 
+        pub fn rawPath(self: *const Self) []const u8 {
+            return self._path;
+        }
+
         pub fn parseParams(self: *Self, a: Allocator, params_in: []const []u8) !void {
             if (param_names.len == 0) return;
             std.debug.assert(params_in.len == param_names.len);
             // reset captures each request
+            parse.destroyStruct(&self._params, a);
             self._params = parse.emptyStruct(ParamsEffective);
             inline for (param_names, 0..) |pn, i| {
                 try @field(self._params, pn).parse(a, params_in[i]);
@@ -407,12 +433,15 @@ fn RequestPWithPatternExt(
             try parse.doneParsingStruct(&self._params, &([_]bool{true} ** param_names.len));
         }
 
-        pub fn parseQuery(self: *Self, a: Allocator) !void {
+        pub fn parseQuery(self: *Self, a: Allocator, query_raw: []u8) !void {
             if (QueryLookup.count == 0) return;
+            // reset captures each request
+            parse.destroyStruct(&self._query, a);
+            self._query = parse.emptyStruct(Query);
             var present: [QueryLookup.count]bool = .{false} ** QueryLookup.count;
 
             var i: usize = 0;
-            const q = self._base.query_raw;
+            const q = query_raw;
             while (i <= q.len) {
                 const amp = std.mem.indexOfScalarPos(u8, q, i, '&') orelse q.len;
                 const part = q[i..amp];
@@ -442,6 +471,7 @@ fn RequestPWithPatternExt(
             self._base.reader = r;
             if (HeaderLookup.count != 0) {
                 // reset captures each request
+                parse.destroyStruct(&self._headers, a);
                 self._headers = parse.emptyStruct(Headers);
             }
             var present: [HeaderLookup.count]bool = .{false} ** HeaderLookup.count;
@@ -774,7 +804,7 @@ test "query capture + decode" {
     var reqv = ReqT.init(gpa, std.testing.io, line, mw_ctx);
     defer reqv.deinit(gpa);
 
-    try reqv.parseQuery(gpa);
+    try reqv.parseQuery(gpa, line.query);
     try std.testing.expectEqualStrings("alice bob", reqv.queryParam(.name).?);
     try std.testing.expectEqual(@as(u32, 10), reqv.queryParam(.page).?);
 }
@@ -1113,7 +1143,7 @@ test "query: required missing rejected" {
     var reqv = ReqT.init(gpa, std.testing.io, line, mw_ctx);
     defer reqv.deinit(gpa);
 
-    try std.testing.expectError(error.MissingRequired, reqv.parseQuery(gpa));
+    try std.testing.expectError(error.MissingRequired, reqv.parseQuery(gpa, line.query));
 }
 
 test "query: invalid percent-encoding rejected" {
@@ -1136,7 +1166,7 @@ test "query: invalid percent-encoding rejected" {
     var reqv = ReqT.init(gpa, std.testing.io, line, mw_ctx);
     defer reqv.deinit(gpa);
 
-    try std.testing.expectError(error.InvalidPercentEncoding, reqv.parseQuery(gpa));
+    try std.testing.expectError(error.InvalidPercentEncoding, reqv.parseQuery(gpa, line.query));
 }
 
 test "query: repeated keys last-wins, SliceOf collects" {
@@ -1164,7 +1194,7 @@ test "query: repeated keys last-wins, SliceOf collects" {
         const mw_ctx: TestMwCtx = .{};
         var reqv = ReqLast.init(gpa, std.testing.io, line, mw_ctx);
         defer reqv.deinit(gpa);
-        try reqv.parseQuery(gpa);
+        try reqv.parseQuery(gpa, line.query);
         try std.testing.expectEqualStrings("two", reqv.queryParam(.k).?);
     }
 
@@ -1175,7 +1205,7 @@ test "query: repeated keys last-wins, SliceOf collects" {
         const mw_ctx: TestMwCtx = .{};
         var reqv = ReqList.init(gpa, std.testing.io, line, mw_ctx);
         defer reqv.deinit(gpa);
-        try reqv.parseQuery(gpa);
+        try reqv.parseQuery(gpa, line.query);
         const items = reqv.queryParam(.k);
         try std.testing.expectEqual(@as(usize, 2), items.len);
         try std.testing.expectEqualStrings("one", items[0].get());
@@ -1286,7 +1316,7 @@ test "parseQuery: key without '=' treated as empty value" {
     const mw_ctx: TestMwCtx = .{};
     var reqv = ReqT.init(gpa, std.testing.io, line, mw_ctx);
     defer reqv.deinit(gpa);
-    try reqv.parseQuery(gpa);
+    try reqv.parseQuery(gpa, line.query);
     try std.testing.expectEqualStrings("", reqv.queryParam(.k).?);
 }
 
@@ -1416,7 +1446,7 @@ test "fuzz: parseQuery" {
             const mw_ctx: TestMwCtx = .{};
             var reqv = ReqT.init(gpa, std.testing.io, line, mw_ctx);
             defer reqv.deinit(gpa);
-            _ = reqv.parseQuery(gpa) catch {};
+            _ = reqv.parseQuery(gpa, line.query) catch {};
         }
     }.testOne, .{ .corpus = corpus });
 }

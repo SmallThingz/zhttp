@@ -1,6 +1,7 @@
 const std = @import("std");
 
 const Res = @import("../response.zig").Res;
+const MiddlewareInfo = @import("../middleware.zig").MiddlewareInfo;
 
 const Io = std.Io;
 
@@ -34,40 +35,53 @@ pub fn Logger(comptime opts: anytype) type {
 
     const Common = struct {
         pub const Data = DataT;
+        pub const info_name: []const u8 = if (store) opts.name else "logger";
+        pub const Info = MiddlewareInfo{
+            .name = info_name,
+            .data = if (store) DataT else null,
+        };
 
-        fn handle(comptime Next: type, next: Next, req: anytype, data_opt: ?*DataT) !Res {
+        fn handle(comptime rctx: anytype, req: rctx.T()) !Res {
             const start = Io.Timestamp.now(req.io(), clock);
-            const res = try next.call(req);
+            const res = try rctx.next(req);
             const elapsed = start.untilNow(req.io(), clock);
 
             if (store) {
-                if (data_opt) |d| {
-                    d.start = start;
-                    d.elapsed = elapsed;
-                    d.status = res.status;
-                }
+                const d = req.middlewareData(info_name);
+                d.start = start;
+                d.elapsed = elapsed;
+                d.status = @intFromEnum(res.status);
             }
 
             if (log_fn) |f| {
-                @call(.auto, f, .{ req.method, req.baseConst().path_raw, @intFromEnum(res.status), elapsed });
+                @call(.auto, f, .{ req.method, req.rawPath(), @intFromEnum(res.status), elapsed });
             } else {
                 const ms = elapsed.toMilliseconds();
-                std.debug.print("{s} {s} {d} {d}ms\n", .{ req.method, req.baseConst().path_raw, res.status, ms });
+                std.debug.print("{s} {s} {d} {d}ms\n", .{ req.method, req.rawPath(), res.status, ms });
             }
             return res;
         }
     };
 
     return if (store) struct {
+        pub const Info = Common.Info;
         pub const Data = Common.Data;
-        pub const name = opts.name;
-        pub fn call(comptime Next: type, next: Next, req: anytype, data: *DataT) !Res {
-            return Common.handle(Next, next, req, data);
+        pub fn call(comptime rctx: anytype, req: rctx.T()) !Res {
+            return Common.handle(rctx, req);
+        }
+
+        pub fn Override(comptime _: anytype) type {
+            return struct {};
         }
     } else struct {
+        pub const Info = Common.Info;
         pub const Data = Common.Data;
-        pub fn call(comptime Next: type, next: Next, req: anytype) !Res {
-            return Common.handle(Next, next, req, null);
+        pub fn call(comptime rctx: anytype, req: rctx.T()) !Res {
+            return Common.handle(rctx, req);
+        }
+
+        pub fn Override(comptime _: anytype) type {
+            return struct {};
         }
     };
 }

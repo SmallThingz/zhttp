@@ -7,6 +7,7 @@ const Io = std.Io;
 const response = @import("response.zig");
 const request = @import("request.zig");
 const router = @import("router.zig");
+const middleware = @import("middleware.zig");
 const parse = @import("parse.zig");
 
 fn setTcpNoDelay(stream: *const std.Io.net.Stream) void {
@@ -64,7 +65,7 @@ pub fn Server(comptime def: anytype) type {
 
     const DefT = @TypeOf(def);
     const Middlewares = if (@hasField(DefT, "middlewares")) def.middlewares else .{};
-    const MiddlewareRoutes = router.middlewareRoutes(Middlewares);
+    const MiddlewareRoutes = middleware.routes(Middlewares);
     const Routes = router.mergeRoutes(def.routes, MiddlewareRoutes);
     const Compiled = router.Compiled(Context, Routes, Middlewares);
     const DefaultNotFound = struct {
@@ -231,8 +232,7 @@ pub fn Server(comptime def: anytype) type {
                     };
 
                     continue :blk (if (Compiled.match(line.method, line.path)) |idx| switch (idx) {
-                        inline 0...(Compiled.RouteCount - 1) => |c_idx|
-                            routeAction(c_idx)(self, &sr.interface, &sw.interface, &stream, line, a) catch |err| self.handleDispatchServerError(&sw.interface, err),
+                        inline 0...(Compiled.RouteCount - 1) => |c_idx| routeAction(c_idx)(self, &sr.interface, &sw.interface, &stream, line, a) catch |err| self.handleDispatchServerError(&sw.interface, err),
                         else => unreachable,
                     } else notFoundAction()(self, &sr.interface, &sw.interface, &stream, line, a) catch |err| self.handleDispatchServerError(&sw.interface, err));
                 },

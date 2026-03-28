@@ -2,6 +2,7 @@ const std = @import("std");
 
 const Res = @import("../response.zig").Res;
 const Header = @import("../response.zig").Header;
+const MiddlewareInfo = @import("../middleware.zig").MiddlewareInfo;
 const parse = @import("../parse.zig");
 const util = @import("util.zig");
 
@@ -42,14 +43,15 @@ pub fn Compression(comptime opts: anytype) type {
     const level: flate.Compress.Options = if (@hasField(@TypeOf(opts), "level")) opts.level else flate.Compress.Options.default;
 
     return struct {
-        pub const Needs = struct {
-            pub const headers = struct {
+        pub const Info = MiddlewareInfo{
+            .name = "compression",
+            .header = struct {
                 accept_encoding: parse.Optional(parse.String),
-            };
+            },
         };
 
-        pub fn call(comptime Next: type, next: Next, req: anytype) !Res {
-            var res = try next.call(req);
+        pub fn call(comptime rctx: anytype, req: rctx.T()) !Res {
+            var res = try rctx.next(req);
             if (res.body.len < min_size) return res;
             if (util.hasHeader(res.headers, "content-encoding")) return res;
 
@@ -73,6 +75,10 @@ pub fn Compression(comptime opts: anytype) type {
             res.headers = try util.appendHeaders(a, res.headers, extra_headers);
             res.body = compressed;
             return res;
+        }
+
+        pub fn Override(comptime _: anytype) type {
+            return struct {};
         }
     };
 }

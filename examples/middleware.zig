@@ -23,24 +23,31 @@ fn usage() void {
 }
 
 const Auth = struct {
-    pub const Needs = struct {
-        headers: type = struct {
+    pub const Info = zhttp.middleware.MiddlewareInfo{
+        .name = "auth",
+        .header = struct {
             authorization: zhttp.parse.Optional(zhttp.parse.String),
         },
     };
 
-    pub fn call(comptime Next: type, next: Next, req: anytype) !zhttp.Res {
+    pub fn call(comptime rctx: anytype, req: rctx.T()) !zhttp.Res {
         const auth = req.header(.authorization) orelse return zhttp.Res.text(401, "missing auth\n");
         if (!std.mem.eql(u8, auth, "bearer ok")) return zhttp.Res.text(403, "bad auth\n");
-        return try next.call(req);
+        return try rctx.next(req);
+    }
+
+    pub fn Override(comptime _: anytype) type {
+        return struct {};
     }
 };
 
-fn public() !zhttp.Res {
+fn public(comptime rctx: anytype, req: rctx.T()) !zhttp.Res {
+    _ = req;
     return zhttp.Res.text(200, "public\n");
 }
 
-fn private() !zhttp.Res {
+fn private(comptime rctx: anytype, req: rctx.T()) !zhttp.Res {
+    _ = req;
     return zhttp.Res.text(200, "private\n");
 }
 

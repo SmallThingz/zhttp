@@ -2,6 +2,7 @@ const std = @import("std");
 
 const Res = @import("../response.zig").Res;
 const Header = @import("../response.zig").Header;
+const MiddlewareInfo = @import("../middleware.zig").MiddlewareInfo;
 const util = @import("util.zig");
 
 pub fn SecurityHeaders(comptime opts: anytype) type {
@@ -16,8 +17,12 @@ pub fn SecurityHeaders(comptime opts: anytype) type {
     const corp: ?[]const u8 = if (@hasField(@TypeOf(opts), "cross_origin_resource_policy")) opts.cross_origin_resource_policy else null;
 
     return struct {
-        pub fn call(comptime Next: type, next: Next, req: anytype) !Res {
-            var res = try next.call(req);
+        pub const Info = MiddlewareInfo{
+            .name = "security_headers",
+        };
+
+        pub fn call(comptime rctx: anytype, req: rctx.T()) !Res {
+            var res = try rctx.next(req);
             const a = req.allocator();
 
             var hdrs: [9]Header = undefined;
@@ -63,6 +68,10 @@ pub fn SecurityHeaders(comptime opts: anytype) type {
             if (n == 0) return res;
             res.headers = try util.appendHeaders(a, res.headers, hdrs[0..n]);
             return res;
+        }
+
+        pub fn Override(comptime _: anytype) type {
+            return struct {};
         }
     };
 }

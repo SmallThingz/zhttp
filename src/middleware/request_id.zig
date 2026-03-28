@@ -2,6 +2,7 @@ const std = @import("std");
 
 const Res = @import("../response.zig").Res;
 const Header = @import("../response.zig").Header;
+const MiddlewareInfo = @import("../middleware.zig").MiddlewareInfo;
 const util = @import("util.zig");
 
 pub fn RequestId(comptime opts: anytype) type {
@@ -16,9 +17,14 @@ pub fn RequestId(comptime opts: anytype) type {
 
     const Common = struct {
         pub const Data = DataT;
+        pub const info_name: []const u8 = if (store) opts.name else "request_id";
+        pub const Info = MiddlewareInfo{
+            .name = info_name,
+            .data = if (store) DataT else null,
+        };
 
-        fn handle(comptime Next: type, next: Next, req: anytype, data_opt: ?*DataT) !Res {
-            var res = try next.call(req);
+        fn handle(comptime rctx: anytype, req: rctx.T()) !Res {
+            var res = try rctx.next(req);
             if (util.hasHeader(res.headers, header_name)) return res;
 
             var raw: [bytes]u8 = undefined;
@@ -27,11 +33,7 @@ pub fn RequestId(comptime opts: anytype) type {
             const a = req.allocator();
             var id_buf: []u8 = undefined;
             if (store) {
-                if (data_opt) |d| {
-                    id_buf = d.value[0..];
-                } else {
-                    id_buf = try a.alloc(u8, hex_len);
-                }
+                id_buf = req.middlewareData(info_name).value[0..];
             } else {
                 id_buf = try a.alloc(u8, hex_len);
             }
@@ -44,15 +46,24 @@ pub fn RequestId(comptime opts: anytype) type {
     };
 
     return if (store) struct {
+        pub const Info = Common.Info;
         pub const Data = Common.Data;
-        pub const name = opts.name;
-        pub fn call(comptime Next: type, next: Next, req: anytype, data: *DataT) !Res {
-            return Common.handle(Next, next, req, data);
+        pub fn call(comptime rctx: anytype, req: rctx.T()) !Res {
+            return Common.handle(rctx, req);
+        }
+
+        pub fn Override(comptime _: anytype) type {
+            return struct {};
         }
     } else struct {
+        pub const Info = Common.Info;
         pub const Data = Common.Data;
-        pub fn call(comptime Next: type, next: Next, req: anytype) !Res {
-            return Common.handle(Next, next, req, null);
+        pub fn call(comptime rctx: anytype, req: rctx.T()) !Res {
+            return Common.handle(rctx, req);
+        }
+
+        pub fn Override(comptime _: anytype) type {
+            return struct {};
         }
     };
 }

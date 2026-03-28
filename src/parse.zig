@@ -284,20 +284,21 @@ pub fn mergeStructsMany(comptime types_tuple: anytype) type {
     return acc;
 }
 
-/// Parse and store a required path-param string without allocating.
-///
-/// This is safe for path params because zhttp copies all path params into stable
-/// request-owned storage before parsing captures.
+/// Parse and store a required path-param string.
 pub const PathString = String;
 
 /// Parse and store a required UTF-8-ish string (no validation).
 pub const String = struct {
-    value: []const u8 = undefined,
+    value: []const u8 = "",
+    owned: ?[]u8 = null,
 
-    pub const empty: String = .{ .value = "" };
+    pub const empty: String = .{ .value = "", .owned = null };
 
-    pub fn parse(self: *String, _: Allocator, raw: []const u8) !void {
-        self.value = raw;
+    pub fn parse(self: *String, allocator: Allocator, raw: []const u8) !void {
+        const dup = try allocator.dupe(u8, raw);
+        if (self.owned) |old| allocator.free(old);
+        self.value = dup;
+        self.owned = dup;
     }
 
     pub fn doneParsing(_: *String, was_present: bool) !void {
@@ -308,8 +309,9 @@ pub const String = struct {
         return self.value;
     }
 
-    pub fn destroy(self: *String, _: Allocator) void {
-        self.* = .{ .value = "" };
+    pub fn destroy(self: *String, allocator: Allocator) void {
+        if (self.owned) |buf| allocator.free(buf);
+        self.* = .{ .value = "", .owned = null };
     }
 };
 
@@ -510,6 +512,18 @@ test "String: parse duplicates and destroy resets" {
     try std.testing.expectEqualStrings("hello", s.get());
     s.destroy(gpa);
     try std.testing.expectEqualStrings("", s.get());
+}
+
+test "String: parse owns copied bytes" {
+    var s: String = .{};
+    const gpa = std.testing.allocator;
+
+    var raw: [5]u8 = "hello".*;
+    try s.parse(gpa, raw[0..]);
+    raw[0] = 'j';
+    try std.testing.expectEqualStrings("hello", s.get());
+
+    s.destroy(gpa);
 }
 
 test "Optional(String): get returns null when missing" {

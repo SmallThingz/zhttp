@@ -12,7 +12,7 @@ Low-latency HTTP/1.1 server primitives for Zig with comptime routing, typed capt
 - 🧭 **Comptime route table**: define routes once with `zhttp.Server(.{ .routes = .{ ... } })`.
 - 🧠 **Typed request captures**: decode headers, query params, and path params with `zhttp.parse.*`.
 - 🪝 **Flexible handlers**: support no-arg, request-only, context-only, or context + request handlers.
-- 🧱 **Composable middleware**: mix global and per-route middleware with compile-time `Needs` merging.
+- 🧱 **Composable middleware**: mix global and per-route middleware with compile-time `Info` capture merging.
 - 📦 **Built-in middleware**: static files, CORS, logging, compression, timeout, ETag, request IDs, and security headers.
 - 🏎 **Tight hot path**: direct request parsing and response writing for low-overhead HTTP/1.1 servers.
 - 🧪 **Runnable examples + benchmarks**: example servers and a small benchmark harness live in-tree.
@@ -31,9 +31,10 @@ Minimal server:
 const std = @import("std");
 const zhttp = @import("zhttp");
 
-fn hello(req: anytype) !zhttp.Res {
+fn hello(comptime rctx: anytype, req: rctx.T()) !zhttp.Res {
     const name = req.queryParam(.name) orelse "world";
     const body = try std.fmt.allocPrint(req.allocator(), "hello {s}\n", .{name});
+    _ = rctx;
     return zhttp.Res.text(200, body);
 }
 

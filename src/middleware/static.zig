@@ -2,6 +2,7 @@ const std = @import("std");
 
 const Res = @import("../response.zig").Res;
 const Header = @import("../response.zig").Header;
+const MiddlewareInfo = @import("../middleware.zig").MiddlewareInfo;
 const parse = @import("../parse.zig");
 const router = @import("../router.zig");
 const urldecode = @import("../urldecode.zig");
@@ -93,14 +94,22 @@ pub fn Static(comptime opts: anytype) type {
     const StaticHeaders = if (etag_enabled) struct { if_none_match: parse.Optional(parse.String) } else struct {};
 
     return struct {
+        pub const Info = MiddlewareInfo{
+            .name = "static",
+            .header = if (etag_enabled) StaticHeaders else null,
+        };
         pub const register_routes = register_routes_opt;
         pub const Routes = .{
             router.get(pattern, handler, .{ .headers = StaticHeaders }),
             router.head(pattern, handler, .{ .headers = StaticHeaders }),
         };
 
-        pub fn call(comptime Next: type, next: Next, req: anytype) !Res {
-            return next.call(req);
+        pub fn call(comptime rctx: anytype, req: rctx.T()) !Res {
+            return rctx.next(req);
+        }
+
+        pub fn Override(comptime _: anytype) type {
+            return struct {};
         }
 
         fn handler(req: anytype) !Res {
@@ -108,7 +117,7 @@ pub fn Static(comptime opts: anytype) type {
         }
 
         fn serve(req: anytype) !Res {
-            var rel = req.baseConst().path_raw;
+            var rel = req.rawPath();
             if (!std.mem.startsWith(u8, rel, mount)) return Res.text(404, "not found");
             rel = rel[mount.len..];
             if (rel.len != 0 and rel[0] == '/') rel = rel[1..];

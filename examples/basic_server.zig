@@ -18,17 +18,18 @@ fn usage() void {
     , .{});
 }
 
-fn health() !zhttp.Res {
+fn health(comptime rctx: anytype, req: rctx.T()) !zhttp.Res {
+    _ = req;
     return zhttp.Res.text(200, "ok");
 }
 
-fn hello(req: anytype) !zhttp.Res {
+fn hello(comptime rctx: anytype, req: rctx.T()) !zhttp.Res {
     const name_opt = req.queryParam(.name) orelse "world";
     const body = try std.fmt.allocPrint(req.allocator(), "hello {s}\n", .{name_opt});
     return zhttp.Res.text(200, body);
 }
 
-fn user(req: anytype) !zhttp.Res {
+fn user(comptime rctx: anytype, req: rctx.T()) !zhttp.Res {
     const id = req.paramValue(.id);
     const host = req.header(.host) orelse "(no host)";
     const body = try std.fmt.allocPrint(req.allocator(), "id={d} host={s}\n", .{ id, host });

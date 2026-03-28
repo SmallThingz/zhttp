@@ -2,6 +2,7 @@ const std = @import("std");
 
 const parse = @import("../parse.zig");
 const Res = @import("../response.zig").Res;
+const MiddlewareInfo = @import("../middleware.zig").MiddlewareInfo;
 
 comptime {
     @setEvalBranchQuota(200_000);
@@ -232,44 +233,53 @@ pub fn Origin(comptime opts: anytype) type {
     } else struct {};
 
     const Common = struct {
-        pub const Needs = struct {
-            headers: type = struct {
+        pub const info_name: []const u8 = if (store) opts.name else "origin";
+        pub const Info = MiddlewareInfo{
+            .name = info_name,
+            .data = if (store) DataT else null,
+            .header = struct {
                 origin: parse.Optional(parse.String),
             },
         };
 
         pub const Data = DataT;
 
-        fn handle(comptime Next: type, next: Next, req: anytype, data_opt: ?*DataT) !Res {
+        fn handle(comptime rctx: anytype, req: rctx.T()) !Res {
             const origin = req.header(.origin);
             const allowed = if (origin) |value| Matcher.contains(value) else allow_missing;
 
             if (store) {
-                if (data_opt) |data| {
-                    data.allowed = allowed;
-                    data.missing = origin == null;
-                }
+                const data = req.middlewareData(info_name);
+                data.allowed = allowed;
+                data.missing = origin == null;
             }
 
             if (!allowed) return Res.text(reject_status, reject_body);
-            return next.call(req);
+            return rctx.next(req);
         }
     };
 
     return if (store) struct {
-        pub const Needs = Common.Needs;
+        pub const Info = Common.Info;
         pub const Data = Common.Data;
-        pub const name = opts.name;
 
-        pub fn call(comptime Next: type, next: Next, req: anytype, data: *DataT) !Res {
-            return Common.handle(Next, next, req, data);
+        pub fn call(comptime rctx: anytype, req: rctx.T()) !Res {
+            return Common.handle(rctx, req);
+        }
+
+        pub fn Override(comptime _: anytype) type {
+            return struct {};
         }
     } else struct {
-        pub const Needs = Common.Needs;
+        pub const Info = Common.Info;
         pub const Data = Common.Data;
 
-        pub fn call(comptime Next: type, next: Next, req: anytype) !Res {
-            return Common.handle(Next, next, req, null);
+        pub fn call(comptime rctx: anytype, req: rctx.T()) !Res {
+            return Common.handle(rctx, req);
+        }
+
+        pub fn Override(comptime _: anytype) type {
+            return struct {};
         }
     };
 }

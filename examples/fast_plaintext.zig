@@ -21,7 +21,8 @@ fn usage() void {
     , .{});
 }
 
-fn plaintext() !zhttp.Res {
+fn plaintext(comptime rctx: anytype, req: rctx.T()) !zhttp.Res {
+    _ = req;
     return .{
         .status = .ok,
         .headers = &.{

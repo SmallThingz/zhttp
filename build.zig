@@ -7,6 +7,10 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("src/root.zig"),
         .target = target,
     });
+    const zws_dep = b.lazyDependency("zwebsocket", .{
+        .target = target,
+        .optimize = optimize,
+    });
 
     const mod_tests = b.addTest(.{
         .root_module = b.createModule(.{
@@ -95,12 +99,13 @@ pub fn build(b: *std.Build) void {
     const examples_step = b.step("examples", "Build all examples");
     const examples_check_step = b.step("examples-check", "Run all examples with --smoke");
 
-    const examples = [_]struct { name: []const u8, path: []const u8 }{
-        .{ .name = "basic_server", .path = "examples/basic_server.zig" },
-        .{ .name = "middleware", .path = "examples/middleware.zig" },
-        .{ .name = "builtin_middlewares", .path = "examples/builtin_middlewares.zig" },
-        .{ .name = "echo_body", .path = "examples/echo_body.zig" },
-        .{ .name = "fast_plaintext", .path = "examples/fast_plaintext.zig" },
+    const examples = [_]struct { name: []const u8, path: []const u8, uses_zws: bool }{
+        .{ .name = "basic_server", .path = "examples/basic_server.zig", .uses_zws = false },
+        .{ .name = "middleware", .path = "examples/middleware.zig", .uses_zws = false },
+        .{ .name = "builtin_middlewares", .path = "examples/builtin_middlewares.zig", .uses_zws = false },
+        .{ .name = "echo_body", .path = "examples/echo_body.zig", .uses_zws = false },
+        .{ .name = "fast_plaintext", .path = "examples/fast_plaintext.zig", .uses_zws = false },
+        .{ .name = "ws_manual_upgrade", .path = "examples/ws_manual_upgrade.zig", .uses_zws = true },
     };
 
     inline for (examples) |ex| {
@@ -110,16 +115,17 @@ pub fn build(b: *std.Build) void {
                 .root_source_file = b.path(ex.path),
                 .target = target,
                 .optimize = optimize,
-                .imports = &.{
-                    .{ .name = "zhttp", .module = mod },
-                },
             }),
         });
+        exe.root_module.addImport("zhttp", mod);
+        if (ex.uses_zws) {
+            const dep = zws_dep orelse @panic("missing 'zwebsocket' dependency; run `zig fetch --save <zws-url>`");
+            exe.root_module.addImport("zwebsocket", dep.module("zwebsocket"));
+        }
         examples_step.dependOn(&exe.step);
 
         const run = b.addRunArtifact(exe);
         run.addArg("--smoke");
         examples_check_step.dependOn(&run.step);
     }
-
 }

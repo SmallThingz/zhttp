@@ -2,6 +2,7 @@ const std = @import("std");
 
 const Res = @import("../response.zig").Res;
 const Header = @import("../response.zig").Header;
+const MiddlewareInfo = @import("../middleware.zig").MiddlewareInfo;
 const parse = @import("../parse.zig");
 const router = @import("../router.zig");
 const util = @import("util.zig");
@@ -72,12 +73,15 @@ pub fn Cors(comptime opts: anytype) type {
     } else struct {};
 
     const Common = struct {
-        pub const Needs = struct {
-            pub const headers = struct {
+        pub const info_name: []const u8 = if (store) opts.name else "cors";
+        pub const Info = MiddlewareInfo{
+            .name = info_name,
+            .data = if (store) DataT else null,
+            .header = struct {
                 origin: parse.Optional(parse.String),
                 access_control_request_method: parse.Optional(parse.String),
                 access_control_request_headers: parse.Optional(parse.String),
-            };
+            },
         };
 
         pub const register_routes = register_routes_opt;
@@ -127,8 +131,8 @@ pub fn Cors(comptime opts: anytype) type {
             return util.appendHeaders(allocator, base, extra);
         }
 
-        fn handle(comptime Next: type, next: Next, req: anytype, data_opt: ?*DataT) !Res {
-            const origin_opt = req.header(.origin) orelse return next.call(req);
+        fn handle(comptime rctx: anytype, req: rctx.T()) !Res {
+            const origin_opt = req.header(.origin) orelse return rctx.next(req);
             const origin = origin_opt;
             const needs_origin_copy = store or !(allow_any_origin and !allow_credentials);
             const origin_copy = if (needs_origin_copy) try req.allocator().dupe(u8, origin) else origin;
@@ -138,13 +142,12 @@ pub fn Cors(comptime opts: anytype) type {
             const preflight = is_options and req.header(.access_control_request_method) != null;
 
             if (store) {
-                if (data_opt) |d| {
-                    d.* = .{
-                        .origin = origin_copy,
-                        .allowed = allowed,
-                        .preflight = preflight,
-                    };
-                }
+                const d = req.middlewareData(info_name);
+                d.* = .{
+                    .origin = origin_copy,
+                    .allowed = allowed,
+                    .preflight = preflight,
+                };
             }
 
             if (preflight) {
@@ -203,10 +206,10 @@ pub fn Cors(comptime opts: anytype) type {
 
             if (!allowed) {
                 if (enforce) return Res.text(403, "cors forbidden");
-                return next.call(req);
+                return rctx.next(req);
             }
 
-            var res = try next.call(req);
+            var res = try rctx.next(req);
 
             const origin_value = if (allow_any_origin and !allow_credentials) "*" else origin_copy;
             var hdrs: [4]Header = undefined;
@@ -235,21 +238,28 @@ pub fn Cors(comptime opts: anytype) type {
     };
 
     return if (store) struct {
-        pub const Needs = Common.Needs;
+        pub const Info = Common.Info;
         pub const register_routes = Common.register_routes;
         pub const Routes = Common.Routes;
         pub const Data = Common.Data;
-        pub const name = opts.name;
-        pub fn call(comptime Next: type, next: Next, req: anytype, data: *DataT) !Res {
-            return Common.handle(Next, next, req, data);
+        pub fn call(comptime rctx: anytype, req: rctx.T()) !Res {
+            return Common.handle(rctx, req);
+        }
+
+        pub fn Override(comptime _: anytype) type {
+            return struct {};
         }
     } else struct {
-        pub const Needs = Common.Needs;
+        pub const Info = Common.Info;
         pub const register_routes = Common.register_routes;
         pub const Routes = Common.Routes;
         pub const Data = Common.Data;
-        pub fn call(comptime Next: type, next: Next, req: anytype) !Res {
-            return Common.handle(Next, next, req, null);
+        pub fn call(comptime rctx: anytype, req: rctx.T()) !Res {
+            return Common.handle(rctx, req);
+        }
+
+        pub fn Override(comptime _: anytype) type {
+            return struct {};
         }
     };
 }

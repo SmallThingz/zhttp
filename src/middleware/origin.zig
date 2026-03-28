@@ -191,14 +191,27 @@ pub fn HashMatcher(comptime origins: []const []const u8) type {
     };
 }
 
+/// Configuration for `Origin`.
 pub const OriginOptions = struct {
+    /// Exact list of allowed `Origin` header values.
+    ///
+    /// Matching is byte-for-byte (scheme, host, port must match exactly).
     origins: []const []const u8,
+    /// Whether requests missing an `Origin` header are allowed.
+    ///
+    /// Keep `false` for stricter browser-origin enforcement.
     allow_missing: bool = false,
+    /// HTTP status returned when origin validation fails.
     status: u16 = 403,
+    /// Response body returned when origin validation fails.
     body: []const u8 = "forbidden origin\n",
+    /// Optional middleware context field name used to store allow/missing decision.
     name: ?[]const u8 = null,
 };
 
+/// Enforces an allow-list for the `Origin` request header.
+///
+/// Use this middleware to mitigate cross-site websocket/API abuse for browser clients.
 pub fn Origin(comptime opts: OriginOptions) type {
     const origins = opts.origins;
     validateOrigins(origins);

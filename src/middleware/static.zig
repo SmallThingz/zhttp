@@ -79,16 +79,37 @@ fn allocHeaders(allocator: std.mem.Allocator, src: []const Header) ![]const Head
     return out;
 }
 
+/// Configuration for `Static`.
 pub const StaticOptions = struct {
+    /// Directory root to serve files from.
+    ///
+    /// May be absolute or relative to current working directory.
     dir: []const u8,
+    /// URL mount prefix for static files (must start with `/`).
+    ///
+    /// `/` serves from root; `/assets` serves under `/assets/*`.
     mount: []const u8 = "/",
+    /// Whether this middleware should auto-register GET/HEAD routes for static serving.
+    ///
+    /// Disable when you want to call `serve` logic via custom routes only.
     register_routes: bool = true,
+    /// Optional `cache-control` header value to include on served files.
     cache_control: ?[]const u8 = null,
+    /// Optional index file name for directory requests (`/foo/` -> `/foo/{index}`).
+    ///
+    /// Set null to disable directory index fallback.
     index: ?[]const u8 = "index.html",
+    /// Enables ETag generation and `If-None-Match` handling for static files.
     etag: bool = true,
+    /// Hard upper limit for served file size in bytes.
+    ///
+    /// Files above this limit return `413 payload too large`.
     max_bytes: usize = std.math.maxInt(usize),
 };
 
+/// Serves static files from disk with optional content-type, cache-control and ETag support.
+///
+/// Use this middleware to host assets/docs without writing dedicated handlers.
 pub fn Static(comptime opts: StaticOptions) type {
     const dir_path: []const u8 = opts.dir;
     if (dir_path.len == 0) @compileError("Static.dir must be non-empty");

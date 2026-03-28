@@ -862,7 +862,7 @@ pub fn Compiled(
                     const NeedH = middleware.needsHeaders(MwTuple);
                     const NeedQ = middleware.needsQuery(MwTuple);
                     const NeedP = middleware.needsParams(MwTuple);
-                    const H = parse.mergeStructs(NeedH, optionsField(rd.options, "headers", struct {}));
+                    const H = parse.mergeHeaderStructs(NeedH, optionsField(rd.options, "headers", struct {}));
                     const Q = parse.mergeStructs(NeedQ, optionsField(rd.options, "query", struct {}));
                     const P = parse.mergeStructs(NeedP, optionsField(rd.options, "params", struct {}));
                     const MwCtx = middleware.contextType(MwTuple);

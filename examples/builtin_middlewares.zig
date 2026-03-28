@@ -59,7 +59,7 @@ const SrvT = zhttp.Server(.{
         zhttp.middleware.Logger(.{}),
         zhttp.middleware.SecurityHeaders(.{}),
         zhttp.middleware.Cors(.{ .origins = &.{"http://example.com"} }),
-        zhttp.middleware.Etag(.{}),
+        zhttp.middleware.Etag(.{ .header_behavior = .check_then_add }),
         zhttp.middleware.RequestId(.{ .name = "rid" }),
         zhttp.middleware.Timeout(.{ .ms = 5000 }),
         zhttp.middleware.Compression(.{ .min_size = 999999 }),

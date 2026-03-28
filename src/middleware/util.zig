@@ -2,6 +2,11 @@ const std = @import("std");
 const Res = @import("../response.zig").Res;
 const Header = @import("../response.zig").Header;
 
+pub const HeaderSetBehavior = enum {
+    assert_absent,
+    check_then_add,
+};
+
 pub fn appendHeaders(
     allocator: std.mem.Allocator,
     base: []const Header,
@@ -20,6 +25,16 @@ pub fn hasHeader(headers: []const Header, name: []const u8) bool {
         if (std.ascii.eqlIgnoreCase(h.name, name)) return true;
     }
     return false;
+}
+
+pub fn shouldAddHeader(headers: []const Header, name: []const u8, behavior: HeaderSetBehavior) bool {
+    return switch (behavior) {
+        .assert_absent => blk: {
+            std.debug.assert(!hasHeader(headers, name));
+            break :blk true;
+        },
+        .check_then_add => !hasHeader(headers, name),
+    };
 }
 
 pub fn joinCommaList(

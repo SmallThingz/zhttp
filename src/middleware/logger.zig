@@ -22,12 +22,26 @@ fn testLog(method: []const u8, path: []const u8, status: u16, _: Io.Duration) vo
     log_state.status = status;
 }
 
+/// Configuration for `Logger`.
 pub const LoggerOptions = struct {
+    /// Optional middleware context field name used to store timing/status data.
+    ///
+    /// When null, logger still logs but does not store per-request data in `req.middlewareData(...)`.
     name: ?[]const u8 = null,
+    /// Optional custom sink invoked once per request with method, path, status and elapsed duration.
+    ///
+    /// When null, logger writes to stderr via `std.debug.print`.
     log: ?*const fn ([]const u8, []const u8, u16, Io.Duration) void = null,
+    /// Clock source used for request latency measurement.
+    ///
+    /// Use `.monotonic` or another clock when you need timing semantics different from `.awake`.
     clock: Io.Clock = .awake,
 };
 
+/// Logs request method/path/status and latency for each request.
+///
+/// Use this middleware for observability in development and production.
+/// Optionally stores measured values in middleware context for downstream handlers.
 pub fn Logger(comptime opts: LoggerOptions) type {
     const store: bool = opts.name != null;
     const LogFn = *const fn ([]const u8, []const u8, u16, Io.Duration) void;

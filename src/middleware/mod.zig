@@ -2,6 +2,7 @@ const middleware = @import("../middleware.zig");
 const std = @import("std");
 
 pub const MiddlewareInfo = middleware.MiddlewareInfo;
+pub const HeaderSetBehavior = middleware.HeaderSetBehavior;
 pub const Static = middleware.Static;
 pub const StaticOptions = middleware.StaticOptions;
 pub const Cors = middleware.Cors;
@@ -25,6 +26,7 @@ pub const SecurityHeadersOptions = middleware.SecurityHeadersOptions;
 
 test "mod forwards canonical middleware exports" {
     try std.testing.expect(MiddlewareInfo == middleware.MiddlewareInfo);
+    try std.testing.expect(HeaderSetBehavior == middleware.HeaderSetBehavior);
     try std.testing.expect(Static == middleware.Static);
     try std.testing.expect(StaticOptions == middleware.StaticOptions);
     try std.testing.expect(Cors == middleware.Cors);

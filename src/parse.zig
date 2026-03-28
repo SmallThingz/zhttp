@@ -270,6 +270,71 @@ pub fn mergeStructs(comptime A: type, comptime B: type) type {
     return @Struct(.auto, null, names[0..], &types, &attrs);
 }
 
+pub fn mergeHeaderStructs(comptime A: type, comptime B: type) type {
+    if (!isStructType(A) or !isStructType(B)) @compileError("mergeHeaderStructs expects struct types");
+    const fa = structFields(A);
+    const fb = structFields(B);
+    const max_fields = fa.len + fb.len;
+
+    const merged = comptime blk: {
+        var names: [max_fields][]const u8 = undefined;
+        var types: [max_fields]type = undefined;
+        var count: usize = 0;
+
+        const Add = struct {
+            fn field(
+                comptime names_buf: *[max_fields][]const u8,
+                comptime types_buf: *[max_fields]type,
+                comptime count_ptr: *usize,
+                comptime name: []const u8,
+                comptime T: type,
+            ) void {
+                comptime var i: usize = 0;
+                inline while (i < count_ptr.*) : (i += 1) {
+                    const existing = names_buf.*[i];
+                    if (!headerFieldNamesClash(existing, name)) continue;
+                    if (types_buf.*[i] != T) {
+                        @compileError(
+                            "conflicting header capture field '" ++ name ++
+                                "' (normalized duplicate of '" ++ existing ++ "')",
+                        );
+                    }
+                    return;
+                }
+                names_buf.*[count_ptr.*] = name;
+                types_buf.*[count_ptr.*] = T;
+                count_ptr.* += 1;
+            }
+        };
+
+        for (fa) |f| Add.field(&names, &types, &count, f.name, f.type);
+        for (fb) |f| Add.field(&names, &types, &count, f.name, f.type);
+
+        const exact_names = b: {
+            var out: [count][]const u8 = undefined;
+            for (0..count) |i| out[i] = names[i];
+            break :b out;
+        };
+        const exact_types = b: {
+            var out: [count]type = undefined;
+            for (0..count) |i| out[i] = types[i];
+            break :b out;
+        };
+        const exact_attrs = b: {
+            var out: [count]std.builtin.Type.StructField.Attributes = undefined;
+            for (&out) |*a| a.* = .{};
+            break :b out;
+        };
+        break :blk .{
+            .names = exact_names,
+            .types = exact_types,
+            .attrs = exact_attrs,
+        };
+    };
+
+    return @Struct(.auto, null, merged.names[0..], &merged.types, &merged.attrs);
+}
+
 pub fn mergeStructsMany(comptime types_tuple: anytype) type {
     const Ti = @TypeOf(types_tuple);
     const info = @typeInfo(Ti);
@@ -501,6 +566,23 @@ test "mergeStructs: merges without losing fields" {
         std.debug.assert(std.mem.eql(u8, mf[0].name, "a"));
         std.debug.assert(std.mem.eql(u8, mf[1].name, "b"));
         std.debug.assert(std.mem.eql(u8, mf[2].name, "c"));
+    }
+}
+
+test "mergeHeaderStructs: normalized duplicates with same type are coalesced" {
+    const A = struct {
+        x_token: Optional(String),
+    };
+    const B = struct {
+        X_TOKEN: Optional(String),
+        host: Optional(String),
+    };
+    const M = mergeHeaderStructs(A, B);
+    comptime {
+        const mf = structFields(M);
+        std.debug.assert(mf.len == 2);
+        std.debug.assert(std.mem.eql(u8, mf[0].name, "x_token"));
+        std.debug.assert(std.mem.eql(u8, mf[1].name, "host"));
     }
 }
 

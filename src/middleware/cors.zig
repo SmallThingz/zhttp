@@ -32,19 +32,55 @@ fn allocHeaders(allocator: std.mem.Allocator, src: []const Header) ![]const Head
     return out;
 }
 
+/// Configuration for `Cors`.
 pub const CorsOptions = struct {
+    /// Allowed origins for CORS.
+    ///
+    /// Use `"*"` to allow any origin. Empty means deny all cross-origin requests.
     origins: []const []const u8 = &.{},
+    /// Allowed request methods for preflight validation.
+    ///
+    /// Use `"*"` to allow any method.
     methods: []const []const u8 = &.{ "GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS" },
+    /// Allowed request headers for preflight validation.
+    ///
+    /// Null reflects requested headers; list restricts to explicit set; `"*"` allows any.
     headers: ?[]const []const u8 = null,
+    /// Response headers exposed to browsers via `access-control-expose-headers`.
     expose: []const []const u8 = &.{},
+    /// Whether to emit `access-control-allow-credentials: true`.
     credentials: bool = false,
+    /// Optional `access-control-max-age` preflight cache duration in seconds.
     max_age: ?u32 = null,
+    /// When true, reject disallowed simple requests with `403` instead of passing through.
     enforce: bool = false,
+    /// Whether middleware registers a default `OPTIONS /*` route.
     register_routes: bool = true,
+    /// Optional middleware context field name used to store origin/allow/preflight results.
     name: ?[]const u8 = null,
+    /// Optional custom origin predicate.
+    ///
+    /// When provided, this overrides static `origins` matching logic.
     origin_is_allowed: ?*const fn ([]const u8) bool = null,
+    /// Behavior when `access-control-allow-origin` already exists.
+    allow_origin_behavior: util.HeaderSetBehavior = .assert_absent,
+    /// Behavior when `access-control-allow-credentials` already exists.
+    allow_credentials_behavior: util.HeaderSetBehavior = .assert_absent,
+    /// Behavior when `access-control-allow-headers` already exists.
+    allow_headers_behavior: util.HeaderSetBehavior = .assert_absent,
+    /// Behavior when `access-control-allow-methods` already exists.
+    allow_methods_behavior: util.HeaderSetBehavior = .assert_absent,
+    /// Behavior when `access-control-max-age` already exists.
+    max_age_behavior: util.HeaderSetBehavior = .assert_absent,
+    /// Behavior when `access-control-expose-headers` already exists.
+    expose_headers_behavior: util.HeaderSetBehavior = .assert_absent,
+    /// Behavior when `vary` already exists.
+    vary_behavior: util.HeaderSetBehavior = .assert_absent,
 };
 
+/// Implements CORS preflight handling and simple-response header injection.
+///
+/// Use this middleware when browsers access your API from different origins.
 pub fn Cors(comptime opts: CorsOptions) type {
     const origins: []const []const u8 = opts.origins;
     const methods: []const []const u8 = opts.methods;
@@ -56,6 +92,13 @@ pub fn Cors(comptime opts: CorsOptions) type {
     const register_routes_opt: bool = opts.register_routes;
     const store: bool = opts.name != null;
     const origin_is_allowed = opts.origin_is_allowed;
+    const allow_origin_behavior = opts.allow_origin_behavior;
+    const allow_credentials_behavior = opts.allow_credentials_behavior;
+    const allow_headers_behavior = opts.allow_headers_behavior;
+    const allow_methods_behavior = opts.allow_methods_behavior;
+    const max_age_behavior = opts.max_age_behavior;
+    const expose_headers_behavior = opts.expose_headers_behavior;
+    const vary_behavior = opts.vary_behavior;
 
     const allow_any_origin: bool = comptime blk: {
         for (origins) |o| {
@@ -179,37 +222,49 @@ pub fn Cors(comptime opts: CorsOptions) type {
                 var n: usize = 0;
 
                 const origin_value = if (allow_any_origin and !allow_credentials) "*" else origin_copy;
-                hdrs[n] = .{ .name = "access-control-allow-origin", .value = origin_value };
-                n += 1;
+                if (util.shouldAddHeader(hdrs[0..n], "access-control-allow-origin", allow_origin_behavior)) {
+                    hdrs[n] = .{ .name = "access-control-allow-origin", .value = origin_value };
+                    n += 1;
+                }
 
                 if (allow_credentials) {
-                    hdrs[n] = .{ .name = "access-control-allow-credentials", .value = "true" };
-                    n += 1;
+                    if (util.shouldAddHeader(hdrs[0..n], "access-control-allow-credentials", allow_credentials_behavior)) {
+                        hdrs[n] = .{ .name = "access-control-allow-credentials", .value = "true" };
+                        n += 1;
+                    }
                 }
 
                 if (allow_headers_opt) |allowed_headers| {
                     const value = try util.joinCommaList(req.allocator(), allowed_headers);
                     if (value.len != 0) {
-                        hdrs[n] = .{ .name = "access-control-allow-headers", .value = value };
-                        n += 1;
+                        if (util.shouldAddHeader(hdrs[0..n], "access-control-allow-headers", allow_headers_behavior)) {
+                            hdrs[n] = .{ .name = "access-control-allow-headers", .value = value };
+                            n += 1;
+                        }
                     }
                 } else if (requested_headers.len != 0) {
                     const value = try util.joinCommaList(req.allocator(), requested_headers);
-                    hdrs[n] = .{ .name = "access-control-allow-headers", .value = value };
-                    n += 1;
+                    if (util.shouldAddHeader(hdrs[0..n], "access-control-allow-headers", allow_headers_behavior)) {
+                        hdrs[n] = .{ .name = "access-control-allow-headers", .value = value };
+                        n += 1;
+                    }
                 }
 
                 const methods_value = try util.joinCommaList(req.allocator(), methods);
-                hdrs[n] = .{ .name = "access-control-allow-methods", .value = methods_value };
-                n += 1;
-
-                if (max_age) |age| {
-                    const value = try std.fmt.allocPrint(req.allocator(), "{d}", .{age});
-                    hdrs[n] = .{ .name = "access-control-max-age", .value = value };
+                if (util.shouldAddHeader(hdrs[0..n], "access-control-allow-methods", allow_methods_behavior)) {
+                    hdrs[n] = .{ .name = "access-control-allow-methods", .value = methods_value };
                     n += 1;
                 }
 
-                if (!util.hasHeader(hdrs[0..n], "vary")) {
+                if (max_age) |age| {
+                    const value = try std.fmt.allocPrint(req.allocator(), "{d}", .{age});
+                    if (util.shouldAddHeader(hdrs[0..n], "access-control-max-age", max_age_behavior)) {
+                        hdrs[n] = .{ .name = "access-control-max-age", .value = value };
+                        n += 1;
+                    }
+                }
+
+                if (util.shouldAddHeader(hdrs[0..n], "vary", vary_behavior)) {
                     hdrs[n] = .{ .name = "vary", .value = varyHeaderValue(true) };
                     n += 1;
                 }
@@ -228,24 +283,33 @@ pub fn Cors(comptime opts: CorsOptions) type {
             const origin_value = if (allow_any_origin and !allow_credentials) "*" else origin_copy;
             var hdrs: [4]Header = undefined;
             var n: usize = 0;
-            hdrs[n] = .{ .name = "access-control-allow-origin", .value = origin_value };
-            n += 1;
-            if (allow_credentials) {
-                hdrs[n] = .{ .name = "access-control-allow-credentials", .value = "true" };
+            if (util.shouldAddHeader(res.headers, "access-control-allow-origin", allow_origin_behavior)) {
+                hdrs[n] = .{ .name = "access-control-allow-origin", .value = origin_value };
                 n += 1;
+            }
+            if (allow_credentials) {
+                if (util.shouldAddHeader(res.headers, "access-control-allow-credentials", allow_credentials_behavior)) {
+                    hdrs[n] = .{ .name = "access-control-allow-credentials", .value = "true" };
+                    n += 1;
+                }
             }
             if (expose_headers.len != 0) {
                 const value = try util.joinCommaList(req.allocator(), expose_headers);
                 if (value.len != 0) {
-                    hdrs[n] = .{ .name = "access-control-expose-headers", .value = value };
+                    if (util.shouldAddHeader(res.headers, "access-control-expose-headers", expose_headers_behavior)) {
+                        hdrs[n] = .{ .name = "access-control-expose-headers", .value = value };
+                        n += 1;
+                    }
+                }
+            }
+            if (!(allow_any_origin and !allow_credentials)) {
+                if (util.shouldAddHeader(res.headers, "vary", vary_behavior)) {
+                    hdrs[n] = .{ .name = "vary", .value = varyHeaderValue(false) };
                     n += 1;
                 }
             }
-            if (!util.hasHeader(hdrs[0..n], "vary") and !(allow_any_origin and !allow_credentials)) {
-                hdrs[n] = .{ .name = "vary", .value = varyHeaderValue(false) };
-                n += 1;
-            }
 
+            if (n == 0) return res;
             res.headers = try appendCorsHeaders(req.allocator(), res.headers, hdrs[0..n]);
             return res;
         }
@@ -267,6 +331,14 @@ fn headerValue(headers: []const Header, name: []const u8) ?[]const u8 {
         if (std.ascii.eqlIgnoreCase(h.name, name)) return h.value;
     }
     return null;
+}
+
+fn countHeader(headers: []const Header, name: []const u8) usize {
+    var n: usize = 0;
+    for (headers) |h| {
+        if (std.ascii.eqlIgnoreCase(h.name, name)) n += 1;
+    }
+    return n;
 }
 
 test "cors: preflight and simple request" {
@@ -330,4 +402,55 @@ test "cors: preflight and simple request" {
         try std.testing.expectEqual(@as(u16, 200), @intFromEnum(res.status));
         try std.testing.expectEqualStrings("https://example.com", headerValue(res.headers, "access-control-allow-origin").?);
     }
+}
+
+test "cors: check_then_add skips existing response headers" {
+    const Mw = Cors(.{
+        .origins = &.{"https://example.com"},
+        .allow_origin_behavior = .check_then_add,
+        .vary_behavior = .check_then_add,
+    });
+    const MwCtx = struct {};
+    const ReqT = @import("../request.zig").Request(
+        struct {
+            origin: parse.Optional(parse.String),
+            access_control_request_method: parse.Optional(parse.String),
+            access_control_request_headers: parse.Optional(parse.String),
+        },
+        struct {},
+        &.{},
+        MwCtx,
+    );
+
+    const Next = struct {
+        pub fn call(_: @This(), _: anytype) !Res {
+            return .{
+                .status = .ok,
+                .headers = &.{
+                    .{ .name = "access-control-allow-origin", .value = "https://example.com" },
+                    .{ .name = "vary", .value = "origin" },
+                },
+                .body = "ok",
+            };
+        }
+    };
+
+    const gpa = std.testing.allocator;
+    const path_buf = "/any".*;
+    const query_buf: [0]u8 = .{};
+    const line: @import("../request.zig").RequestLine = .{
+        .method = "GET",
+        .version = .http11,
+        .path = @constCast(path_buf[0..]),
+        .query = @constCast(query_buf[0..]),
+    };
+    const mw_ctx: MwCtx = .{};
+    var reqv = ReqT.init(gpa, std.testing.io, line, mw_ctx);
+    defer reqv.deinit(gpa);
+    var r = std.Io.Reader.fixed("Origin: https://example.com\r\n\r\n");
+    try reqv.parseHeaders(gpa, &r, 1024);
+
+    const res = try Mw.call(Next, Next{}, &reqv);
+    try std.testing.expectEqual(@as(usize, 1), countHeader(res.headers, "access-control-allow-origin"));
+    try std.testing.expectEqual(@as(usize, 1), countHeader(res.headers, "vary"));
 }

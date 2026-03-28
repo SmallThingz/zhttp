@@ -165,7 +165,7 @@ pub fn needsHeaders(comptime mws: anytype) type {
         const Mw = @field(mws, f.name);
         const mw_info = info(Mw);
         if (mw_info.header) |Header| {
-            acc = parse.mergeStructs(acc, Header);
+            acc = parse.mergeHeaderStructs(acc, Header);
         }
     }
     return acc;
@@ -387,6 +387,7 @@ pub fn typeList(comptime t: anytype) []const type {
 
 pub const Static = @import("middleware/static.zig").Static;
 pub const StaticOptions = @import("middleware/static.zig").StaticOptions;
+pub const HeaderSetBehavior = @import("middleware/util.zig").HeaderSetBehavior;
 pub const Cors = @import("middleware/cors.zig").Cors;
 pub const CorsOptions = @import("middleware/cors.zig").CorsOptions;
 pub const Logger = @import("middleware/logger.zig").Logger;

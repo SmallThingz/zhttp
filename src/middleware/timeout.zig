@@ -6,14 +6,29 @@ const ReqCtx = @import("../req_ctx.zig").ReqCtx;
 
 const Io = std.Io;
 
+/// Configuration for `Timeout`.
 pub const TimeoutOptions = struct {
+    /// Optional middleware context field name used to store deadline/elapsed/timed_out data.
     name: ?[]const u8 = null,
+    /// Clock source used for deadline and elapsed-time calculations.
     clock: Io.Clock = .awake,
+    /// Absolute timeout duration.
+    ///
+    /// If provided, this takes precedence over `ms` and `timeout_ms`.
     duration: ?Io.Duration = null,
+    /// Timeout in milliseconds.
+    ///
+    /// Used only when `duration` is null.
     ms: ?i64 = null,
+    /// Backward-compatible alias for `ms`.
+    ///
+    /// Used only when both `duration` and `ms` are null.
     timeout_ms: ?i64 = null,
 };
 
+/// Enforces a wall-clock request timeout around downstream middleware/handler execution.
+///
+/// Returns `504 timeout` when execution time exceeds the configured limit.
 pub fn Timeout(comptime opts: TimeoutOptions) type {
     const clock: Io.Clock = opts.clock;
     const timeout: Io.Duration = if (opts.duration) |d|

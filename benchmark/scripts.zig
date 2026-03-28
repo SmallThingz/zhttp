@@ -2,17 +2,27 @@ const std = @import("std");
 const builtin = @import("builtin");
 
 pub const BenchConfig = struct {
+    /// Stores `port`.
     port: u16,
+    /// Stores `host`.
     host: []const u8 = "127.0.0.1",
+    /// Stores `path`.
     path: []const u8 = "/plaintext",
+    /// Stores `conns`.
     conns: usize,
+    /// Stores `iters`.
     iters: usize,
+    /// Stores `warmup`.
     warmup: usize,
+    /// Stores `full_request`.
     full_request: bool,
+    /// Stores `fixed_bytes`.
     fixed_bytes: ?usize = null,
+    /// Stores `quiet`.
     quiet: bool = false,
 };
 
+/// Implements trim cr.
 pub fn trimCR(line: []const u8) []const u8 {
     if (line.len != 0 and line[line.len - 1] == '\r') return line[0 .. line.len - 1];
     return line;
@@ -111,31 +121,37 @@ fn printLabel(io: std.Io, label: []const u8) void {
     stdout.interface.writeAll("\n") catch {};
 }
 
+/// Implements env int.
 pub fn envInt(env: *const std.process.Environ.Map, name: []const u8, default: usize) usize {
     const v = env.get(name) orelse return default;
     return std.fmt.parseInt(usize, v, 10) catch default;
 }
 
+/// Implements env bool.
 pub fn envBool(env: *const std.process.Environ.Map, name: []const u8, default: bool) bool {
     const v = env.get(name) orelse return default;
     if (std.mem.eql(u8, v, "0")) return false;
     return true;
 }
 
+/// Implements env string.
 pub fn envString(env: *const std.process.Environ.Map, name: []const u8, default: []const u8) []const u8 {
     return env.get(name) orelse default;
 }
 
+/// Implements parse key val.
 pub fn parseKeyVal(arg: []const u8) ?struct { key: []const u8, val: []const u8 } {
     if (!std.mem.startsWith(u8, arg, "--")) return null;
     const eq = std.mem.indexOfScalar(u8, arg, '=') orelse return null;
     return .{ .key = arg[2..eq], .val = arg[eq + 1 ..] };
 }
 
+/// Implements run checked.
 pub fn runChecked(io: std.Io, argv: []const []const u8, cwd: ?[]const u8, inherit: bool) !void {
     return runCheckedEnv(io, argv, cwd, inherit, null);
 }
 
+/// Implements run checked env.
 pub fn runCheckedEnv(
     io: std.Io,
     argv: []const []const u8,
@@ -159,6 +175,7 @@ pub fn runCheckedEnv(
     }
 }
 
+/// Implements spawn background.
 pub fn spawnBackground(io: std.Io, argv: []const []const u8, cwd: ?[]const u8, inherit: bool) !std.process.Child {
     const cwd_opt: std.process.Child.Cwd = if (cwd) |p| .{ .path = p } else .inherit;
     return try std.process.spawn(io, .{
@@ -253,6 +270,7 @@ fn terminateChild(io: std.Io, child: *std.process.Child) void {
     _ = child.wait(io) catch {};
 }
 
+/// Implements run zhttp external.
 pub fn runZhttpExternal(
     io: std.Io,
     allocator: std.mem.Allocator,
@@ -637,6 +655,7 @@ fn patchFafExampleMain(io: std.Io, allocator: std.mem.Allocator, root: []const u
     _ = try writeFileIfChanged(io, allocator, path, default_main);
 }
 
+/// Implements run faf.
 pub fn runFaf(
     io: std.Io,
     allocator: std.mem.Allocator,

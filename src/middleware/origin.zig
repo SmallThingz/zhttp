@@ -25,6 +25,7 @@ fn validateOrigins(comptime origins: []const []const u8) void {
     }
 }
 
+/// Builds a compile-time origin matcher using a decision tree layout.
 pub fn DecisionTree(comptime origins: []const []const u8) type {
     comptime {
         @setEvalBranchQuota(200_000);
@@ -134,6 +135,7 @@ pub fn DecisionTree(comptime origins: []const []const u8) type {
             return false;
         }
 
+        /// Returns true when `origin` exists in the allow-list.
         pub fn contains(origin: []const u8) bool {
             if (comptime count == 1) return eqLiteral(origin, allowed[0]);
             return containsImpl(all_ids[0..], 0, origin);
@@ -141,6 +143,7 @@ pub fn DecisionTree(comptime origins: []const []const u8) type {
     };
 }
 
+/// Builds a compile-time origin matcher using hashed lookups.
 pub fn HashMatcher(comptime origins: []const []const u8) type {
     comptime {
         @setEvalBranchQuota(200_000);
@@ -180,6 +183,7 @@ pub fn HashMatcher(comptime origins: []const []const u8) type {
             };
         }
 
+        /// Returns true when `origin` exists in the allow-list.
         pub fn contains(origin: []const u8) bool {
             const hfp = getHFP(origin);
             var i: usize = @intCast(hfp.hash & (cap - 1));
@@ -223,7 +227,9 @@ pub fn Origin(comptime opts: OriginOptions) type {
     const Matcher = HashMatcher(origins);
 
     const DataT = if (store) struct {
+        /// Whether the request origin matched the allow-list.
         allowed: bool = false,
+        /// Whether the request omitted the `Origin` header.
         missing: bool = false,
     } else struct {};
 
@@ -233,6 +239,7 @@ pub fn Origin(comptime opts: OriginOptions) type {
             .name = info_name,
             .data = if (store) DataT else null,
             .header = struct {
+                /// Captured request `Origin` header value.
                 origin: parse.Optional(parse.String),
             },
         };
@@ -255,6 +262,7 @@ pub fn Origin(comptime opts: OriginOptions) type {
     return struct {
         pub const Info = Common.Info;
 
+        /// Executes origin validation for the current request.
         pub fn call(comptime rctx: ReqCtx, req: rctx.T()) !Res {
             return Common.handle(rctx, req);
         }
@@ -295,10 +303,12 @@ test "origin middleware allows configured origin" {
     });
     const MwCtx = struct {};
     const ReqT = @import("../request.zig").Request(struct {
+        /// Captured request `Origin` header used by the middleware.
         origin: parse.Optional(parse.String),
     }, struct {}, &.{}, MwCtx);
 
     const Next = struct {
+        /// Test helper next-handler implementation.
         pub fn call(_: @This(), _: anytype) !Res {
             return Res.text(200, "ok");
         }
@@ -329,10 +339,12 @@ test "origin middleware rejects missing origin by default" {
     const Mw = Origin(.{ .origins = &.{"https://app.example.com"} });
     const MwCtx = struct {};
     const ReqT = @import("../request.zig").Request(struct {
+        /// Captured request `Origin` header used by the middleware.
         origin: parse.Optional(parse.String),
     }, struct {}, &.{}, MwCtx);
 
     const Next = struct {
+        /// Test helper next-handler implementation.
         pub fn call(_: @This(), _: anytype) !Res {
             return Res.text(200, "ok");
         }
@@ -363,16 +375,21 @@ test "origin middleware can allow missing origin and store decision" {
         .name = "origin",
     });
     const MwCtx = struct {
+        /// Middleware data bucket keyed by middleware name.
         origin: struct {
+            /// Whether the request origin matched the allow-list.
             allowed: bool = false,
+            /// Whether the request omitted the `Origin` header.
             missing: bool = false,
         } = .{},
     };
     const ReqT = @import("../request.zig").Request(struct {
+        /// Captured request `Origin` header used by the middleware.
         origin: parse.Optional(parse.String),
     }, struct {}, &.{}, MwCtx);
 
     const Next = struct {
+        /// Test helper next-handler implementation.
         pub fn call(_: @This(), _: anytype) !Res {
             return Res.text(200, "ok");
         }

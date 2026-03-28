@@ -56,6 +56,7 @@ pub const head = router.head;
 pub const options = router.options;
 pub const ReqCtx = @import("req_ctx.zig").ReqCtx;
 
+/// Implements fuzz.
 pub fn fuzz(
     context: anytype,
     comptime testOne: fn (context: @TypeOf(context), smith: *std.testing.Smith) anyerror!void,
@@ -87,6 +88,7 @@ fn fuzzBuiltin(
 
     const Wrapper = struct {
         var ctx: Ctx = undefined;
+        /// Implements test one c.
         pub fn testOneC() callconv(.c) void {
             var smith: Smith = .{ .in = null };
             testOne(ctx, &smith) catch {};
@@ -127,5 +129,6 @@ test {
     _ = @import("router.zig");
     _ = @import("server.zig");
     _ = @import("middleware.zig");
+    _ = @import("middleware/static.zig");
     _ = @import("urldecode.zig");
 }

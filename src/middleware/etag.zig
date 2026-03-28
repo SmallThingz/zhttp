@@ -59,10 +59,12 @@ pub fn Etag(comptime opts: EtagOptions) type {
         pub const Info = MiddlewareInfo{
             .name = "etag",
             .header = struct {
+                /// Conditional request header used for 304 matching.
                 if_none_match: parse.Optional(parse.String),
             },
         };
 
+        /// Executes etag middleware for the current request.
         pub fn call(comptime rctx: ReqCtx, req: rctx.T()) !Res {
             var res = try rctx.next(req);
             if (res.body.len == 0) return res;
@@ -99,6 +101,7 @@ test "etag: check_then_add skips if already set" {
     );
 
     const Next = struct {
+        /// Test helper next-handler implementation with pre-existing etag.
         pub fn call(_: @This(), _: anytype) !Res {
             return .{
                 .status = .ok,

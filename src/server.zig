@@ -78,10 +78,15 @@ pub fn Server(comptime def: anytype) type {
     const NotFoundCompiled = router.Compiled(Context, .{router.get("/", NotFoundHandler, NotFoundOptions)}, Middlewares);
 
     return struct {
+        /// Stores `io`.
         io: Io,
+        /// Stores `gpa`.
         gpa: Allocator,
+        /// Stores `listener`.
         listener: std.Io.net.Server,
+        /// Stores `group`.
         group: Io.Group = .init,
+        /// Stores `ctx`.
         ctx: if (Context == void) void else *Context,
 
         const Self = @This();
@@ -111,6 +116,7 @@ pub fn Server(comptime def: anytype) type {
         };
         const ErrorHandler = if (@hasField(DefT, "error_handler")) def.error_handler else DefaultErrorHandler.call;
 
+        /// Initializes this value.
         pub fn init(
             gpa: Allocator,
             io: Io,
@@ -126,12 +132,14 @@ pub fn Server(comptime def: anytype) type {
             };
         }
 
+        /// Releases resources held by this value.
         pub fn deinit(self: *Self) void {
             self.listener.deinit(self.io);
             self.group.cancel(self.io);
             self.* = undefined;
         }
 
+        /// Runs this component.
         pub fn run(self: *Self) Io.Cancelable!void {
             while (true) {
                 const stream = self.listener.accept(self.io) catch |err| switch (err) {
@@ -171,6 +179,7 @@ pub fn Server(comptime def: anytype) type {
             return @call(.auto, ErrorHandler, .{ self, w, ErrorSet, err });
         }
 
+        /// Implements handle handler error.
         pub fn handleHandlerError(self: *Self, w: *Io.Writer, comptime ErrorSet: type, err: ErrorSet) Action {
             return self.callErrorHandler(w, ErrorSet, err);
         }
@@ -850,6 +859,7 @@ test "HTTP/1.0 request does not keep-alive" {
 
 test "upgrade_handler: 101 triggers upgrade callback and stream ownership" {
     const State = struct {
+        /// Stores `upgraded`.
         upgraded: bool = false,
     };
 

@@ -5,6 +5,7 @@ pub const panic = std.debug.FullPanic(panicHandler);
 
 var is_child_mode: bool = false;
 
+/// Implements fuzz.
 pub fn fuzz(
     context: anytype,
     comptime testOne: fn (context: @TypeOf(context), smith: *std.testing.Smith) anyerror!void,
@@ -36,6 +37,7 @@ fn fuzzBuiltin(
 
     const Wrapper = struct {
         var ctx: Ctx = undefined;
+        /// Implements test one c.
         pub fn testOneC() callconv(.c) void {
             var smith: Smith = .{ .in = null };
             testOne(ctx, &smith) catch {};
@@ -69,6 +71,7 @@ fn fuzzBuiltin(
     if (map_opt) |*m| m.deinit();
 }
 
+/// Starts this executable.
 pub fn main(init: std.process.Init) !void {
     const threaded = std.Io.Threaded.init(init.gpa, .{
         .argv0 = .init(init.minimal.args),
@@ -157,6 +160,7 @@ fn printHelp() void {
 }
 
 const TestInfo = struct {
+    /// Stores `name`.
     name: []const u8,
 };
 
@@ -169,10 +173,15 @@ const Status = enum {
 };
 
 const Summary = struct {
+    /// Stores `pass`.
     pass: usize = 0,
+    /// Stores `fail`.
     fail: usize = 0,
+    /// Stores `skip`.
     skip: usize = 0,
+    /// Stores `leak`.
     leak: usize = 0,
+    /// Stores `crash`.
     crash: usize = 0,
 };
 
@@ -268,14 +277,23 @@ fn runAllTests(
 }
 
 const WorkerCtx = struct {
+    /// Stores `gpa`.
     gpa: std.mem.Allocator,
+    /// Stores `io`.
     io: std.Io,
+    /// Stores `argv0`.
     argv0: []const u8,
+    /// Stores `tests`.
     tests: []const TestInfo,
+    /// Stores `seed`.
     seed: ?u32,
+    /// Stores `next_index`.
     next_index: *std.atomic.Value(usize),
+    /// Stores `summary`.
     summary: *Summary,
+    /// Stores `print_mutex`.
     print_mutex: *std.Io.Mutex,
+    /// Stores `count_mutex`.
     count_mutex: *std.Io.Mutex,
 };
 
@@ -312,7 +330,9 @@ fn worker(ctx: *WorkerCtx) void {
 }
 
 const ChildResult = struct {
+    /// Stores `status`.
     status: Status,
+    /// Stores `term`.
     term: std.process.Child.Term,
 };
 

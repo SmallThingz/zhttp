@@ -8,10 +8,15 @@ comptime {
 }
 
 pub const MiddlewareInfo = struct {
+    /// Unique middleware name used for middleware data lookup.
     name: []const u8,
+    /// Optional middleware data type stored in request middleware context.
     data: ?type = null,
+    /// Optional path param capture type required by this middleware.
     path: ?type = null,
+    /// Optional query capture type required by this middleware.
     query: ?type = null,
+    /// Optional header capture type required by this middleware.
     header: ?type = null,
 };
 
@@ -80,6 +85,7 @@ fn tupleTail(comptime t: anytype) tupleTailType(t) {
     };
 }
 
+/// Returns the combined type of middleware-provided routes.
 pub fn routesType(comptime mws: anytype) type {
     comptime {
         @setEvalBranchQuota(50000);
@@ -103,6 +109,7 @@ pub fn routesType(comptime mws: anytype) type {
     return tupleConcatValuesType(a, b);
 }
 
+/// Returns the combined middleware-provided route tuple.
 pub fn routes(comptime mws: anytype) routesType(mws) {
     const info0 = @typeInfo(@TypeOf(mws));
     if (info0 != .@"struct" or !info0.@"struct".is_tuple) @compileError("middlewares must be a tuple");
@@ -121,18 +128,13 @@ pub fn routes(comptime mws: anytype) routesType(mws) {
     return tupleConcatValues(first_routes, rest_routes);
 }
 
+/// Validates and returns middleware metadata.
 pub fn info(comptime Mw: type) MiddlewareInfo {
     if (!@hasDecl(Mw, "Info")) {
         @compileError("middleware " ++ @typeName(Mw) ++ " must expose `pub const Info: zhttp.middleware.MiddlewareInfo`");
     }
     if (!@hasDecl(Mw, "call")) {
         @compileError("middleware " ++ @typeName(Mw) ++ " must expose `pub fn call(comptime rctx: ReqCtx, req: rctx.T()) !Res`");
-    }
-    if (@hasDecl(Mw, "Data")) {
-        @compileError("middleware " ++ @typeName(Mw) ++ " must not expose `Data`; use `Info.data` instead");
-    }
-    if (@hasDecl(Mw, "Needs")) {
-        @compileError("middleware " ++ @typeName(Mw) ++ " must not expose `Needs`; use `Info.path/query/header` instead");
     }
     const out = Mw.Info;
 
@@ -163,6 +165,7 @@ pub fn info(comptime Mw: type) MiddlewareInfo {
     return out;
 }
 
+/// Merges all middleware header capture requirements.
 pub fn needsHeaders(comptime mws: anytype) type {
     comptime {
         @setEvalBranchQuota(100000);
@@ -179,6 +182,7 @@ pub fn needsHeaders(comptime mws: anytype) type {
     return acc;
 }
 
+/// Merges all middleware query capture requirements.
 pub fn needsQuery(comptime mws: anytype) type {
     comptime {
         @setEvalBranchQuota(100000);
@@ -195,6 +199,7 @@ pub fn needsQuery(comptime mws: anytype) type {
     return acc;
 }
 
+/// Merges all middleware path capture requirements.
 pub fn needsParams(comptime mws: anytype) type {
     comptime {
         @setEvalBranchQuota(100000);
@@ -237,6 +242,7 @@ fn initData(comptime Mw: type) dataType(Mw) {
     return std.mem.zeroes(Data);
 }
 
+/// Builds the middleware context struct type used by requests.
 pub fn contextType(comptime MwTuple: anytype) type {
     const fields = @typeInfo(@TypeOf(MwTuple)).@"struct".fields;
     comptime var field_count: usize = 0;
@@ -303,6 +309,7 @@ pub fn contextType(comptime MwTuple: anytype) type {
     return @Struct(.auto, null, out_names[0..], &out_types, &out_attrs);
 }
 
+/// Initializes middleware context values for one request.
 pub fn initContext(comptime MwTuple: anytype, comptime Ctx: type) Ctx {
     var ctx: Ctx = std.mem.zeroes(Ctx);
     const fields = @typeInfo(@TypeOf(MwTuple)).@"struct".fields;
@@ -329,6 +336,7 @@ pub fn initContext(comptime MwTuple: anytype, comptime Ctx: type) Ctx {
     return ctx;
 }
 
+/// Returns middleware context schema entries used by `ReqCtx`.
 pub fn contextST(comptime MwTuple: anytype) []const req_ctx.ST {
     const fields = @typeInfo(@TypeOf(MwTuple)).@"struct".fields;
     comptime var count: usize = 0;
@@ -382,6 +390,7 @@ pub fn contextST(comptime MwTuple: anytype) []const req_ctx.ST {
     return out[0..];
 }
 
+/// Returns middleware tuple elements as a flat `[]const type`.
 pub fn typeList(comptime t: anytype) []const type {
     const fields = @typeInfo(@TypeOf(t)).@"struct".fields;
     if (fields.len == 0) return &.{};

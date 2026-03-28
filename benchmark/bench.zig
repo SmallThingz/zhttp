@@ -11,27 +11,43 @@ const Mode = enum {
 };
 
 const Config = struct {
+    /// Stores `mode`.
     mode: Mode = .external,
+    /// Stores `host`.
     host: []const u8 = "127.0.0.1",
+    /// Stores `port`.
     port: u16 = 0,
+    /// Stores `path`.
     path: []const u8 = "/plaintext",
+    /// Stores `conns`.
     conns: usize = 1,
+    /// Stores `iters`.
     iters: u64 = 200_000,
+    /// Stores `warmup`.
     warmup: u64 = 10_000,
+    /// Stores `fixed_bytes`.
     fixed_bytes: ?usize = null,
+    /// Stores `minimal_request`.
     minimal_request: bool = true,
+    /// Stores `quiet`.
     quiet: bool = false,
 };
 
 const ConnResult = struct {
+    /// Stores `completed`.
     completed: u64 = 0,
+    /// Stores `err`.
     err: ?anyerror = null,
 };
 
 const ConnState = struct {
+    /// Stores `stream`.
     stream: std.Io.net.Stream = undefined,
+    /// Stores `read_buf`.
     read_buf: []u8 = &.{},
+    /// Stores `write_buf`.
     write_buf: []u8 = &.{},
+    /// Stores `result`.
     result: ConnResult = .{},
 };
 
@@ -332,6 +348,7 @@ fn runExternal(init: std.process.Init, cfg: Config) !void {
     try runBenchmark(init, addr, request_bytes, fixed_bytes, cfg);
 }
 
+/// Starts this executable.
 pub fn main(init: std.process.Init) !void {
     const a = init.arena.allocator();
     var cfg: Config = .{};

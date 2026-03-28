@@ -42,9 +42,13 @@ pub fn Timeout(comptime opts: TimeoutOptions) type {
 
     const store: bool = opts.name != null;
     const DataT = if (store) struct {
+        /// Computed request deadline timestamp.
         deadline: Io.Timestamp = .zero,
+        /// Configured timeout duration.
         timeout: Io.Duration = .zero,
+        /// Observed request processing duration.
         elapsed: Io.Duration = .zero,
+        /// True when `elapsed` exceeded `timeout`.
         timed_out: bool = false,
     } else struct {};
 
@@ -81,6 +85,7 @@ pub fn Timeout(comptime opts: TimeoutOptions) type {
 
     return struct {
         pub const Info = Common.Info;
+        /// Executes timeout middleware for the current request.
         pub fn call(comptime rctx: ReqCtx, req: rctx.T()) !Res {
             return Common.handle(rctx, req);
         }
@@ -93,6 +98,7 @@ test "timeout: immediate timeout" {
     const ReqT = @import("../request.zig").Request(struct {}, struct {}, &.{}, MwCtx);
 
     const Next = struct {
+        /// Test helper next-handler implementation.
         pub fn call(_: @This(), _: anytype) !Res {
             return Res.text(200, "ok");
         }

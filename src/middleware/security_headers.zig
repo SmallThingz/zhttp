@@ -74,6 +74,7 @@ pub fn SecurityHeaders(comptime opts: SecurityHeadersOptions) type {
             .name = "security_headers",
         };
 
+        /// Executes security-header middleware for the current request.
         pub fn call(comptime rctx: ReqCtx, req: rctx.T()) !Res {
             var res = try rctx.next(req);
             const a = req.allocator();
@@ -146,6 +147,7 @@ test "security_headers: default headers present" {
     const ReqT = @import("../request.zig").Request(struct {}, struct {}, &.{}, MwCtx);
 
     const Next = struct {
+        /// Test helper next-handler implementation.
         pub fn call(_: @This(), _: anytype) !Res {
             return Res.text(200, "ok");
         }
@@ -176,6 +178,7 @@ test "security_headers: check_then_add skips existing" {
     const ReqT = @import("../request.zig").Request(struct {}, struct {}, &.{}, MwCtx);
 
     const Next = struct {
+        /// Test helper next-handler implementation with pre-existing headers.
         pub fn call(_: @This(), _: anytype) !Res {
             return .{
                 .status = .ok,

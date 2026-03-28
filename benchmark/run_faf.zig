@@ -1,6 +1,7 @@
 const std = @import("std");
 const scripts = @import("scripts.zig");
 
+/// Starts this executable.
 pub fn main(init: std.process.Init) !void {
     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer arena.deinit();

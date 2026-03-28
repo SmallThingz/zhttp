@@ -33,6 +33,7 @@ const SrvT = zhttp.Server(.{
     },
 });
 
+/// Starts this executable.
 pub fn main(init: std.process.Init) !void {
     var port: u16 = 8080;
     var smoke: bool = false;

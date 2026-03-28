@@ -1,7 +1,9 @@
 const std = @import("std");
 
 pub const ST = struct {
+    /// Stores `name`.
     name: []const u8,
+    /// Stores `T`.
     T: type,
 };
 
@@ -40,14 +42,22 @@ fn assertTupleWithReq(comptime ParamsT: type) usize {
 pub const ReqCtx = struct {
     const Self = @This();
 
+    /// Stores `handler`.
     handler: type,
+    /// Stores `middlewares`.
     middlewares: []const type,
+    /// Stores `path`.
     path: []const ST,
+    /// Stores `query`.
     query: []const ST,
+    /// Stores `headers`.
     headers: []const ST,
+    /// Stores `middleware_contexts`.
     middleware_contexts: []const ST,
+    /// Stores `idx`.
     idx: usize,
 
+    /// Stores internal `_base_req_type` state.
     _base_req_type: type,
 
     fn payloadType(comptime ReturnT: type) type {
@@ -67,6 +77,7 @@ pub const ReqCtx = struct {
         }
     }
 
+    /// Implements with idx.
     pub fn withIdx(comptime self: Self, comptime next_idx: usize) Self {
         return .{
             .handler = self.handler,
@@ -80,6 +91,7 @@ pub const ReqCtx = struct {
         };
     }
 
+    /// Returns the response type for this request context.
     pub fn Response(comptime self: Self) type {
         assertHandlerType(self.handler);
         const HandlerReq = self.T();
@@ -95,94 +107,118 @@ pub const ReqCtx = struct {
         return @call(.auto, self.handler.function, .{ self, req });
     }
 
+    /// Returns the request wrapper type for this request context.
     pub fn T(comptime self: Self) type {
         const BaseReq = self._base_req_type;
         const Ctx = self;
         return struct {
+            /// Stores internal `_base` state.
             _base: *BaseReq,
+            /// Stores `path`.
             path: []const u8,
+            /// Stores `method`.
             method: []const u8,
 
             const ReqSelf = @This();
 
+            /// Implements raw.
             pub fn raw(self2: ReqSelf) *BaseReq {
                 return self2._base;
             }
 
+            /// Implements allocator.
             pub fn allocator(self2: ReqSelf) std.mem.Allocator {
                 return Ctx.call(std.mem.Allocator, "allocator", .{self2});
             }
 
+            /// Implements io.
             pub fn io(self2: ReqSelf) std.Io {
                 return Ctx.call(std.Io, "io", .{self2});
             }
 
+            /// Implements base.
             pub fn base(self2: ReqSelf) *const @TypeOf(self2._base.baseConst().*) {
                 return Ctx.call(*const @TypeOf(self2._base.baseConst().*), "baseConst", .{self2});
             }
 
+            /// Implements base const.
             pub fn baseConst(self2: ReqSelf) *const @TypeOf(self2._base.baseConst().*) {
                 return Ctx.call(*const @TypeOf(self2._base.baseConst().*), "baseConst", .{self2});
             }
 
+            /// Implements base mut.
             pub fn baseMut(self2: ReqSelf) *@TypeOf(self2._base.base().*) {
                 return Ctx.call(*@TypeOf(self2._base.base().*), "base", .{self2});
             }
 
+            /// Implements ctx.
             pub fn ctx(self2: ReqSelf) @TypeOf(self2._base.ctx()) {
                 return Ctx.call(@TypeOf(self2._base.ctx()), "ctx", .{self2});
             }
 
+            /// Implements ctx const.
             pub fn ctxConst(self2: ReqSelf) @TypeOf(self2._base.ctxConst()) {
                 return Ctx.call(@TypeOf(self2._base.ctxConst()), "ctxConst", .{self2});
             }
 
+            /// Implements mw ctx mut.
             pub fn mwCtxMut(self2: ReqSelf) *@TypeOf(self2._base.mwCtxMut().*) {
                 return Ctx.call(*@TypeOf(self2._base.mwCtxMut().*), "mwCtxMut", .{self2});
             }
 
+            /// Implements mw ctx const.
             pub fn mwCtxConst(self2: ReqSelf) *const @TypeOf(self2._base.mwCtxConst().*) {
                 return Ctx.call(*const @TypeOf(self2._base.mwCtxConst().*), "mwCtxConst", .{self2});
             }
 
+            /// Implements keep alive.
             pub fn keepAlive(self2: ReqSelf) bool {
                 return Ctx.call(bool, "keepAlive", .{self2});
             }
 
+            /// Implements raw path.
             pub fn rawPath(self2: ReqSelf) []const u8 {
                 return Ctx.call([]const u8, "rawPath", .{self2});
             }
 
+            /// Implements header.
             pub fn header(self2: ReqSelf, comptime field: @EnumLiteral()) @TypeOf(self2._base.header(field)) {
                 return Ctx.call(@TypeOf(self2._base.header(field)), "header", .{ self2, field });
             }
 
+            /// Implements query param.
             pub fn queryParam(self2: ReqSelf, comptime field: @EnumLiteral()) @TypeOf(self2._base.queryParam(field)) {
                 return Ctx.call(@TypeOf(self2._base.queryParam(field)), "queryParam", .{ self2, field });
             }
 
+            /// Implements param value.
             pub fn paramValue(self2: ReqSelf, comptime field: @EnumLiteral()) @TypeOf(self2._base.paramValue(field)) {
                 return Ctx.call(@TypeOf(self2._base.paramValue(field)), "paramValue", .{ self2, field });
             }
 
+            /// Implements middleware data.
             pub fn middlewareData(self2: ReqSelf, comptime name: anytype) @TypeOf(self2._base.middlewareData(name)) {
                 return Ctx.call(@TypeOf(self2._base.middlewareData(name)), "middlewareData", .{ self2, name });
             }
 
+            /// Implements middleware data const.
             pub fn middlewareDataConst(self2: ReqSelf, comptime name: anytype) @TypeOf(self2._base.middlewareDataConst(name)) {
                 return Ctx.call(@TypeOf(self2._base.middlewareDataConst(name)), "middlewareDataConst", .{ self2, name });
             }
 
+            /// Implements body all.
             pub fn bodyAll(self2: ReqSelf, max_bytes: usize) @TypeOf(self2._base.bodyAll(max_bytes)) {
                 return Ctx.call(@TypeOf(self2._base.bodyAll(max_bytes)), "bodyAll", .{ self2, max_bytes });
             }
 
+            /// Implements discard unread body.
             pub fn discardUnreadBody(self2: ReqSelf) @TypeOf(self2._base.discardUnreadBody()) {
                 return Ctx.call(@TypeOf(self2._base.discardUnreadBody()), "discardUnreadBody", .{self2});
             }
         };
     }
 
+    /// Handles a middleware invocation for the current request context.
     pub fn call(comptime self: Self, comptime ReturnT: type, comptime func_name: []const u8, params: anytype) ReturnT {
         const params_len = comptime assertTupleWithReq(@TypeOf(params));
 
@@ -248,6 +284,7 @@ pub const ReqCtx = struct {
         @compileError("ReqCtx.call supports request methods with at most one argument beyond req");
     }
 
+    /// Invokes the next handler in the middleware chain.
     pub fn next(comptime self: Self, req: self.T()) !self.Response() {
         const next_idx = self.idx + 1;
         if (next_idx > self.middlewares.len) {
@@ -263,6 +300,7 @@ pub const ReqCtx = struct {
         return child.invoke(child_req);
     }
 
+    /// Runs this component.
     pub fn run(comptime self: Self, req: self.T()) !self.Response() {
         return self.invoke(req);
     }

@@ -67,10 +67,12 @@ pub fn Compression(comptime opts: CompressionOptions) type {
         pub const Info = MiddlewareInfo{
             .name = "compression",
             .header = struct {
+                /// Request `Accept-Encoding` capture used to decide gzip support.
                 accept_encoding: parse.Optional(parse.String),
             },
         };
 
+        /// Executes compression middleware for the current request.
         pub fn call(comptime rctx: ReqCtx, req: rctx.T()) !Res {
             var res = try rctx.next(req);
             if (res.body.len < min_size) return res;
@@ -122,6 +124,7 @@ test "compression: check_then_add skips when content-encoding exists" {
     );
 
     const Next = struct {
+        /// Test helper next-handler implementation with pre-existing encoding.
         pub fn call(_: @This(), _: anytype) !Res {
             return .{
                 .status = .ok,
@@ -166,6 +169,7 @@ test "compression: check_then_add skips duplicate vary" {
     );
 
     const Next = struct {
+        /// Test helper next-handler implementation with compressible payload.
         pub fn call(_: @This(), _: anytype) !Res {
             return .{
                 .status = .ok,

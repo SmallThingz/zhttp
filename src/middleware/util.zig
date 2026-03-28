@@ -7,6 +7,7 @@ pub const HeaderSetBehavior = enum {
     check_then_add,
 };
 
+/// Returns `base` with `extra` appended as a single header slice.
 pub fn appendHeaders(
     allocator: std.mem.Allocator,
     base: []const Header,
@@ -20,6 +21,7 @@ pub fn appendHeaders(
     return out;
 }
 
+/// Returns true when `headers` already contains `name` (case-insensitive).
 pub fn hasHeader(headers: []const Header, name: []const u8) bool {
     for (headers) |h| {
         if (std.ascii.eqlIgnoreCase(h.name, name)) return true;
@@ -27,6 +29,7 @@ pub fn hasHeader(headers: []const Header, name: []const u8) bool {
     return false;
 }
 
+/// Applies configured duplicate-header behavior and reports whether to add `name`.
 pub fn shouldAddHeader(headers: []const Header, name: []const u8, behavior: HeaderSetBehavior) bool {
     return switch (behavior) {
         .assert_absent => blk: {
@@ -37,6 +40,7 @@ pub fn shouldAddHeader(headers: []const Header, name: []const u8, behavior: Head
     };
 }
 
+/// Joins `items` into a single comma-separated header value.
 pub fn joinCommaList(
     allocator: std.mem.Allocator,
     items: []const []const u8,
@@ -60,6 +64,7 @@ pub fn joinCommaList(
     return out;
 }
 
+/// Returns true when `value` contains `token` in a comma-separated token list.
 pub fn hasToken(value: []const u8, token: []const u8) bool {
     var it = std.mem.splitScalar(u8, value, ',');
     while (it.next()) |part| {

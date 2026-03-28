@@ -25,6 +25,7 @@ fn usage() void {
     , .{});
 }
 
+/// Starts this executable.
 pub fn main(init: std.process.Init) !void {
     var port: u16 = 8081;
 

@@ -12,14 +12,20 @@ pub const Version = enum { http10, http11 };
 pub const BodyKind = enum { none, content_length, chunked };
 
 pub const Base = struct {
+    /// Stores `io`.
     io: Io,
+    /// Stores `arena`.
     arena: Allocator,
+    /// Stores `reader`.
     reader: ?*Io.Reader = null,
 
+    /// Stores `version`.
     version: Version,
 
+    /// Stores `connection_close`.
     connection_close: bool = false,
 
+    /// Stores `body_kind`.
     body_kind: BodyKind = .none,
     body_remaining: usize = 0, // for content-length bodies
 };
@@ -84,12 +90,17 @@ fn middlewareContextFieldType(comptime Ctx: type, comptime name: anytype) type {
 }
 
 pub const RequestLine = struct {
+    /// Stores `method`.
     method: []const u8,
+    /// Stores `version`.
     version: Version,
+    /// Stores `path`.
     path: []u8,
+    /// Stores `query`.
     query: []u8,
 };
 
+/// Implements parse request line borrowed.
 pub fn parseRequestLineBorrowed(r: *Io.Reader, max_line_len: usize) ParseLineError!RequestLine {
     var line0_incl: []u8 = undefined;
     const available = r.peekGreedy(1) catch |err| switch (err) {
@@ -174,6 +185,7 @@ pub fn parseRequestLineBorrowed(r: *Io.Reader, max_line_len: usize) ParseLineErr
     };
 }
 
+/// Implements parse request line.
 pub fn parseRequestLine(r: *Io.Reader, allocator: Allocator, max_line_len: usize) ParseLineError!RequestLine {
     const borrowed = try parseRequestLineBorrowed(r, max_line_len);
     const method_copy = try allocator.dupe(u8, borrowed.method);
@@ -249,18 +261,26 @@ fn RequestPWithPatternExt(
     return struct {
         comptime path: []const u8 = route_pattern,
         comptime method: []const u8 = method_name,
+        /// Stores internal `_base` state.
         _base: Base,
+        /// Stores internal `_path` state.
         _path: []u8,
+        /// Stores internal `_ctx` state.
         _ctx: CtxPtr,
+        /// Stores internal `_mw_ctx` state.
         _mw_ctx: MwCtx,
+        /// Stores internal `_headers` state.
         _headers: Headers = parse.emptyStruct(Headers),
+        /// Stores internal `_query` state.
         _query: Query = parse.emptyStruct(Query),
+        /// Stores internal `_params` state.
         _params: ParamsEffective = parse.emptyStruct(ParamsEffective),
 
         const Self = @This();
 
         pub const ParamNames: []const []const u8 = param_names;
 
+        /// Implements init with ctx.
         pub fn initWithCtx(init_arena: Allocator, init_io: Io, line: RequestLine, mw_ctx: MwCtx, app_ctx: CtxPtr) Self {
             return .{
                 ._base = .{
@@ -274,111 +294,138 @@ fn RequestPWithPatternExt(
             };
         }
 
+        /// Initializes this value.
         pub fn init(init_arena: Allocator, init_io: Io, line: RequestLine, mw_ctx: MwCtx) Self {
             if (CtxPtr != void) @compileError("Request.init requires void app context; use initWithCtx for non-void context");
             return initWithCtx(init_arena, init_io, line, mw_ctx, {});
         }
 
+        /// Implements ctx.
         pub fn ctx(self: *Self) CtxPtr {
             return self._ctx;
         }
 
+        /// Implements ctx const.
         pub fn ctxConst(self: *const Self) CtxPtr {
             return self._ctx;
         }
 
+        /// Implements set ctx.
         pub fn setCtx(self: *Self, value: CtxPtr) void {
             self._ctx = value;
         }
 
+        /// Implements allocator.
         pub fn allocator(self: *const Self) Allocator {
             return self._base.arena;
         }
 
+        /// Implements base.
         pub fn base(self: *Self) *Base {
             return &self._base;
         }
 
+        /// Implements base const.
         pub fn baseConst(self: *const Self) *const Base {
             return &self._base;
         }
 
+        /// Implements set base.
         pub fn setBase(self: *Self, value: Base) void {
             self._base = value;
         }
 
+        /// Implements io.
         pub fn io(self: *const Self) Io {
             return self._base.io;
         }
 
+        /// Implements set io.
         pub fn setIo(self: *Self, value: Io) void {
             self._base.io = value;
         }
 
+        /// Implements arena.
         pub fn arena(self: *const Self) Allocator {
             return self._base.arena;
         }
 
+        /// Implements set arena.
         pub fn setArena(self: *Self, value: Allocator) void {
             self._base.arena = value;
         }
 
+        /// Implements reader.
         pub fn reader(self: *const Self) ?*Io.Reader {
             return self._base.reader;
         }
 
+        /// Implements set reader.
         pub fn setReader(self: *Self, value: ?*Io.Reader) void {
             self._base.reader = value;
         }
 
+        /// Implements mw ctx mut.
         pub fn mwCtxMut(self: *Self) *MwCtx {
             return &self._mw_ctx;
         }
 
+        /// Implements mw ctx const.
         pub fn mwCtxConst(self: *const Self) *const MwCtx {
             return &self._mw_ctx;
         }
 
+        /// Implements set mw ctx.
         pub fn setMwCtx(self: *Self, value: MwCtx) void {
             self._mw_ctx = value;
         }
 
+        /// Implements headers mut.
         pub fn headersMut(self: *Self) *Headers {
             return &self._headers;
         }
 
+        /// Implements headers const.
         pub fn headersConst(self: *const Self) *const Headers {
             return &self._headers;
         }
 
+        /// Implements set headers.
         pub fn setHeaders(self: *Self, value: Headers) void {
             self._headers = value;
         }
 
+        /// Implements query mut.
         pub fn queryMut(self: *Self) *Query {
             return &self._query;
         }
 
+        /// Implements query const.
         pub fn queryConst(self: *const Self) *const Query {
             return &self._query;
         }
 
+        /// Implements set query.
         pub fn setQuery(self: *Self, value: Query) void {
             self._query = value;
         }
 
+        /// Implements params mut.
         pub fn paramsMut(self: *Self) *ParamsEffective {
             return &self._params;
         }
 
+        /// Implements params const.
         pub fn paramsConst(self: *const Self) *const ParamsEffective {
             return &self._params;
         }
 
+        /// Implements set params.
         pub fn setParams(self: *Self, value: ParamsEffective) void {
             self._params = value;
         }
 
+        /// Releases resources held by this value.
         pub fn deinit(self: *Self, a: Allocator) void {
             parse.destroyStruct(&self._headers, a);
             parse.destroyStruct(&self._query, a);
@@ -413,14 +460,17 @@ fn RequestPWithPatternExt(
             return &@field(self._mw_ctx, middlewareContextFieldName(MwCtx, name));
         }
 
+        /// Implements keep alive.
         pub fn keepAlive(self: *const Self) bool {
             return self._base.version == .http11 and !self._base.connection_close;
         }
 
+        /// Implements raw path.
         pub fn rawPath(self: *const Self) []const u8 {
             return self._path;
         }
 
+        /// Implements parse params.
         pub fn parseParams(self: *Self, a: Allocator, params_in: []const []u8) !void {
             if (param_names.len == 0) return;
             std.debug.assert(params_in.len == param_names.len);
@@ -433,6 +483,7 @@ fn RequestPWithPatternExt(
             try parse.doneParsingStruct(&self._params, &([_]bool{true} ** param_names.len));
         }
 
+        /// Implements parse query.
         pub fn parseQuery(self: *Self, a: Allocator, query_raw: []u8) !void {
             if (QueryLookup.count == 0) return;
             // reset captures each request
@@ -467,6 +518,7 @@ fn RequestPWithPatternExt(
             try parse.doneParsingStruct(&self._query, present[0..]);
         }
 
+        /// Implements parse headers.
         pub fn parseHeaders(self: *Self, a: Allocator, r: *Io.Reader, max_header_bytes: usize) ParseHeadersError!void {
             self._base.reader = r;
             if (HeaderLookup.count != 0) {
@@ -731,6 +783,7 @@ fn RequestPWithPatternExt(
     };
 }
 
+/// Implements request pwith pattern.
 pub fn RequestPWithPattern(
     comptime Headers: type,
     comptime Query: type,
@@ -743,6 +796,7 @@ pub fn RequestPWithPattern(
     return RequestPWithPatternExt(Headers, Query, Params, param_names, MwCtx, route_pattern, method_name, void);
 }
 
+/// Implements request pwith pattern ctx.
 pub fn RequestPWithPatternCtx(
     comptime Headers: type,
     comptime Query: type,
@@ -756,10 +810,12 @@ pub fn RequestPWithPatternCtx(
     return RequestPWithPatternExt(Headers, Query, Params, param_names, MwCtx, route_pattern, method_name, CtxPtr);
 }
 
+/// Implements request.
 pub fn Request(comptime Headers: type, comptime Query: type, comptime param_names: []const []const u8, comptime MwCtx: type) type {
     return RequestPWithPattern(Headers, Query, struct {}, param_names, MwCtx, "", "GET");
 }
 
+/// Implements request with pattern.
 pub fn RequestWithPattern(
     comptime Headers: type,
     comptime Query: type,
@@ -770,6 +826,7 @@ pub fn RequestWithPattern(
     return RequestPWithPattern(Headers, Query, struct {}, param_names, MwCtx, route_pattern, "GET");
 }
 
+/// Implements request p.
 pub fn RequestP(
     comptime Headers: type,
     comptime Query: type,

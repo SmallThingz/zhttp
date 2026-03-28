@@ -30,14 +30,23 @@ fn usage() void {
 }
 
 const WsHeaders = struct {
+    /// Stores `connection`.
     connection: zhttp.parse.Optional(zhttp.parse.String),
+    /// Stores `upgrade`.
     upgrade: zhttp.parse.Optional(zhttp.parse.String),
+    /// Stores `sec_websocket_key`.
     sec_websocket_key: zhttp.parse.Optional(zhttp.parse.String),
+    /// Stores `sec_websocket_version`.
     sec_websocket_version: zhttp.parse.Optional(zhttp.parse.String),
+    /// Stores `sec_websocket_protocol`.
     sec_websocket_protocol: zhttp.parse.Optional(zhttp.parse.String),
+    /// Stores `sec_websocket_extensions`.
     sec_websocket_extensions: zhttp.parse.Optional(zhttp.parse.String),
+    /// Stores `origin`.
     origin: zhttp.parse.Optional(zhttp.parse.String),
+    /// Stores `host`.
     host: zhttp.parse.Optional(zhttp.parse.String),
+    /// Stores `x_auth`.
     x_auth: zhttp.parse.Optional(zhttp.parse.String),
 };
 
@@ -156,6 +165,7 @@ const Server = zhttp.Server(.{
     },
 });
 
+/// Starts this executable.
 pub fn main(init: std.process.Init) !void {
     var port: u16 = 8080;
     var smoke: bool = false;

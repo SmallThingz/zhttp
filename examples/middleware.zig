@@ -27,10 +27,12 @@ const Auth = struct {
     pub const Info = zhttp.middleware.MiddlewareInfo{
         .name = "auth",
         .header = struct {
+            /// Stores `authorization`.
             authorization: zhttp.parse.Optional(zhttp.parse.String),
         },
     };
 
+    /// Handles a middleware invocation for the current request context.
     pub fn call(comptime rctx: ReqCtx, req: rctx.T()) !zhttp.Res {
         const auth = req.header(.authorization) orelse return zhttp.Res.text(401, "missing auth\n");
         if (!std.mem.eql(u8, auth, "bearer ok")) return zhttp.Res.text(403, "bad auth\n");
@@ -57,6 +59,7 @@ const SrvT = zhttp.Server(.{
     },
 });
 
+/// Starts this executable.
 pub fn main(init: std.process.Init) !void {
     var port: u16 = 8080;
     var smoke: bool = false;

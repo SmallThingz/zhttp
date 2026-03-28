@@ -35,6 +35,7 @@ pub fn RequestId(comptime opts: RequestIdOptions) type {
     const hex_len: usize = bytes * 2;
 
     const DataT = if (store) struct {
+        /// Hex-encoded request id bytes reused across the request lifecycle.
         value: [hex_len]u8 = undefined,
     } else struct {};
 
@@ -69,6 +70,7 @@ pub fn RequestId(comptime opts: RequestIdOptions) type {
 
     return struct {
         pub const Info = Common.Info;
+        /// Executes request-id middleware logic for the current request.
         pub fn call(comptime rctx: ReqCtx, req: rctx.T()) !Res {
             return Common.handle(rctx, req);
         }
@@ -88,6 +90,7 @@ test "request_id: adds header" {
     const ReqT = @import("../request.zig").Request(struct {}, struct {}, &.{}, MwCtx);
 
     const Next = struct {
+        /// Test helper next-handler implementation.
         pub fn call(_: @This(), _: anytype) !Res {
             return Res.text(200, "ok");
         }
@@ -117,6 +120,7 @@ test "request_id: check_then_add keeps existing header" {
     const ReqT = @import("../request.zig").Request(struct {}, struct {}, &.{}, MwCtx);
 
     const Next = struct {
+        /// Test helper next-handler implementation with pre-existing header.
         pub fn call(_: @This(), _: anytype) !Res {
             return .{
                 .status = .ok,

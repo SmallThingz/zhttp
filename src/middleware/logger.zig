@@ -7,9 +7,13 @@ const ReqCtx = @import("../req_ctx.zig").ReqCtx;
 const Io = std.Io;
 
 const LogState = struct {
+    /// Whether the test logger callback was invoked.
     called: bool = false,
+    /// Captured request method for assertion.
     method: []const u8 = "",
+    /// Captured request path for assertion.
     path: []const u8 = "",
+    /// Captured response status code for assertion.
     status: u16 = 0,
 };
 
@@ -49,8 +53,11 @@ pub fn Logger(comptime opts: LoggerOptions) type {
     const clock: Io.Clock = opts.clock;
 
     const DataT = if (store) struct {
+        /// Timestamp captured immediately before downstream execution.
         start: Io.Timestamp = .zero,
+        /// Measured downstream execution duration.
         elapsed: Io.Duration = .zero,
+        /// Downstream response status code.
         status: u16 = 0,
     } else struct {};
 
@@ -85,6 +92,7 @@ pub fn Logger(comptime opts: LoggerOptions) type {
 
     return struct {
         pub const Info = Common.Info;
+        /// Executes logger middleware for the current request.
         pub fn call(comptime rctx: ReqCtx, req: rctx.T()) !Res {
             return Common.handle(rctx, req);
         }
@@ -98,6 +106,7 @@ test "logger: invokes log function" {
     const ReqT = @import("../request.zig").Request(struct {}, struct {}, &.{}, MwCtx);
 
     const Next = struct {
+        /// Test helper next-handler implementation.
         pub fn call(_: @This(), _: anytype) !Res {
             return Res.text(201, "ok");
         }

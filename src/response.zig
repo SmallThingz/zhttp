@@ -2,20 +2,31 @@ const std = @import("std");
 const builtin = @import("builtin");
 
 pub const Header = struct {
+    /// Stores `name`.
     name: []const u8,
+    /// Stores `value`.
     value: []const u8,
 };
 
 pub const Res = struct {
+    /// Stores `status`.
     status: std.http.Status = .ok,
+    /// Stores `headers`.
     headers: []const Header = &.{},
+    /// Stores `body`.
     body: []const u8 = "",
+    /// Stores `close`.
     close: bool = false,
+    /// Stores `format_connection_header`.
     format_connection_header: bool = true,
+    /// Stores `format_content_length`.
     format_content_length: bool = true,
+    /// Stores `format_send_body`.
     format_send_body: bool = true,
+    /// Stores `format_body_len_override`.
     format_body_len_override: ?usize = null,
 
+    /// Implements text.
     pub fn text(status: u16, body: []const u8) Res {
         return .{
             .status = @enumFromInt(status),
@@ -24,6 +35,7 @@ pub const Res = struct {
         };
     }
 
+    /// Implements format.
     pub fn format(self: Res, w: *std.Io.Writer) !void {
         try writeStatusLine(w, self.status);
 
@@ -72,6 +84,7 @@ pub fn digits2(value: u8) [2]u8 {
     }
 }
 
+/// Implements write.
 pub fn write(
     w: *std.Io.Writer,
     res: Res,
@@ -97,6 +110,7 @@ pub fn write(
     }
 }
 
+/// Implements write upgrade.
 pub fn writeUpgrade(w: *std.Io.Writer, res: Res) !void {
     try writeStatusLine(w, res.status);
     for (res.headers) |h| {

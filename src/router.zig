@@ -75,19 +75,28 @@ fn validateRouteOptions(comptime opts: anytype) void {
 }
 
 pub const RouteDecl = struct {
+    /// Stores `method`.
     method: []const u8,
+    /// Stores `pattern`.
     pattern: []const u8,
     // Bridge type carrying `pub const function = handler`.
+    /// Stores `handler`.
     handler: type,
+    /// Stores `headers`.
     headers: type,
+    /// Stores `query`.
     query: type,
+    /// Stores `params`.
     params: type,
     // Bridge type carrying `pub const value = tuple`.
+    /// Stores `middlewares`.
     middlewares: type,
     // Bridge type carrying `pub const value = null|fn|?fn`.
+    /// Stores `upgrade_handler`.
     upgrade_handler: type,
 };
 
+/// Implements route.
 pub fn route(
     /// HTTP method enum literal, e.g. `.GET`.
     comptime method_lit: @EnumLiteral(),
@@ -120,24 +129,31 @@ pub fn route(
     };
 }
 
+/// Implements get.
 pub fn get(comptime pattern: []const u8, comptime handler: anytype, comptime opts: anytype) RouteDecl {
     return route(.GET, pattern, handler, opts);
 }
+/// Implements post.
 pub fn post(comptime pattern: []const u8, comptime handler: anytype, comptime opts: anytype) RouteDecl {
     return route(.POST, pattern, handler, opts);
 }
+/// Implements put.
 pub fn put(comptime pattern: []const u8, comptime handler: anytype, comptime opts: anytype) RouteDecl {
     return route(.PUT, pattern, handler, opts);
 }
+/// Implements delete.
 pub fn delete(comptime pattern: []const u8, comptime handler: anytype, comptime opts: anytype) RouteDecl {
     return route(.DELETE, pattern, handler, opts);
 }
+/// Implements patch.
 pub fn patch(comptime pattern: []const u8, comptime handler: anytype, comptime opts: anytype) RouteDecl {
     return route(.PATCH, pattern, handler, opts);
 }
+/// Implements head.
 pub fn head(comptime pattern: []const u8, comptime handler: anytype, comptime opts: anytype) RouteDecl {
     return route(.HEAD, pattern, handler, opts);
 }
+/// Implements options.
 pub fn options(comptime pattern: []const u8, comptime handler: anytype, comptime opts: anytype) RouteDecl {
     return route(.OPTIONS, pattern, handler, opts);
 }
@@ -233,6 +249,7 @@ fn mergeRoutesType(comptime user_routes: anytype, comptime extra_routes: anytype
     return tupleConcatValuesType(a, b);
 }
 
+/// Implements merge routes.
 pub fn mergeRoutes(comptime user_routes: anytype, comptime extra_routes: anytype) mergeRoutesType(user_routes, extra_routes) {
     if (util.tupleLen(extra_routes) == 0) return user_routes;
     assertNoDuplicateRoutes(extra_routes);
@@ -255,14 +272,20 @@ fn structFieldsToST(comptime T: type) []const req_ctx.ST {
 
 const SegmentKind = enum { lit, param, glob };
 const Segment = struct {
+    /// Stores `kind`.
     kind: SegmentKind,
+    /// Stores `lit`.
     lit: []const u8 = "",
+    /// Stores `param_index`.
     param_index: u8 = 0,
 };
 
 const Pattern = struct {
+    /// Stores `segments`.
     segments: []const Segment,
+    /// Stores `param_names`.
     param_names: []const []const u8,
+    /// Stores `glob`.
     glob: bool,
 };
 
@@ -443,8 +466,11 @@ fn nextPow2AtLeast(comptime n: usize, comptime min: usize) usize {
 }
 
 const ExactEntry = struct {
+    /// Stores `path`.
     path: []const u8,
+    /// Stores `hash`.
     hash: u64,
+    /// Stores `route_index`.
     route_index: u16,
 };
 
@@ -475,6 +501,7 @@ fn ExactMap(comptime entries: anytype, comptime n: usize) type {
     };
 
     return struct {
+        /// Implements find.
         pub fn find(path: []const u8) ?u16 {
             if (n == 0) return null;
             const h = fnv1a64(path);
@@ -496,6 +523,7 @@ fn ExactMap(comptime entries: anytype, comptime n: usize) type {
     };
 }
 
+/// Implements compiled.
 pub fn Compiled(
     comptime _: type,
     comptime routes: anytype,
@@ -800,6 +828,7 @@ pub fn Compiled(
             return null;
         }
 
+        /// Implements match.
         pub fn match(method_token: []const u8, path: []u8) ?u16 {
             if (single_exact) {
                 if (eqLiteral(method_token, "HEAD")) {
@@ -894,6 +923,7 @@ pub fn Compiled(
             return null;
         }
 
+        /// Implements dispatch.
         pub fn dispatch(
             server: anytype,
             allocator: Allocator,
@@ -992,9 +1022,12 @@ fn dispatchForTest(
     out: []u8,
 ) !struct { action: Action, len: usize } {
     const ServerT = struct {
+        /// Stores `io`.
         io: Io,
+        /// Stores `ctx`.
         ctx: @TypeOf(ctx),
 
+        /// Implements handle handler error.
         pub fn handleHandlerError(_: *@This(), _: *Io.Writer, comptime _: type, _: anytype) Action {
             unreachable;
         }
@@ -1072,11 +1105,13 @@ test "middleware Info: supports 'header: type = ...' form" {
         pub const Info = @import("middleware.zig").MiddlewareInfo{
             .name = "mw_needs",
             .header = struct {
+                /// Stores `host`.
                 host: parse.Optional(parse.String),
             },
             .query = struct {},
         };
 
+        /// Handles a middleware invocation for the current request context.
         pub fn call(comptime rctx: ReqCtx, req: rctx.T()) !Res {
             return rctx.next(req);
         }
@@ -1094,22 +1129,27 @@ test "middleware Info: supports 'header: type = ...' form" {
 test "middleware Info: supports header/query/path/data captures" {
     const Mw = struct {
         const AuthData = struct {
+            /// Stores `seen`.
             seen: bool = false,
         };
         pub const Info = @import("middleware.zig").MiddlewareInfo{
             .name = "auth",
             .data = AuthData,
             .path = struct {
+                /// Stores `id`.
                 id: parse.Int(u32),
             },
             .query = struct {
+                /// Stores `q`.
                 q: parse.String,
             },
             .header = struct {
+                /// Stores `x_token`.
                 x_token: parse.String,
             },
         };
 
+        /// Handles a middleware invocation for the current request context.
         pub fn call(comptime rctx: ReqCtx, req: rctx.T()) !Res {
             if (req.paramValue(.id) != 7) return Res.text(500, "bad-id");
             if (!std.mem.eql(u8, req.queryParam(.q), "ok")) return Res.text(500, "bad-q");
@@ -1298,9 +1338,12 @@ test "dispatch: typed path params bad value errors" {
     var w = Io.Writer.fixed(out[0..]);
     var stream: std.Io.net.Stream = undefined;
     const ServerT = struct {
+        /// Stores `io`.
         io: Io,
+        /// Stores `ctx`.
         ctx: void,
 
+        /// Implements handle handler error.
         pub fn handleHandlerError(_: *@This(), _: *Io.Writer, comptime _: type, _: anytype) Action {
             unreachable;
         }
@@ -1315,10 +1358,15 @@ test "dispatch: typed path params with non-string parsers allocate zero" {
     const Alignment = std.mem.Alignment;
 
     const CountingAllocator = struct {
+        /// Stores `inner`.
         inner: Alloc,
+        /// Stores `alloc_calls`.
         alloc_calls: usize = 0,
+        /// Stores `resize_calls`.
         resize_calls: usize = 0,
+        /// Stores `remap_calls`.
         remap_calls: usize = 0,
+        /// Stores `free_calls`.
         free_calls: usize = 0,
 
         fn allocator(self: *@This()) Alloc {
@@ -1392,10 +1440,12 @@ test "dispatch: middleware Info.path works" {
         pub const Info = @import("middleware.zig").MiddlewareInfo{
             .name = "require_id",
             .path = struct {
+                /// Stores `id`.
                 id: parse.Int(u32),
             },
         };
 
+        /// Handles a middleware invocation for the current request context.
         pub fn call(comptime rctx: ReqCtx, req: rctx.T()) !Res {
             if (req.paramValue(.id) == 0) return Res.text(400, "bad");
             return try rctx.next(req);
@@ -1430,6 +1480,7 @@ test "middleware data: set in middleware and handler access" {
             .data = AuthData,
         };
 
+        /// Handles a middleware invocation for the current request context.
         pub fn call(comptime rctx: ReqCtx, req: rctx.T()) !Res {
             const data = req.middlewareData("auth");
             data.user_id = 7;
@@ -1479,10 +1530,14 @@ test "dispatch: handler error uses callback" {
     var w = Io.Writer.fixed(out[0..]);
     var stream: std.Io.net.Stream = undefined;
     const ServerT = struct {
+        /// Stores `io`.
         io: Io,
+        /// Stores `ctx`.
         ctx: void,
+        /// Stores `called`.
         called: *bool,
 
+        /// Implements handle handler error.
         pub fn handleHandlerError(self: *@This(), _: *Io.Writer, comptime _: type, _: anytype) Action {
             self.called.* = true;
             return .close;
@@ -1606,9 +1661,12 @@ test "dispatch: invalid path percent-encoding rejected" {
     var w = Io.Writer.fixed(out[0..]);
     var stream: std.Io.net.Stream = undefined;
     const ServerT = struct {
+        /// Stores `io`.
         io: Io,
+        /// Stores `ctx`.
         ctx: void,
 
+        /// Implements handle handler error.
         pub fn handleHandlerError(_: *@This(), _: *Io.Writer, comptime _: type, _: anytype) Action {
             unreachable;
         }
@@ -1620,10 +1678,14 @@ test "dispatch: invalid path percent-encoding rejected" {
 
 test "dispatch: route upgrade_handler handles 101 and returns upgraded action" {
     const ServerT = struct {
+        /// Stores `io`.
         io: Io,
+        /// Stores `ctx`.
         ctx: void,
+        /// Stores `upgraded`.
         upgraded: bool,
 
+        /// Implements handle handler error.
         pub fn handleHandlerError(_: *@This(), _: *Io.Writer, comptime _: type, _: anytype) Action {
             unreachable;
         }
@@ -1693,9 +1755,12 @@ test "dispatch: null upgrade_handler does not check status" {
     }, .{});
 
     const ServerT = struct {
+        /// Stores `io`.
         io: Io,
+        /// Stores `ctx`.
         ctx: void,
 
+        /// Implements handle handler error.
         pub fn handleHandlerError(_: *@This(), _: *Io.Writer, comptime _: type, _: anytype) Action {
             unreachable;
         }

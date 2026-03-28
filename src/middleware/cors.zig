@@ -124,8 +124,11 @@ pub fn Cors(comptime opts: CorsOptions) type {
     };
 
     const DataT = if (store) struct {
+        /// Stores `origin`.
         origin: []const u8 = "",
+        /// Stores `allowed`.
         allowed: bool = false,
+        /// Stores `preflight`.
         preflight: bool = false,
     } else struct {};
 
@@ -135,8 +138,11 @@ pub fn Cors(comptime opts: CorsOptions) type {
             .name = info_name,
             .data = if (store) DataT else null,
             .header = struct {
+                /// Stores `origin`.
                 origin: parse.Optional(parse.String),
+                /// Stores `access_control_request_method`.
                 access_control_request_method: parse.Optional(parse.String),
+                /// Stores `access_control_request_headers`.
                 access_control_request_headers: parse.Optional(parse.String),
             },
         };
@@ -317,6 +323,7 @@ pub fn Cors(comptime opts: CorsOptions) type {
         pub const Info = Common.Info;
         pub const register_routes = Common.register_routes;
         pub const Routes = Common.Routes;
+        /// Handles a middleware invocation for the current request context.
         pub fn call(comptime rctx: ReqCtx, req: rctx.T()) !Res {
             return Common.handle(rctx, req);
         }
@@ -353,6 +360,7 @@ test "cors: preflight and simple request" {
     );
 
     const Next = struct {
+        /// Handles a middleware invocation for the current request context.
         pub fn call(_: @This(), _: anytype) !Res {
             return Res.text(200, "ok");
         }
@@ -420,6 +428,7 @@ test "cors: check_then_add skips existing response headers" {
     );
 
     const Next = struct {
+        /// Handles a middleware invocation for the current request context.
         pub fn call(_: @This(), _: anytype) !Res {
             return .{
                 .status = .ok,

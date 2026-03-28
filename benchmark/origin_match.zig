@@ -119,6 +119,7 @@ fn printResult(name: []const u8, elapsed_ns: u64, total_lookups: usize) void {
     std.debug.print("{s}: {d} ns total, {d:.3} ns/lookup\n", .{ name, elapsed_ns, ns_per_lookup });
 }
 
+/// Starts this executable.
 pub fn main(init: std.process.Init) !void {
     var iters: usize = 2_000_000;
     var warmup: usize = 200_000;

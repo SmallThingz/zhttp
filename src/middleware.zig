@@ -2,6 +2,7 @@ const std = @import("std");
 const parse = @import("parse.zig");
 const req_ctx = @import("req_ctx.zig");
 const util = @import("util.zig");
+const Res = @import("response.zig").Res;
 
 comptime {
     @setEvalBranchQuota(50000);
@@ -423,3 +424,154 @@ pub const RequestId = @import("middleware/request_id.zig").RequestId;
 pub const RequestIdOptions = @import("middleware/request_id.zig").RequestIdOptions;
 pub const SecurityHeaders = @import("middleware/security_headers.zig").SecurityHeaders;
 pub const SecurityHeadersOptions = @import("middleware/security_headers.zig").SecurityHeadersOptions;
+pub const staticContentTypeFor = @import("middleware/static.zig").contentTypeFor;
+
+test {
+    _ = @import("middleware/mod.zig");
+    _ = @import("middleware/static.zig");
+    _ = @import("middleware/cors.zig");
+    _ = @import("middleware/logger.zig");
+    _ = @import("middleware/compression.zig");
+    _ = @import("middleware/origin.zig");
+    _ = @import("middleware/timeout.zig");
+    _ = @import("middleware/etag.zig");
+    _ = @import("middleware/request_id.zig");
+    _ = @import("middleware/security_headers.zig");
+}
+
+test "middleware routes: register_routes=false is skipped" {
+    const MwA = struct {
+        pub const Info: MiddlewareInfo = .{ .name = "a" };
+        pub const Routes = .{ "a-1", "a-2" };
+        pub fn call(comptime rctx: req_ctx.ReqCtx, req: rctx.T()) !Res {
+            _ = rctx;
+            _ = req;
+            return Res.text(200, "ok");
+        }
+    };
+    const MwB = struct {
+        pub const Info: MiddlewareInfo = .{ .name = "b" };
+        pub const register_routes = false;
+        pub const Routes = .{"b-1"};
+        pub fn call(comptime rctx: req_ctx.ReqCtx, req: rctx.T()) !Res {
+            _ = rctx;
+            _ = req;
+            return Res.text(200, "ok");
+        }
+    };
+    const MwC = struct {
+        pub const Info: MiddlewareInfo = .{ .name = "c" };
+        pub fn call(comptime rctx: req_ctx.ReqCtx, req: rctx.T()) !Res {
+            _ = rctx;
+            _ = req;
+            return Res.text(200, "ok");
+        }
+    };
+
+    const out = routes(.{ MwA, MwB, MwC });
+    try std.testing.expectEqual(@as(usize, 2), util.tupleLen(out));
+    try std.testing.expectEqualStrings("a-1", @field(out, "0"));
+    try std.testing.expectEqualStrings("a-2", @field(out, "1"));
+}
+
+test "middleware context: deduplicates by name and honors initData" {
+    const AuthData = struct { value: u8 = 0 };
+    const MwA = struct {
+        pub const Info: MiddlewareInfo = .{ .name = "auth", .data = AuthData };
+        pub fn initData() AuthData {
+            return .{ .value = 7 };
+        }
+        pub fn call(comptime rctx: req_ctx.ReqCtx, req: rctx.T()) !Res {
+            _ = rctx;
+            _ = req;
+            return Res.text(200, "ok");
+        }
+    };
+    const MwB = struct {
+        pub const Info: MiddlewareInfo = .{ .name = "auth", .data = AuthData };
+        pub fn call(comptime rctx: req_ctx.ReqCtx, req: rctx.T()) !Res {
+            _ = rctx;
+            _ = req;
+            return Res.text(200, "ok");
+        }
+    };
+    const MwC = struct {
+        pub const Info: MiddlewareInfo = .{ .name = "noop", .data = struct {} };
+        pub fn call(comptime rctx: req_ctx.ReqCtx, req: rctx.T()) !Res {
+            _ = rctx;
+            _ = req;
+            return Res.text(200, "ok");
+        }
+    };
+
+    const mws = .{ MwA, MwB, MwC };
+    const Ctx = contextType(mws);
+    try std.testing.expect(@hasField(Ctx, "auth"));
+    try std.testing.expectEqual(@as(usize, 1), @typeInfo(Ctx).@"struct".fields.len);
+
+    const ctx = initContext(mws, Ctx);
+    try std.testing.expectEqual(@as(u8, 7), ctx.auth.value);
+
+    const st = contextST(mws);
+    try std.testing.expectEqual(@as(usize, 1), st.len);
+    try std.testing.expectEqualStrings("auth", st[0].name);
+    try std.testing.expect(st[0].T == AuthData);
+}
+
+test "middleware needs: merges header/query/path requirements" {
+    const MwA = struct {
+        pub const Info: MiddlewareInfo = .{
+            .name = "a",
+            .path = struct { id: parse.Int(u64) },
+            .query = struct { page: parse.Optional(parse.Int(u32)) },
+            .header = struct { x_token: parse.Optional(parse.String) },
+        };
+        pub fn call(comptime rctx: req_ctx.ReqCtx, req: rctx.T()) !Res {
+            _ = rctx;
+            _ = req;
+            return Res.text(200, "ok");
+        }
+    };
+    const MwB = struct {
+        pub const Info: MiddlewareInfo = .{
+            .name = "b",
+            .path = struct { slug: parse.Optional(parse.String) },
+            .query = struct {
+                page: parse.Optional(parse.Int(u32)),
+                q: parse.Optional(parse.String),
+            },
+            .header = struct {
+                X_TOKEN: parse.Optional(parse.String),
+                host: parse.Optional(parse.String),
+            },
+        };
+        pub fn call(comptime rctx: req_ctx.ReqCtx, req: rctx.T()) !Res {
+            _ = rctx;
+            _ = req;
+            return Res.text(200, "ok");
+        }
+    };
+
+    const Headers = needsHeaders(.{ MwA, MwB });
+    try std.testing.expect(@hasField(Headers, "host"));
+    try std.testing.expect(@hasField(Headers, "x_token") or @hasField(Headers, "X_TOKEN"));
+    try std.testing.expectEqual(@as(usize, 2), @typeInfo(Headers).@"struct".fields.len);
+
+    const Query = needsQuery(.{ MwA, MwB });
+    try std.testing.expect(@hasField(Query, "page"));
+    try std.testing.expect(@hasField(Query, "q"));
+    try std.testing.expectEqual(@as(usize, 2), @typeInfo(Query).@"struct".fields.len);
+
+    const Params = needsParams(.{ MwA, MwB });
+    try std.testing.expect(@hasField(Params, "id"));
+    try std.testing.expect(@hasField(Params, "slug"));
+    try std.testing.expectEqual(@as(usize, 2), @typeInfo(Params).@"struct".fields.len);
+}
+
+test "middleware typeList: preserves tuple order" {
+    const out = typeList(.{ u8, u16, bool });
+    try std.testing.expectEqual(@as(usize, 3), out.len);
+    try std.testing.expect(out[0] == u8);
+    try std.testing.expect(out[1] == u16);
+    try std.testing.expect(out[2] == bool);
+}

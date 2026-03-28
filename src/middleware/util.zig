@@ -73,3 +73,59 @@ pub fn hasToken(value: []const u8, token: []const u8) bool {
     }
     return false;
 }
+
+test "appendHeaders: short-circuits empty slices" {
+    const base = [_]Header{.{ .name = "x-a", .value = "1" }};
+    const extra = [_]Header{.{ .name = "x-b", .value = "2" }};
+
+    const out1 = try appendHeaders(std.testing.allocator, base[0..], &.{});
+    try std.testing.expectEqual(@as(usize, @intFromPtr(base[0..].ptr)), @as(usize, @intFromPtr(out1.ptr)));
+    try std.testing.expectEqual(@as(usize, 1), out1.len);
+
+    const out2 = try appendHeaders(std.testing.allocator, &.{}, extra[0..]);
+    try std.testing.expectEqual(@as(usize, @intFromPtr(extra[0..].ptr)), @as(usize, @intFromPtr(out2.ptr)));
+    try std.testing.expectEqual(@as(usize, 1), out2.len);
+}
+
+test "appendHeaders: concatenates in order" {
+    const base = [_]Header{.{ .name = "x-a", .value = "1" }};
+    const extra = [_]Header{
+        .{ .name = "x-b", .value = "2" },
+        .{ .name = "x-c", .value = "3" },
+    };
+    const out = try appendHeaders(std.testing.allocator, base[0..], extra[0..]);
+    defer std.testing.allocator.free(out);
+
+    try std.testing.expectEqual(@as(usize, 3), out.len);
+    try std.testing.expectEqualStrings("x-a", out[0].name);
+    try std.testing.expectEqualStrings("x-b", out[1].name);
+    try std.testing.expectEqualStrings("x-c", out[2].name);
+}
+
+test "shouldAddHeader: check_then_add is case-insensitive" {
+    const headers = [_]Header{
+        .{ .name = "X-Token", .value = "abc" },
+    };
+    try std.testing.expect(!shouldAddHeader(headers[0..], "x-token", .check_then_add));
+    try std.testing.expect(shouldAddHeader(headers[0..], "x-other", .check_then_add));
+}
+
+test "joinCommaList: supports zero one and many entries" {
+    const empty = try joinCommaList(std.testing.allocator, &.{});
+    try std.testing.expectEqualStrings("", empty);
+
+    const single_items = [_][]const u8{"gzip"};
+    const single = try joinCommaList(std.testing.allocator, single_items[0..]);
+    try std.testing.expectEqualStrings("gzip", single);
+
+    const multi_items = [_][]const u8{ "gzip", "br", "deflate" };
+    const multi = try joinCommaList(std.testing.allocator, multi_items[0..]);
+    defer std.testing.allocator.free(multi);
+    try std.testing.expectEqualStrings("gzip, br, deflate", multi);
+}
+
+test "hasToken: trims tokens and ignores case" {
+    try std.testing.expect(hasToken("gzip, deflate, br", "BR"));
+    try std.testing.expect(hasToken(" gzip ,\tdeflate\t", "deflate"));
+    try std.testing.expect(!hasToken("gzip,br", "zstd"));
+}

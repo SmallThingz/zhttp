@@ -1069,6 +1069,25 @@ test "headers: Connection close disables keep-alive" {
     try std.testing.expect(!reqv.keepAlive());
 }
 
+test "headers: HTTP/1.0 is never keep-alive in current policy" {
+    const ReqT = Request(struct {}, struct {}, &.{}, TestMwCtx);
+    const gpa = std.testing.allocator;
+
+    const path = try gpa.dupe(u8, "/");
+    defer gpa.free(path);
+    const query = try gpa.dupe(u8, "");
+    defer gpa.free(query);
+    const line: RequestLine = .{ .method = "GET", .version = .http10, .path = path, .query = query };
+
+    const mw_ctx: TestMwCtx = .{};
+    var reqv = ReqT.init(gpa, std.testing.io, line, mw_ctx);
+    defer reqv.deinit(gpa);
+
+    var r = Io.Reader.fixed("Connection: keep-alive\r\n\r\n");
+    try reqv.parseHeaders(gpa, &r, 8 * 1024);
+    try std.testing.expect(!reqv.keepAlive());
+}
+
 test "headers: trim value + case-insensitive match" {
     const ReqT = Request(
         struct { host: parse.Optional(parse.String) },
@@ -1105,6 +1124,23 @@ test "headers: transfer-encoding list sets chunked" {
     var reqv = ReqT.init(gpa, std.testing.io, line, mw_ctx);
     defer reqv.deinit(gpa);
     var r = Io.Reader.fixed("Transfer-Encoding: gzip, chunked\r\n\r\n");
+    try reqv.parseHeaders(gpa, &r, 8 * 1024);
+    try std.testing.expectEqual(BodyKind.chunked, reqv.baseConst().body_kind);
+}
+
+test "headers: transfer-encoding token match is case-insensitive" {
+    const ReqT = Request(struct {}, struct {}, &.{}, TestMwCtx);
+    const gpa = std.testing.allocator;
+    const path = try gpa.dupe(u8, "/");
+    defer gpa.free(path);
+    const query = try gpa.dupe(u8, "");
+    defer gpa.free(query);
+    const line: RequestLine = .{ .method = "POST", .version = .http11, .path = path, .query = query };
+
+    const mw_ctx: TestMwCtx = .{};
+    var reqv = ReqT.init(gpa, std.testing.io, line, mw_ctx);
+    defer reqv.deinit(gpa);
+    var r = Io.Reader.fixed("Transfer-Encoding: GZIP, CHUNKED\r\n\r\n");
     try reqv.parseHeaders(gpa, &r, 8 * 1024);
     try std.testing.expectEqual(BodyKind.chunked, reqv.baseConst().body_kind);
 }

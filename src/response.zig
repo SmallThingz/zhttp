@@ -219,3 +219,30 @@ test "writeUpgrade: does not inject connection or content-length" {
         "\r\n";
     try std.testing.expectEqualStrings(expected, out[0..w.end]);
 }
+
+test "digits2: handles boundaries" {
+    try std.testing.expectEqualStrings("00", digits2(0)[0..]);
+    try std.testing.expectEqualStrings("07", digits2(7)[0..]);
+    try std.testing.expectEqualStrings("42", digits2(42)[0..]);
+    try std.testing.expectEqualStrings("99", digits2(99)[0..]);
+}
+
+test "Res.format: content-length override is respected" {
+    var res = Res.text(200, "hello");
+    res.format_body_len_override = 123;
+    var out: [256]u8 = undefined;
+    var w = std.Io.Writer.fixed(out[0..]);
+    try res.format(&w);
+    try std.testing.expect(std.mem.indexOf(u8, out[0..w.end], "content-length: 123\r\n") != null);
+}
+
+test "Res.format: optional content-length can be omitted while body is sent" {
+    var res = Res.text(200, "abc");
+    res.format_content_length = false;
+    var out: [256]u8 = undefined;
+    var w = std.Io.Writer.fixed(out[0..]);
+    try res.format(&w);
+
+    try std.testing.expect(std.mem.indexOf(u8, out[0..w.end], "content-length:") == null);
+    try std.testing.expect(std.mem.endsWith(u8, out[0..w.end], "\r\nabc"));
+}

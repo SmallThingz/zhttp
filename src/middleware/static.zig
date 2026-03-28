@@ -31,7 +31,7 @@ fn isSafeRelative(path: []const u8) bool {
     return true;
 }
 
-fn contentTypeFor(path: []const u8) ?[]const u8 {
+pub fn contentTypeFor(path: []const u8) ?[]const u8 {
     const dot = std.mem.lastIndexOfScalar(u8, path, '.') orelse return null;
     const ext = path[dot + 1 ..];
     if (ext.len == 0) return null;
@@ -40,15 +40,52 @@ fn contentTypeFor(path: []const u8) ?[]const u8 {
     return switch (ext.len) {
         2 => switch (c0) {
             'j' => if (std.ascii.toLower(ext[1]) == 's') "application/javascript; charset=utf-8" else null,
+            'm' => if (std.ascii.toLower(ext[1]) == 'd') "text/markdown; charset=utf-8" else null,
+            'g' => if (std.ascii.toLower(ext[1]) == 'z') "application/gzip" else null,
             else => null,
         },
         3 => switch (c0) {
-            'c' => if (std.ascii.toLower(ext[1]) == 's' and std.ascii.toLower(ext[2]) == 's') "text/css; charset=utf-8" else null,
-            't' => if (std.ascii.toLower(ext[1]) == 'x' and std.ascii.toLower(ext[2]) == 't') "text/plain; charset=utf-8" else null,
+            'c' => if (std.ascii.toLower(ext[1]) == 's' and std.ascii.toLower(ext[2]) == 's')
+                "text/css; charset=utf-8"
+            else if (std.ascii.toLower(ext[1]) == 's' and std.ascii.toLower(ext[2]) == 'v')
+                "text/csv; charset=utf-8"
+            else
+                null,
+            't' => if (std.ascii.toLower(ext[1]) == 'x' and std.ascii.toLower(ext[2]) == 't')
+                "text/plain; charset=utf-8"
+            else if (std.ascii.toLower(ext[1]) == 't' and std.ascii.toLower(ext[2]) == 'f')
+                "font/ttf"
+            else if (std.ascii.toLower(ext[1]) == 'a' and std.ascii.toLower(ext[2]) == 'r')
+                "application/x-tar"
+            else
+                null,
             's' => if (std.ascii.toLower(ext[1]) == 'v' and std.ascii.toLower(ext[2]) == 'g') "image/svg+xml" else null,
-            'p' => if (std.ascii.toLower(ext[1]) == 'n' and std.ascii.toLower(ext[2]) == 'g') "image/png" else null,
+            'p' => if (std.ascii.toLower(ext[1]) == 'n' and std.ascii.toLower(ext[2]) == 'g')
+                "image/png"
+            else if (std.ascii.toLower(ext[1]) == 'd' and std.ascii.toLower(ext[2]) == 'f')
+                "application/pdf"
+            else
+                null,
             'j' => if (std.ascii.toLower(ext[1]) == 'p' and std.ascii.toLower(ext[2]) == 'g') "image/jpeg" else null,
             'i' => if (std.ascii.toLower(ext[1]) == 'c' and std.ascii.toLower(ext[2]) == 'o') "image/x-icon" else null,
+            'g' => if (std.ascii.toLower(ext[1]) == 'i' and std.ascii.toLower(ext[2]) == 'f') "image/gif" else null,
+            'b' => if (std.ascii.toLower(ext[1]) == 'm' and std.ascii.toLower(ext[2]) == 'p') "image/bmp" else null,
+            'x' => if (std.ascii.toLower(ext[1]) == 'm' and std.ascii.toLower(ext[2]) == 'l') "application/xml; charset=utf-8" else null,
+            'w' => if (std.ascii.toLower(ext[1]) == 'a' and std.ascii.toLower(ext[2]) == 'v') "audio/wav" else null,
+            'o' => if (std.ascii.toLower(ext[1]) == 'g' and std.ascii.toLower(ext[2]) == 'g') "audio/ogg" else if (std.ascii.toLower(ext[1]) == 't' and std.ascii.toLower(ext[2]) == 'f') "font/otf" else null,
+            'e' => if (std.ascii.toLower(ext[1]) == 'o' and std.ascii.toLower(ext[2]) == 't') "application/vnd.ms-fontobject" else null,
+            'z' => if (std.ascii.toLower(ext[1]) == 'i' and std.ascii.toLower(ext[2]) == 'p') "application/zip" else null,
+            'm' => if (std.ascii.toLower(ext[1]) == 'a' and std.ascii.toLower(ext[2]) == 'p')
+                "application/json; charset=utf-8"
+            else if (std.ascii.toLower(ext[1]) == 'p' and ext[2] == '3')
+                "audio/mpeg"
+            else if (std.ascii.toLower(ext[1]) == 'p' and ext[2] == '4')
+                "video/mp4"
+            else if (std.ascii.toLower(ext[1]) == 'j' and std.ascii.toLower(ext[2]) == 's')
+                "application/javascript; charset=utf-8"
+            else
+                null,
+            'h' => if (std.ascii.toLower(ext[1]) == 't' and std.ascii.toLower(ext[2]) == 'm') "text/html; charset=utf-8" else null,
             else => null,
         },
         4 => switch (c0) {
@@ -59,15 +96,38 @@ fn contentTypeFor(path: []const u8) ?[]const u8 {
                 else => null,
             },
             'w' => switch (std.ascii.toLower(ext[1])) {
-                'e' => if (std.ascii.toLower(ext[2]) == 'b' and std.ascii.toLower(ext[3]) == 'p') "image/webp" else null,
+                'e' => if (std.ascii.toLower(ext[2]) == 'b' and std.ascii.toLower(ext[3]) == 'p')
+                    "image/webp"
+                else if (std.ascii.toLower(ext[2]) == 'b' and std.ascii.toLower(ext[3]) == 'm')
+                    "video/webm"
+                else
+                    null,
                 'o' => if (std.ascii.toLower(ext[2]) == 'f' and std.ascii.toLower(ext[3]) == 'f') "font/woff" else null,
+                'a' => if (std.ascii.toLower(ext[2]) == 's' and std.ascii.toLower(ext[3]) == 'm') "application/wasm" else null,
                 else => null,
             },
+            'a' => if (std.ascii.toLower(ext[1]) == 'v' and std.ascii.toLower(ext[2]) == 'i' and std.ascii.toLower(ext[3]) == 'f') "image/avif" else null,
             else => null,
         },
         5 => switch (c0) {
             'w' => if (std.ascii.toLower(ext[1]) == 'o' and std.ascii.toLower(ext[2]) == 'f' and
                 std.ascii.toLower(ext[3]) == 'f' and std.ascii.toLower(ext[4]) == '2') "font/woff2" else null,
+            else => null,
+        },
+        11 => switch (c0) {
+            'w' => if (std.ascii.toLower(ext[1]) == 'e' and
+                std.ascii.toLower(ext[2]) == 'b' and
+                std.ascii.toLower(ext[3]) == 'm' and
+                std.ascii.toLower(ext[4]) == 'a' and
+                std.ascii.toLower(ext[5]) == 'n' and
+                std.ascii.toLower(ext[6]) == 'i' and
+                std.ascii.toLower(ext[7]) == 'f' and
+                std.ascii.toLower(ext[8]) == 'e' and
+                std.ascii.toLower(ext[9]) == 's' and
+                std.ascii.toLower(ext[10]) == 't')
+                "application/manifest+json; charset=utf-8"
+            else
+                null,
             else => null,
         },
         else => null,
@@ -168,7 +228,7 @@ pub fn Static(comptime opts: StaticOptions) type {
     const cache_enabled: bool = opts.in_memory_cache;
     const watch_opts: StaticWatchOptions = opts.fs_watch;
     const watch_enabled: bool = cache_enabled and watch_opts.enabled;
-    const watch_interval_ns: i128 = @as(i128, @intCast(watch_opts.poll_interval_ms)) * std.time.ns_per_ms;
+    const watch_interval_ns: i96 = @as(i96, @intCast(watch_opts.poll_interval_ms)) * std.time.ns_per_ms;
 
     const pattern = if (std.mem.eql(u8, mount, "/")) "/*" else mount ++ "/*";
     const StaticHeaders = if (etag_enabled) struct { if_none_match: parse.Optional(parse.String) } else struct {};
@@ -181,11 +241,11 @@ pub fn Static(comptime opts: StaticOptions) type {
             content_type: ?[]const u8,
             size: usize,
             mtime_ns: i96,
-            next_watch_check_ns: i128 = 0,
+            next_watch_check_ns: i96 = 0,
         };
         const CacheMap = std.StringHashMapUnmanaged(CacheEntry);
         const CacheState = struct {
-            mutex: std.Thread.Mutex = .{},
+            mutex: Io.Mutex = Io.Mutex.init,
             map: CacheMap = .empty,
         };
         var cache_state: CacheState = .{};
@@ -209,8 +269,8 @@ pub fn Static(comptime opts: StaticOptions) type {
             return serve(req);
         }
 
-        fn nowNs() i128 {
-            return std.time.nanoTimestamp();
+        fn nowNs(io: Io) i96 {
+            return Io.Timestamp.now(io, .awake).nanoseconds;
         }
 
         fn openBaseDir(io: Io) !Io.Dir {
@@ -228,6 +288,7 @@ pub fn Static(comptime opts: StaticOptions) type {
         }
 
         fn cacheInsert(
+            io: Io,
             file_rel: []const u8,
             body: []const u8,
             etag: ?[]const u8,
@@ -247,8 +308,8 @@ pub fn Static(comptime opts: StaticOptions) type {
             const tag_copy = if (etag) |tag| cache_a.dupe(u8, tag) catch return else null;
             errdefer if (tag_copy) |tag| cache_a.free(tag);
 
-            cache_state.mutex.lock();
-            defer cache_state.mutex.unlock();
+            cache_state.mutex.lockUncancelable(io);
+            defer cache_state.mutex.unlock(io);
 
             if (cache_state.map.fetchRemove(file_rel)) |old| {
                 freeRemoved(old);
@@ -260,7 +321,7 @@ pub fn Static(comptime opts: StaticOptions) type {
                 .content_type = content_type,
                 .size = size,
                 .mtime_ns = mtime_ns,
-                .next_watch_check_ns = if (watch_interval_ns == 0) 0 else nowNs() + watch_interval_ns,
+                .next_watch_check_ns = if (watch_interval_ns == 0) 0 else nowNs(io) + watch_interval_ns,
             }) catch {
                 cache_a.free(key_copy);
                 cache_a.free(body_copy);
@@ -284,13 +345,13 @@ pub fn Static(comptime opts: StaticOptions) type {
         fn serveFromCache(req: anytype, file_rel: []const u8) !?Res {
             if (!cache_enabled) return null;
 
-            cache_state.mutex.lock();
-            defer cache_state.mutex.unlock();
+            cache_state.mutex.lockUncancelable(req.io());
+            defer cache_state.mutex.unlock(req.io());
 
             const entry = cache_state.map.getPtr(file_rel) orelse return null;
 
             if (watch_enabled) {
-                const now = nowNs();
+                const now = nowNs(req.io());
                 if (watch_interval_ns == 0 or now >= entry.next_watch_check_ns) {
                     entry.next_watch_check_ns = now + watch_interval_ns;
                     if (!cacheEntryFresh(req.io(), file_rel, entry.*)) {
@@ -302,7 +363,7 @@ pub fn Static(comptime opts: StaticOptions) type {
                 }
             }
 
-            return buildResponse(req, entry.body, entry.content_type, entry.etag);
+            return @as(?Res, try buildResponse(req, entry.body, entry.content_type, entry.etag));
         }
 
         fn buildResponse(req: anytype, body: []const u8, content_type: ?[]const u8, tag: ?[]const u8) !Res {
@@ -387,7 +448,7 @@ pub fn Static(comptime opts: StaticOptions) type {
             const content_type = contentTypeFor(file_rel);
             const tag = if (etag_enabled) try etagFor(a, body) else null;
 
-            cacheInsert(file_rel, body, tag, content_type, size, st.mtime.nanoseconds);
+            cacheInsert(req.io(), file_rel, body, tag, content_type, size, st.mtime.nanoseconds);
             return buildResponse(req, body, content_type, tag);
         }
     };
@@ -396,6 +457,25 @@ pub fn Static(comptime opts: StaticOptions) type {
 test "static: normalize mount and patterns" {
     const S = Static(.{ .dir = "public", .mount = "/static/" });
     try std.testing.expect(std.mem.eql(u8, S.Routes[0].pattern, "/static/*"));
+}
+
+test "static: helper functions handle edge cases" {
+    try std.testing.expect(isSafeRelative("a/b/c.txt"));
+    try std.testing.expect(!isSafeRelative(""));
+    try std.testing.expect(!isSafeRelative("/abs/path"));
+    try std.testing.expect(!isSafeRelative("a//b"));
+    try std.testing.expect(!isSafeRelative("../secret"));
+    try std.testing.expect(!isSafeRelative("a\\b"));
+
+    try std.testing.expectEqualStrings("text/html; charset=utf-8", contentTypeFor("index.HTML").?);
+    try std.testing.expectEqualStrings("image/jpeg", contentTypeFor("photo.JpEg").?);
+    try std.testing.expect(contentTypeFor("noext") == null);
+
+    try std.testing.expect(etagMatches("\"abc\"", "\"abc\""));
+    try std.testing.expect(etagMatches("W/\"abc\"", "\"abc\""));
+    try std.testing.expect(etagMatches("W/\"x\", \"abc\"", "\"abc\""));
+    try std.testing.expect(etagMatches("*", "\"abc\""));
+    try std.testing.expect(!etagMatches("\"x\", \"y\"", "\"abc\""));
 }
 
 fn headerValue(headers: []const Header, name: []const u8) ?[]const u8 {
@@ -412,6 +492,17 @@ fn writeTestFile(path: []const u8, content: []const u8) !void {
     });
 }
 
+test "static: contentTypeFor covers common web/media types" {
+    try std.testing.expectEqualStrings("text/html; charset=utf-8", contentTypeFor("index.html").?);
+    try std.testing.expectEqualStrings("text/html; charset=utf-8", contentTypeFor("index.htm").?);
+    try std.testing.expectEqualStrings("application/javascript; charset=utf-8", contentTypeFor("app.mjs").?);
+    try std.testing.expectEqualStrings("application/json; charset=utf-8", contentTypeFor("app.map").?);
+    try std.testing.expectEqualStrings("application/wasm", contentTypeFor("mod.wasm").?);
+    try std.testing.expectEqualStrings("video/webm", contentTypeFor("clip.webm").?);
+    try std.testing.expectEqualStrings("audio/mpeg", contentTypeFor("sound.mp3").?);
+    try std.testing.expectEqualStrings("application/manifest+json; charset=utf-8", contentTypeFor("site.webmanifest").?);
+}
+
 test "static: serves file and index, blocks traversal" {
     const S = Static(.{ .dir = "testdata/static", .mount = "/static" });
     const MwCtx = struct {};
@@ -422,9 +513,10 @@ test "static: serves file and index, blocks traversal" {
         MwCtx,
     );
 
-    const gpa = std.testing.allocator;
-
     {
+        var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena_state.deinit();
+        const a = arena_state.allocator();
         const path_buf = "/static/hello.txt".*;
         const query_buf: [0]u8 = .{};
         const line: @import("../request.zig").RequestLine = .{
@@ -434,15 +526,18 @@ test "static: serves file and index, blocks traversal" {
             .query = @constCast(query_buf[0..]),
         };
         const mw_ctx: MwCtx = .{};
-        var reqv = ReqT.init(gpa, std.testing.io, line, mw_ctx);
-        defer reqv.deinit(gpa);
-        const res = try S.Routes[0].handler(&reqv);
+        var reqv = ReqT.init(a, std.testing.io, line, mw_ctx);
+        defer reqv.deinit(a);
+        const res = try S.serve(&reqv);
         try std.testing.expectEqual(@as(u16, 200), @intFromEnum(res.status));
         try std.testing.expectEqualStrings("hello\n", res.body);
         try std.testing.expect(headerValue(res.headers, "content-type") != null);
     }
 
     {
+        var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena_state.deinit();
+        const a = arena_state.allocator();
         const path_buf = "/static/".*;
         const query_buf: [0]u8 = .{};
         const line: @import("../request.zig").RequestLine = .{
@@ -452,14 +547,17 @@ test "static: serves file and index, blocks traversal" {
             .query = @constCast(query_buf[0..]),
         };
         const mw_ctx: MwCtx = .{};
-        var reqv = ReqT.init(gpa, std.testing.io, line, mw_ctx);
-        defer reqv.deinit(gpa);
-        const res = try S.Routes[0].handler(&reqv);
+        var reqv = ReqT.init(a, std.testing.io, line, mw_ctx);
+        defer reqv.deinit(a);
+        const res = try S.serve(&reqv);
         try std.testing.expectEqual(@as(u16, 200), @intFromEnum(res.status));
         try std.testing.expectEqualStrings("index\n", res.body);
     }
 
     {
+        var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena_state.deinit();
+        const a = arena_state.allocator();
         const path_buf = "/static/../secret.txt".*;
         const query_buf: [0]u8 = .{};
         const line: @import("../request.zig").RequestLine = .{
@@ -469,9 +567,9 @@ test "static: serves file and index, blocks traversal" {
             .query = @constCast(query_buf[0..]),
         };
         const mw_ctx: MwCtx = .{};
-        var reqv = ReqT.init(gpa, std.testing.io, line, mw_ctx);
-        defer reqv.deinit(gpa);
-        const res = try S.Routes[0].handler(&reqv);
+        var reqv = ReqT.init(a, std.testing.io, line, mw_ctx);
+        defer reqv.deinit(a);
+        const res = try S.serve(&reqv);
         try std.testing.expectEqual(@as(u16, 404), @intFromEnum(res.status));
     }
 }
@@ -486,11 +584,13 @@ test "static: etag returns 304 on match" {
         MwCtx,
     );
 
-    const gpa = std.testing.allocator;
     const path_buf = "/static/hello.txt".*;
     const query_buf: [0]u8 = .{};
 
     {
+        var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena_state.deinit();
+        const a = arena_state.allocator();
         const line: @import("../request.zig").RequestLine = .{
             .method = "GET",
             .version = .http11,
@@ -498,12 +598,11 @@ test "static: etag returns 304 on match" {
             .query = @constCast(query_buf[0..]),
         };
         const mw_ctx: MwCtx = .{};
-        var reqv = ReqT.init(gpa, std.testing.io, line, mw_ctx);
-        defer reqv.deinit(gpa);
-        const res = try S.Routes[0].handler(&reqv);
+        var reqv = ReqT.init(a, std.testing.io, line, mw_ctx);
+        defer reqv.deinit(a);
+        const res = try S.serve(&reqv);
         const tag = headerValue(res.headers, "etag") orelse return error.TestExpectedEqual;
-        const header_line = try std.fmt.allocPrint(gpa, "If-None-Match: {s}\r\n\r\n", .{tag});
-        defer gpa.free(header_line);
+        const header_line = try std.fmt.allocPrint(a, "If-None-Match: {s}\r\n\r\n", .{tag});
 
         const line2: @import("../request.zig").RequestLine = .{
             .method = "GET",
@@ -512,11 +611,11 @@ test "static: etag returns 304 on match" {
             .query = @constCast(query_buf[0..]),
         };
         const mw_ctx2: MwCtx = .{};
-        var reqv2 = ReqT.init(gpa, std.testing.io, line2, mw_ctx2);
-        defer reqv2.deinit(gpa);
+        var reqv2 = ReqT.init(a, std.testing.io, line2, mw_ctx2);
+        defer reqv2.deinit(a);
         var r = std.Io.Reader.fixed(header_line);
-        try reqv2.parseHeaders(gpa, &r, 1024);
-        const res2 = try S.Routes[0].handler(&reqv2);
+        try reqv2.parseHeaders(a, &r, 1024);
+        const res2 = try S.serve(&reqv2);
         try std.testing.expectEqual(@as(u16, 304), @intFromEnum(res2.status));
         try std.testing.expectEqualStrings("", res2.body);
     }
@@ -544,11 +643,13 @@ test "static: in-memory cache serves stale bytes when fs watch is disabled" {
     defer cwd.deleteTree(std.testing.io, static_dir) catch {};
     try writeTestFile(file_path, "v1\n");
 
-    const gpa = std.testing.allocator;
     const path_buf = "/static/watch.txt".*;
     const query_buf: [0]u8 = .{};
 
     {
+        var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena_state.deinit();
+        const a = arena_state.allocator();
         const line: @import("../request.zig").RequestLine = .{
             .method = "GET",
             .version = .http11,
@@ -556,9 +657,9 @@ test "static: in-memory cache serves stale bytes when fs watch is disabled" {
             .query = @constCast(query_buf[0..]),
         };
         const mw_ctx: MwCtx = .{};
-        var reqv = ReqT.init(gpa, std.testing.io, line, mw_ctx);
-        defer reqv.deinit(gpa);
-        const res = try S.Routes[0].handler(&reqv);
+        var reqv = ReqT.init(a, std.testing.io, line, mw_ctx);
+        defer reqv.deinit(a);
+        const res = try S.serve(&reqv);
         try std.testing.expectEqual(@as(u16, 200), @intFromEnum(res.status));
         try std.testing.expectEqualStrings("v1\n", res.body);
     }
@@ -566,6 +667,9 @@ test "static: in-memory cache serves stale bytes when fs watch is disabled" {
     try writeTestFile(file_path, "v2\n");
 
     {
+        var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena_state.deinit();
+        const a = arena_state.allocator();
         const line: @import("../request.zig").RequestLine = .{
             .method = "GET",
             .version = .http11,
@@ -573,9 +677,9 @@ test "static: in-memory cache serves stale bytes when fs watch is disabled" {
             .query = @constCast(query_buf[0..]),
         };
         const mw_ctx: MwCtx = .{};
-        var reqv = ReqT.init(gpa, std.testing.io, line, mw_ctx);
-        defer reqv.deinit(gpa);
-        const res = try S.Routes[0].handler(&reqv);
+        var reqv = ReqT.init(a, std.testing.io, line, mw_ctx);
+        defer reqv.deinit(a);
+        const res = try S.serve(&reqv);
         try std.testing.expectEqual(@as(u16, 200), @intFromEnum(res.status));
         try std.testing.expectEqualStrings("v1\n", res.body);
     }
@@ -606,11 +710,13 @@ test "static: in-memory cache refreshes when fs watch is enabled" {
     defer cwd.deleteTree(std.testing.io, static_dir) catch {};
     try writeTestFile(file_path, "v1\n");
 
-    const gpa = std.testing.allocator;
     const path_buf = "/static/watch.txt".*;
     const query_buf: [0]u8 = .{};
 
     {
+        var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena_state.deinit();
+        const a = arena_state.allocator();
         const line: @import("../request.zig").RequestLine = .{
             .method = "GET",
             .version = .http11,
@@ -618,9 +724,9 @@ test "static: in-memory cache refreshes when fs watch is enabled" {
             .query = @constCast(query_buf[0..]),
         };
         const mw_ctx: MwCtx = .{};
-        var reqv = ReqT.init(gpa, std.testing.io, line, mw_ctx);
-        defer reqv.deinit(gpa);
-        const res = try S.Routes[0].handler(&reqv);
+        var reqv = ReqT.init(a, std.testing.io, line, mw_ctx);
+        defer reqv.deinit(a);
+        const res = try S.serve(&reqv);
         try std.testing.expectEqual(@as(u16, 200), @intFromEnum(res.status));
         try std.testing.expectEqualStrings("v1\n", res.body);
     }
@@ -628,6 +734,9 @@ test "static: in-memory cache refreshes when fs watch is enabled" {
     try writeTestFile(file_path, "v2\n");
 
     {
+        var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena_state.deinit();
+        const a = arena_state.allocator();
         const line: @import("../request.zig").RequestLine = .{
             .method = "GET",
             .version = .http11,
@@ -635,9 +744,9 @@ test "static: in-memory cache refreshes when fs watch is enabled" {
             .query = @constCast(query_buf[0..]),
         };
         const mw_ctx: MwCtx = .{};
-        var reqv = ReqT.init(gpa, std.testing.io, line, mw_ctx);
-        defer reqv.deinit(gpa);
-        const res = try S.Routes[0].handler(&reqv);
+        var reqv = ReqT.init(a, std.testing.io, line, mw_ctx);
+        defer reqv.deinit(a);
+        const res = try S.serve(&reqv);
         try std.testing.expectEqual(@as(u16, 200), @intFromEnum(res.status));
         try std.testing.expectEqualStrings("v2\n", res.body);
     }

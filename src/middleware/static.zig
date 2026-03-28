@@ -11,6 +11,8 @@ const util = @import("util.zig");
 
 const Io = std.Io;
 
+pub const StaticSignature = struct {};
+
 fn normalizeMount(comptime m: []const u8) []const u8 {
     if (m.len == 0 or m[0] != '/') @compileError("Static.mount must start with '/'");
     if (m.len == 1) return "/";
@@ -186,10 +188,8 @@ pub const StaticOptions = struct {
     ///
     /// `/` serves from root; `/assets` serves under `/assets/*`.
     mount: []const u8 = "/",
-    /// Whether this middleware should auto-register GET/HEAD routes for static serving.
-    ///
-    /// Disable when you want to call `serve` logic via custom routes only.
-    register_routes: bool = true,
+    /// Optional middleware name used for metadata/signature identification.
+    name: ?[]const u8 = null,
     /// Optional `cache-control` header value to include on served files.
     cache_control: ?[]const u8 = null,
     /// Optional index file name for directory requests (`/foo/` -> `/foo/{index}`).
@@ -220,7 +220,7 @@ pub fn Static(comptime opts: StaticOptions) type {
     if (dir_path.len == 0) @compileError("Static.dir must be non-empty");
 
     const mount = normalizeMount(opts.mount);
-    const register_routes_opt = opts.register_routes;
+    const info_name = if (opts.name) |n| n else "static";
     const cache_control: ?[]const u8 = opts.cache_control;
     const index: ?[]const u8 = opts.index;
     const etag_enabled: bool = opts.etag;
@@ -251,14 +251,18 @@ pub fn Static(comptime opts: StaticOptions) type {
         var cache_state: CacheState = .{};
 
         pub const Info = MiddlewareInfo{
-            .name = "static",
+            .name = info_name,
             .header = if (etag_enabled) StaticHeaders else null,
         };
-        pub const register_routes = register_routes_opt;
-        pub const Routes = .{
+        pub const Signature = StaticSignature;
+        const OperationRoutes = .{
             router.get(pattern, handler, .{ .headers = StaticHeaders }),
             router.head(pattern, handler, .{ .headers = StaticHeaders }),
         };
+
+        pub fn operationRoutes() @TypeOf(OperationRoutes) {
+            return OperationRoutes;
+        }
 
         /// Handles a middleware invocation for the current request context.
         pub fn call(comptime rctx: ReqCtx, req: rctx.T()) !Res {
@@ -454,9 +458,11 @@ pub fn Static(comptime opts: StaticOptions) type {
     };
 }
 
-test "static: normalize mount and patterns" {
+test "static: normalize mount and operation routes" {
     const S = Static(.{ .dir = "public", .mount = "/static/" });
-    try std.testing.expect(std.mem.eql(u8, S.Routes[0].pattern, "/static/*"));
+    const routes = S.operationRoutes();
+    const fields = @typeInfo(@TypeOf(routes)).@"struct".fields;
+    try std.testing.expect(std.mem.eql(u8, @field(routes, fields[0].name).pattern, "/static/*"));
 }
 
 test "static: helper functions handle edge cases" {

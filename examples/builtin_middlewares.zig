@@ -54,6 +54,9 @@ fn headerContains(head: []const u8, allocator: std.mem.Allocator, needle_lower: 
     return std.mem.indexOf(u8, lower, needle_lower) != null;
 }
 
+const CorsMw = zhttp.middleware.Cors(.{ .origins = &.{"http://example.com"} });
+const StaticMw = zhttp.middleware.Static(.{ .dir = "examples/static", .mount = "/static" });
+
 const SrvT = zhttp.Server(.{
     .middlewares = .{
         zhttp.middleware.Logger(.{}),
@@ -62,12 +65,16 @@ const SrvT = zhttp.Server(.{
             .origins = &.{"http://example.com"},
             .allow_missing = true,
         }),
-        zhttp.middleware.Cors(.{ .origins = &.{"http://example.com"} }),
+        CorsMw,
         zhttp.middleware.Etag(.{ .header_behavior = .check_then_add }),
         zhttp.middleware.RequestId(.{ .name = "rid" }),
         zhttp.middleware.Timeout(.{ .ms = 5000 }),
         zhttp.middleware.Compression(.{ .min_size = 999999 }),
-        zhttp.middleware.Static(.{ .dir = "examples/static", .mount = "/static" }),
+        StaticMw,
+    },
+    .operations = .{
+        zhttp.operations.Cors(CorsMw),
+        zhttp.operations.Static(StaticMw),
     },
     .routes = .{
         zhttp.get("/public", public, .{}),

@@ -8,6 +8,7 @@ const response = @import("response.zig");
 const request = @import("request.zig");
 const router = @import("router.zig");
 const middleware = @import("middleware.zig");
+const operations = @import("operations.zig");
 const parse = @import("parse.zig");
 
 fn setTcpNoDelay(stream: *const std.Io.net.Stream) void {
@@ -45,6 +46,7 @@ fn configField(comptime cfg: anytype, comptime name: []const u8) @FieldType(Conf
 /// - `Context: type`      Optional user context type. Defaults to `void`.
 /// - `middlewares: tuple` Optional global middleware types. Defaults to `.{}`.
 /// - `routes: struct`     Required routes tuple/struct: `.{ zhttp.get(...), ... }`.
+/// - `operations: tuple`  Optional route-operation types executed at comptime in tuple order.
 /// - `config: struct`     Optional config overrides (fields match `zhttp.server.Config`).
 /// - `error_handler`      Optional fallback transport/dispatch error handler:
 ///                        `fn(*Server, *Io.Writer, comptime ErrorSet: type, err: ErrorSet) router.Action`.
@@ -65,8 +67,8 @@ pub fn Server(comptime def: anytype) type {
 
     const DefT = @TypeOf(def);
     const Middlewares = if (@hasField(DefT, "middlewares")) def.middlewares else .{};
-    const MiddlewareRoutes = middleware.routes(Middlewares);
-    const Routes = router.mergeRoutes(def.routes, MiddlewareRoutes);
+    const Operations = if (@hasField(DefT, "operations")) def.operations else .{};
+    const Routes = operations.apply(def.routes, Middlewares, Operations);
     const Compiled = router.Compiled(Context, Routes, Middlewares);
     const DefaultNotFound = struct {
         fn handler(_: anytype) !response.Res {

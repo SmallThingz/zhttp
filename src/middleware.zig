@@ -1,7 +1,6 @@
 const std = @import("std");
 const parse = @import("parse.zig");
 const req_ctx = @import("req_ctx.zig");
-const util = @import("util.zig");
 
 comptime {
     @setEvalBranchQuota(50000);
@@ -19,114 +18,6 @@ pub const MiddlewareInfo = struct {
     /// Optional header capture type required by this middleware.
     header: ?type = null,
 };
-
-const EmptyTuple = std.meta.Tuple(&.{});
-
-fn tupleConcatValuesType(comptime a: anytype, comptime b: anytype) type {
-    const la: usize = comptime util.tupleLen(a);
-    const lb: usize = comptime util.tupleLen(b);
-    if (la == 0) return @TypeOf(b);
-    if (lb == 0) return @TypeOf(a);
-    const OutFieldTypes = comptime blk: {
-        var out: [la + lb]type = undefined;
-        for (@typeInfo(@TypeOf(a)).@"struct".fields, 0..) |f, i| {
-            out[i] = @TypeOf(@field(a, f.name));
-        }
-        for (@typeInfo(@TypeOf(b)).@"struct".fields, 0..) |f, i| {
-            out[la + i] = @TypeOf(@field(b, f.name));
-        }
-        break :blk out;
-    };
-    return std.meta.Tuple(&OutFieldTypes);
-}
-
-fn tupleConcatValues(comptime a: anytype, comptime b: anytype) tupleConcatValuesType(a, b) {
-    const la: usize = comptime util.tupleLen(a);
-    const lb: usize = comptime util.tupleLen(b);
-    if (la == 0) return b;
-    if (lb == 0) return a;
-
-    const OutT = tupleConcatValuesType(a, b);
-    return comptime blk: {
-        var out: OutT = undefined;
-        for (@typeInfo(@TypeOf(a)).@"struct".fields, 0..) |f, i| {
-            @field(out, std.fmt.comptimePrint("{d}", .{i})) = @field(a, f.name);
-        }
-        for (@typeInfo(@TypeOf(b)).@"struct".fields, 0..) |f, i| {
-            @field(out, std.fmt.comptimePrint("{d}", .{la + i})) = @field(b, f.name);
-        }
-        break :blk out;
-    };
-}
-
-fn tupleTailType(comptime t: anytype) type {
-    const fields = @typeInfo(@TypeOf(t)).@"struct".fields;
-    if (fields.len <= 1) return EmptyTuple;
-    const OutFieldTypes = comptime blk: {
-        var out: [fields.len - 1]type = undefined;
-        for (fields[1..], 0..) |f, i| {
-            out[i] = @TypeOf(@field(t, f.name));
-        }
-        break :blk out;
-    };
-    return std.meta.Tuple(&OutFieldTypes);
-}
-
-fn tupleTail(comptime t: anytype) tupleTailType(t) {
-    const fields = @typeInfo(@TypeOf(t)).@"struct".fields;
-    if (fields.len <= 1) return .{};
-    const OutT = tupleTailType(t);
-    return comptime blk: {
-        var out: OutT = undefined;
-        for (fields[1..], 0..) |f, i| {
-            @field(out, std.fmt.comptimePrint("{d}", .{i})) = @field(t, f.name);
-        }
-        break :blk out;
-    };
-}
-
-/// Returns the combined type of middleware-provided routes.
-pub fn routesType(comptime mws: anytype) type {
-    comptime {
-        @setEvalBranchQuota(50000);
-    }
-    const info0 = @typeInfo(@TypeOf(mws));
-    if (info0 != .@"struct" or !info0.@"struct".is_tuple) @compileError("middlewares must be a tuple");
-    const fields = info0.@"struct".fields;
-    if (fields.len == 0) return EmptyTuple;
-
-    const First = @field(mws, fields[0].name);
-    const Rest = tupleTail(mws);
-
-    const FirstRoutesT = comptime blk: {
-        if (!@hasDecl(First, "Routes")) break :blk EmptyTuple;
-        if (@hasDecl(First, "register_routes") and !First.register_routes) break :blk EmptyTuple;
-        break :blk @TypeOf(First.Routes);
-    };
-    const RestRoutesT = routesType(Rest);
-    const a: FirstRoutesT = undefined;
-    const b: RestRoutesT = undefined;
-    return tupleConcatValuesType(a, b);
-}
-
-/// Returns the combined middleware-provided route tuple.
-pub fn routes(comptime mws: anytype) routesType(mws) {
-    const info0 = @typeInfo(@TypeOf(mws));
-    if (info0 != .@"struct" or !info0.@"struct".is_tuple) @compileError("middlewares must be a tuple");
-    const fields = info0.@"struct".fields;
-    if (fields.len == 0) return .{};
-
-    const First = @field(mws, fields[0].name);
-    const Rest = tupleTail(mws);
-
-    const first_routes = comptime blk: {
-        if (!@hasDecl(First, "Routes")) break :blk .{};
-        if (@hasDecl(First, "register_routes") and !First.register_routes) break :blk .{};
-        break :blk First.Routes;
-    };
-    const rest_routes = routes(Rest);
-    return tupleConcatValues(first_routes, rest_routes);
-}
 
 /// Validates and returns middleware metadata.
 pub fn info(comptime Mw: type) MiddlewareInfo {
@@ -421,9 +312,11 @@ pub fn concatTypeLists(comptime a: []const type, comptime b: []const type) []con
 
 pub const Static = @import("middleware/static.zig").Static;
 pub const StaticOptions = @import("middleware/static.zig").StaticOptions;
+pub const StaticSignature = @import("middleware/static.zig").StaticSignature;
 pub const HeaderSetBehavior = @import("middleware/util.zig").HeaderSetBehavior;
 pub const Cors = @import("middleware/cors.zig").Cors;
 pub const CorsOptions = @import("middleware/cors.zig").CorsOptions;
+pub const CorsSignature = @import("middleware/cors.zig").CorsSignature;
 pub const Logger = @import("middleware/logger.zig").Logger;
 pub const LoggerOptions = @import("middleware/logger.zig").LoggerOptions;
 pub const Compression = @import("middleware/compression.zig").Compression;

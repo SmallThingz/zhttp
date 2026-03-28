@@ -5,8 +5,9 @@ const Header = @import("../response.zig").Header;
 const MiddlewareInfo = @import("../middleware.zig").MiddlewareInfo;
 const ReqCtx = @import("../req_ctx.zig").ReqCtx;
 const parse = @import("../parse.zig");
-const router = @import("../router.zig");
 const util = @import("util.zig");
+
+pub const CorsSignature = struct {};
 
 fn listContainsIgnoreCase(list: []const []const u8, value: []const u8) bool {
     for (list) |item| {
@@ -54,8 +55,6 @@ pub const CorsOptions = struct {
     max_age: ?u32 = null,
     /// When true, reject disallowed simple requests with `403` instead of passing through.
     enforce: bool = false,
-    /// Whether middleware registers a default `OPTIONS /*` route.
-    register_routes: bool = true,
     /// Optional middleware context field name used to store origin/allow/preflight results.
     name: ?[]const u8 = null,
     /// Optional custom origin predicate.
@@ -89,7 +88,6 @@ pub fn Cors(comptime opts: CorsOptions) type {
     const allow_credentials: bool = opts.credentials;
     const max_age: ?u32 = opts.max_age;
     const enforce: bool = opts.enforce;
-    const register_routes_opt: bool = opts.register_routes;
     const store: bool = opts.name != null;
     const origin_is_allowed = opts.origin_is_allowed;
     const allow_origin_behavior = opts.allow_origin_behavior;
@@ -133,6 +131,7 @@ pub fn Cors(comptime opts: CorsOptions) type {
     } else struct {};
 
     const Common = struct {
+        pub const Signature = CorsSignature;
         pub const info_name: []const u8 = if (store) opts.name.? else "cors";
         pub const Info = MiddlewareInfo{
             .name = info_name,
@@ -146,16 +145,6 @@ pub fn Cors(comptime opts: CorsOptions) type {
                 access_control_request_headers: parse.Optional(parse.String),
             },
         };
-
-        pub const register_routes = register_routes_opt;
-        pub const Routes = .{
-            router.options("/*", defaultOptionsHandler, .{}),
-        };
-
-        fn defaultOptionsHandler(req: anytype) !Res {
-            _ = req;
-            return Res.text(404, "not found");
-        }
 
         fn originAllowed(origin: []const u8) bool {
             if (origin_is_allowed) |f| return @call(.auto, f, .{origin});
@@ -320,9 +309,8 @@ pub fn Cors(comptime opts: CorsOptions) type {
     };
 
     return struct {
+        pub const Signature = Common.Signature;
         pub const Info = Common.Info;
-        pub const register_routes = Common.register_routes;
-        pub const Routes = Common.Routes;
         /// Handles a middleware invocation for the current request context.
         pub fn call(comptime rctx: ReqCtx, req: rctx.T()) !Res {
             return Common.handle(rctx, req);

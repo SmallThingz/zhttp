@@ -1050,10 +1050,6 @@ test "middleware Needs: supports 'headers: type = ...' form" {
         pub fn call(comptime rctx: ReqCtx, req: rctx.T()) !Res {
             return rctx.next(req);
         }
-
-        pub fn Override(comptime _: ReqCtx) type {
-            return struct {};
-        }
     };
 
     _ = Compiled(void, .{
@@ -1091,10 +1087,6 @@ test "middleware Info: supports header/query/path/data captures" {
             const data = req.middlewareData("auth");
             data.seen = true;
             return rctx.next(req);
-        }
-
-        pub fn Override(comptime _: ReqCtx) type {
-            return struct {};
         }
     };
 
@@ -1378,10 +1370,6 @@ test "dispatch: middleware Needs.params works" {
             if (req.paramValue(.id) == 0) return Res.text(400, "bad");
             return try rctx.next(req);
         }
-
-        pub fn Override(comptime _: ReqCtx) type {
-            return struct {};
-        }
     };
 
     const S = Compiled(void, .{
@@ -1416,10 +1404,6 @@ test "middleware data: set in middleware and handler access" {
             const data = req.middlewareData("auth");
             data.user_id = 7;
             return rctx.next(req);
-        }
-
-        pub fn Override(comptime _: ReqCtx) type {
-            return struct {};
         }
     };
 

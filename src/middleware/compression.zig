@@ -77,10 +77,6 @@ pub fn Compression(comptime opts: anytype) type {
             res.body = compressed;
             return res;
         }
-
-        pub fn Override(comptime _: ReqCtx) type {
-            return struct {};
-        }
     };
 }
 

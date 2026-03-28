@@ -109,10 +109,6 @@ pub fn Static(comptime opts: anytype) type {
             return rctx.next(req);
         }
 
-        pub fn Override(comptime _: ReqCtx) type {
-            return struct {};
-        }
-
         fn handler(req: anytype) !Res {
             return serve(req);
         }

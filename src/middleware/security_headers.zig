@@ -70,10 +70,6 @@ pub fn SecurityHeaders(comptime opts: anytype) type {
             res.headers = try util.appendHeaders(a, res.headers, hdrs[0..n]);
             return res;
         }
-
-        pub fn Override(comptime _: ReqCtx) type {
-            return struct {};
-        }
     };
 }
 

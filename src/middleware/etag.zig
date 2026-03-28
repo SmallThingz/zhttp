@@ -64,10 +64,6 @@ pub fn Etag(comptime opts: anytype) type {
             res.headers = try util.appendHeaders(req.allocator(), res.headers, &.{.{ .name = "etag", .value = tag }});
             return res;
         }
-
-        pub fn Override(comptime _: ReqCtx) type {
-            return struct {};
-        }
     };
 }
 

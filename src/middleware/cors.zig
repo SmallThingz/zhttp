@@ -246,10 +246,6 @@ pub fn Cors(comptime opts: anytype) type {
         pub fn call(comptime rctx: ReqCtx, req: rctx.T()) !Res {
             return Common.handle(rctx, req);
         }
-
-        pub fn Override(comptime _: ReqCtx) type {
-            return struct {};
-        }
     } else struct {
         pub const Info = Common.Info;
         pub const register_routes = Common.register_routes;
@@ -257,10 +253,6 @@ pub fn Cors(comptime opts: anytype) type {
         pub const Data = Common.Data;
         pub fn call(comptime rctx: ReqCtx, req: rctx.T()) !Res {
             return Common.handle(rctx, req);
-        }
-
-        pub fn Override(comptime _: ReqCtx) type {
-            return struct {};
         }
     };
 }

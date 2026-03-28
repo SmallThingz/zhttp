@@ -126,9 +126,6 @@ pub fn info(comptime Mw: type) MiddlewareInfo {
     if (!@hasDecl(Mw, "call")) {
         @compileError("middleware " ++ @typeName(Mw) ++ " must expose `pub fn call(comptime rctx: ReqCtx, req: rctx.T()) !Res`");
     }
-    if (!@hasDecl(Mw, "Override")) {
-        @compileError("middleware " ++ @typeName(Mw) ++ " must expose `pub fn Override(comptime rctx: ReqCtx) type`");
-    }
     const out = Mw.Info;
 
     if (@TypeOf(out) != MiddlewareInfo) {

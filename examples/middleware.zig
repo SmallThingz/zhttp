@@ -36,10 +36,6 @@ const Auth = struct {
         if (!std.mem.eql(u8, auth, "bearer ok")) return zhttp.Res.text(403, "bad auth\n");
         return try rctx.next(req);
     }
-
-    pub fn Override(comptime _: ReqCtx) type {
-        return struct {};
-    }
 };
 
 fn public(comptime rctx: ReqCtx, req: rctx.T()) !zhttp.Res {

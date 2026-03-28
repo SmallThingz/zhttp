@@ -3,6 +3,7 @@ const std = @import("std");
 const Res = @import("../response.zig").Res;
 const Header = @import("../response.zig").Header;
 const MiddlewareInfo = @import("../middleware.zig").MiddlewareInfo;
+const ReqCtx = @import("../req_ctx.zig").ReqCtx;
 const util = @import("util.zig");
 
 pub fn SecurityHeaders(comptime opts: anytype) type {
@@ -21,7 +22,7 @@ pub fn SecurityHeaders(comptime opts: anytype) type {
             .name = "security_headers",
         };
 
-        pub fn call(comptime rctx: anytype, req: rctx.T()) !Res {
+        pub fn call(comptime rctx: ReqCtx, req: rctx.T()) !Res {
             var res = try rctx.next(req);
             const a = req.allocator();
 
@@ -70,7 +71,7 @@ pub fn SecurityHeaders(comptime opts: anytype) type {
             return res;
         }
 
-        pub fn Override(comptime _: anytype) type {
+        pub fn Override(comptime _: ReqCtx) type {
             return struct {};
         }
     };

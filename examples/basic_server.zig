@@ -1,6 +1,7 @@
 const std = @import("std");
 const zhttp = @import("zhttp");
 const common = @import("common.zig");
+const ReqCtx = zhttp.ReqCtx;
 
 fn usage() void {
     std.debug.print(
@@ -18,18 +19,18 @@ fn usage() void {
     , .{});
 }
 
-fn health(comptime rctx: anytype, req: rctx.T()) !zhttp.Res {
+fn health(comptime rctx: ReqCtx, req: rctx.T()) !zhttp.Res {
     _ = req;
     return zhttp.Res.text(200, "ok");
 }
 
-fn hello(comptime rctx: anytype, req: rctx.T()) !zhttp.Res {
+fn hello(comptime rctx: ReqCtx, req: rctx.T()) !zhttp.Res {
     const name_opt = req.queryParam(.name) orelse "world";
     const body = try std.fmt.allocPrint(req.allocator(), "hello {s}\n", .{name_opt});
     return zhttp.Res.text(200, body);
 }
 
-fn user(comptime rctx: anytype, req: rctx.T()) !zhttp.Res {
+fn user(comptime rctx: ReqCtx, req: rctx.T()) !zhttp.Res {
     const id = req.paramValue(.id);
     const host = req.header(.host) orelse "(no host)";
     const body = try std.fmt.allocPrint(req.allocator(), "id={d} host={s}\n", .{ id, host });

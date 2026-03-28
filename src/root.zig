@@ -54,6 +54,7 @@ pub const delete = router.delete;
 pub const patch = router.patch;
 pub const head = router.head;
 pub const options = router.options;
+pub const ReqCtx = @import("req_ctx.zig").ReqCtx;
 
 pub fn fuzz(
     context: anytype,

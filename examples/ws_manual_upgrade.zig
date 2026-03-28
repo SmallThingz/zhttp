@@ -2,6 +2,7 @@ const std = @import("std");
 const zhttp = @import("zhttp");
 const zws = @import("zwebsocket");
 const common = @import("common.zig");
+const ReqCtx = zhttp.ReqCtx;
 
 const Io = std.Io;
 
@@ -40,7 +41,7 @@ const WsHeaders = struct {
     x_auth: zhttp.parse.Optional(zhttp.parse.String),
 };
 
-fn handshakeResponse(comptime rctx: anytype, req: rctx.T()) !zhttp.Res {
+fn handshakeResponse(comptime rctx: ReqCtx, req: rctx.T()) !zhttp.Res {
     const auth = req.header(.x_auth) orelse return zhttp.Res.text(401, "missing x-auth\n");
     if (!std.mem.eql(u8, auth, "secret")) return zhttp.Res.text(403, "bad x-auth\n");
 

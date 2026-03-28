@@ -1,6 +1,7 @@
 const std = @import("std");
 const zhttp = @import("zhttp");
 const common = @import("common.zig");
+const ReqCtx = zhttp.ReqCtx;
 
 fn usage() void {
     std.debug.print(
@@ -21,7 +22,7 @@ fn usage() void {
     , .{});
 }
 
-fn plaintext(comptime rctx: anytype, req: rctx.T()) !zhttp.Res {
+fn plaintext(comptime rctx: ReqCtx, req: rctx.T()) !zhttp.Res {
     _ = req;
     return .{
         .status = .ok,

@@ -2,6 +2,7 @@ const std = @import("std");
 
 const Res = @import("../response.zig").Res;
 const MiddlewareInfo = @import("../middleware.zig").MiddlewareInfo;
+const ReqCtx = @import("../req_ctx.zig").ReqCtx;
 
 const Io = std.Io;
 
@@ -41,7 +42,7 @@ pub fn Logger(comptime opts: anytype) type {
             .data = if (store) DataT else null,
         };
 
-        fn handle(comptime rctx: anytype, req: rctx.T()) !Res {
+        fn handle(comptime rctx: ReqCtx, req: rctx.T()) !Res {
             const start = Io.Timestamp.now(req.io(), clock);
             const res = try rctx.next(req);
             const elapsed = start.untilNow(req.io(), clock);
@@ -66,21 +67,21 @@ pub fn Logger(comptime opts: anytype) type {
     return if (store) struct {
         pub const Info = Common.Info;
         pub const Data = Common.Data;
-        pub fn call(comptime rctx: anytype, req: rctx.T()) !Res {
+        pub fn call(comptime rctx: ReqCtx, req: rctx.T()) !Res {
             return Common.handle(rctx, req);
         }
 
-        pub fn Override(comptime _: anytype) type {
+        pub fn Override(comptime _: ReqCtx) type {
             return struct {};
         }
     } else struct {
         pub const Info = Common.Info;
         pub const Data = Common.Data;
-        pub fn call(comptime rctx: anytype, req: rctx.T()) !Res {
+        pub fn call(comptime rctx: ReqCtx, req: rctx.T()) !Res {
             return Common.handle(rctx, req);
         }
 
-        pub fn Override(comptime _: anytype) type {
+        pub fn Override(comptime _: ReqCtx) type {
             return struct {};
         }
     };

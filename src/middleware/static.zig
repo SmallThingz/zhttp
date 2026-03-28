@@ -3,6 +3,7 @@ const std = @import("std");
 const Res = @import("../response.zig").Res;
 const Header = @import("../response.zig").Header;
 const MiddlewareInfo = @import("../middleware.zig").MiddlewareInfo;
+const ReqCtx = @import("../req_ctx.zig").ReqCtx;
 const parse = @import("../parse.zig");
 const router = @import("../router.zig");
 const urldecode = @import("../urldecode.zig");
@@ -104,11 +105,11 @@ pub fn Static(comptime opts: anytype) type {
             router.head(pattern, handler, .{ .headers = StaticHeaders }),
         };
 
-        pub fn call(comptime rctx: anytype, req: rctx.T()) !Res {
+        pub fn call(comptime rctx: ReqCtx, req: rctx.T()) !Res {
             return rctx.next(req);
         }
 
-        pub fn Override(comptime _: anytype) type {
+        pub fn Override(comptime _: ReqCtx) type {
             return struct {};
         }
 

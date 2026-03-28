@@ -3,6 +3,7 @@ const std = @import("std");
 const parse = @import("../parse.zig");
 const Res = @import("../response.zig").Res;
 const MiddlewareInfo = @import("../middleware.zig").MiddlewareInfo;
+const ReqCtx = @import("../req_ctx.zig").ReqCtx;
 
 comptime {
     @setEvalBranchQuota(200_000);
@@ -244,7 +245,7 @@ pub fn Origin(comptime opts: anytype) type {
 
         pub const Data = DataT;
 
-        fn handle(comptime rctx: anytype, req: rctx.T()) !Res {
+        fn handle(comptime rctx: ReqCtx, req: rctx.T()) !Res {
             const origin = req.header(.origin);
             const allowed = if (origin) |value| Matcher.contains(value) else allow_missing;
 
@@ -263,22 +264,22 @@ pub fn Origin(comptime opts: anytype) type {
         pub const Info = Common.Info;
         pub const Data = Common.Data;
 
-        pub fn call(comptime rctx: anytype, req: rctx.T()) !Res {
+        pub fn call(comptime rctx: ReqCtx, req: rctx.T()) !Res {
             return Common.handle(rctx, req);
         }
 
-        pub fn Override(comptime _: anytype) type {
+        pub fn Override(comptime _: ReqCtx) type {
             return struct {};
         }
     } else struct {
         pub const Info = Common.Info;
         pub const Data = Common.Data;
 
-        pub fn call(comptime rctx: anytype, req: rctx.T()) !Res {
+        pub fn call(comptime rctx: ReqCtx, req: rctx.T()) !Res {
             return Common.handle(rctx, req);
         }
 
-        pub fn Override(comptime _: anytype) type {
+        pub fn Override(comptime _: ReqCtx) type {
             return struct {};
         }
     };

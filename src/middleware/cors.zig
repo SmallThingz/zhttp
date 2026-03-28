@@ -3,6 +3,7 @@ const std = @import("std");
 const Res = @import("../response.zig").Res;
 const Header = @import("../response.zig").Header;
 const MiddlewareInfo = @import("../middleware.zig").MiddlewareInfo;
+const ReqCtx = @import("../req_ctx.zig").ReqCtx;
 const parse = @import("../parse.zig");
 const router = @import("../router.zig");
 const util = @import("util.zig");
@@ -131,7 +132,7 @@ pub fn Cors(comptime opts: anytype) type {
             return util.appendHeaders(allocator, base, extra);
         }
 
-        fn handle(comptime rctx: anytype, req: rctx.T()) !Res {
+        fn handle(comptime rctx: ReqCtx, req: rctx.T()) !Res {
             const origin_opt = req.header(.origin) orelse return rctx.next(req);
             const origin = origin_opt;
             const needs_origin_copy = store or !(allow_any_origin and !allow_credentials);
@@ -242,11 +243,11 @@ pub fn Cors(comptime opts: anytype) type {
         pub const register_routes = Common.register_routes;
         pub const Routes = Common.Routes;
         pub const Data = Common.Data;
-        pub fn call(comptime rctx: anytype, req: rctx.T()) !Res {
+        pub fn call(comptime rctx: ReqCtx, req: rctx.T()) !Res {
             return Common.handle(rctx, req);
         }
 
-        pub fn Override(comptime _: anytype) type {
+        pub fn Override(comptime _: ReqCtx) type {
             return struct {};
         }
     } else struct {
@@ -254,11 +255,11 @@ pub fn Cors(comptime opts: anytype) type {
         pub const register_routes = Common.register_routes;
         pub const Routes = Common.Routes;
         pub const Data = Common.Data;
-        pub fn call(comptime rctx: anytype, req: rctx.T()) !Res {
+        pub fn call(comptime rctx: ReqCtx, req: rctx.T()) !Res {
             return Common.handle(rctx, req);
         }
 
-        pub fn Override(comptime _: anytype) type {
+        pub fn Override(comptime _: ReqCtx) type {
             return struct {};
         }
     };

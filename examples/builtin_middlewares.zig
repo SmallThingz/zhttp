@@ -1,6 +1,7 @@
 const std = @import("std");
 const zhttp = @import("zhttp");
 const common = @import("common.zig");
+const ReqCtx = zhttp.ReqCtx;
 
 fn usage() void {
     std.debug.print(
@@ -22,7 +23,7 @@ fn usage() void {
     , .{});
 }
 
-fn public(comptime rctx: anytype, req: rctx.T()) !zhttp.Res {
+fn public(comptime rctx: ReqCtx, req: rctx.T()) !zhttp.Res {
     const rid = req.middlewareDataConst("rid").value[0..];
     const body = try std.fmt.allocPrint(req.allocator(), "public rid={s}\n", .{rid});
     return zhttp.Res.text(200, body);

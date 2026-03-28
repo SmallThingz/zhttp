@@ -11,6 +11,7 @@ const urldecode = @import("urldecode.zig");
 const util = @import("util.zig");
 const middleware = @import("middleware.zig");
 const req_ctx = @import("req_ctx.zig");
+const ReqCtx = req_ctx.ReqCtx;
 
 comptime {
     @setEvalBranchQuota(30000);
@@ -623,7 +624,18 @@ pub fn Compiled(
     };
 
     const callHandlerCompat = struct {
-        fn call(comptime handler: anytype, comptime rctxv: anytype, reqv: anytype) !Res {
+        fn returnType(comptime handler: anytype, comptime rctxv: ReqCtx, comptime ReqT: type) type {
+            const Ht = @TypeOf(handler);
+            const info = @typeInfo(Ht);
+            if (info != .@"fn") @compileError("handler must be a function");
+            const params = info.@"fn".params;
+            if (params.len == 2) return @TypeOf(@call(.auto, handler, .{ rctxv, @as(ReqT, undefined) }));
+            if (params.len == 1) return @TypeOf(@call(.auto, handler, .{@as(ReqT, undefined)}));
+            if (params.len == 0) return @TypeOf(@call(.auto, handler, .{}));
+            @compileError("handler must be fn(comptime rctx, req), fn(req), or fn()");
+        }
+
+        fn call(comptime handler: anytype, comptime rctxv: ReqCtx, reqv: anytype) returnType(handler, rctxv, @TypeOf(reqv)) {
             const Ht = @TypeOf(handler);
             const info = @typeInfo(Ht);
             if (info != .@"fn") @compileError("handler must be a function");
@@ -633,7 +645,7 @@ pub fn Compiled(
             if (params.len == 0) return @call(.auto, handler, .{});
             @compileError("handler must be fn(comptime rctx, req), fn(req), or fn()");
         }
-    }.call;
+    };
 
     return struct {
         pub const RouteCount: usize = route_count;
@@ -856,12 +868,14 @@ pub fn Compiled(
                     const MwCtx = middleware.contextType(MwTuple);
                     const mw_ctx = middleware.initContext(MwTuple, MwCtx);
                     const ReqT = request.RequestPWithPatternCtx(H, Q, P, p.param_names, MwCtx, rd.pattern, rd.method, @TypeOf(server.ctx));
-                    const ReqCtxT = req_ctx.ReqCtx(anyerror!Res);
-                    const HandlerBridge: ReqCtxT.HandlerFn = struct {
-                        fn call(comptime rctxv: ReqCtxT, reqv2: rctxv.T()) !Res {
-                            return callHandlerCompat(rd.handler, rctxv, reqv2);
-                        }
-                    }.call;
+                    const ReqCtxT = req_ctx.ReqCtx;
+                    const HandlerBridge = struct {
+                        pub const function = struct {
+                            fn call(comptime rctxv: ReqCtxT, reqv2: rctxv.T()) callHandlerCompat.returnType(rd.handler, rctxv, rctxv.T()) {
+                                return callHandlerCompat.call(rd.handler, rctxv, reqv2);
+                            }
+                        }.call;
+                    };
                     const rctx: ReqCtxT = comptime .{
                         .handler = HandlerBridge,
                         .middlewares = middleware.typeList(MwTuple),
@@ -1033,11 +1047,11 @@ test "middleware Needs: supports 'headers: type = ...' form" {
             .query = struct {},
         };
 
-        pub fn call(comptime rctx: anytype, req: rctx.T()) !Res {
+        pub fn call(comptime rctx: ReqCtx, req: rctx.T()) !Res {
             return rctx.next(req);
         }
 
-        pub fn Override(comptime _: anytype) type {
+        pub fn Override(comptime _: ReqCtx) type {
             return struct {};
         }
     };
@@ -1070,7 +1084,7 @@ test "middleware Info: supports header/query/path/data captures" {
             },
         };
 
-        pub fn call(comptime rctx: anytype, req: rctx.T()) !Res {
+        pub fn call(comptime rctx: ReqCtx, req: rctx.T()) !Res {
             if (req.paramValue(.id) != 7) return Res.text(500, "bad-id");
             if (!std.mem.eql(u8, req.queryParam(.q), "ok")) return Res.text(500, "bad-q");
             if (!std.mem.eql(u8, req.header(.x_token), "token")) return Res.text(500, "bad-header");
@@ -1079,7 +1093,7 @@ test "middleware Info: supports header/query/path/data captures" {
             return rctx.next(req);
         }
 
-        pub fn Override(comptime _: anytype) type {
+        pub fn Override(comptime _: ReqCtx) type {
             return struct {};
         }
     };
@@ -1360,12 +1374,12 @@ test "dispatch: middleware Needs.params works" {
             },
         };
 
-        pub fn call(comptime rctx: anytype, req: rctx.T()) !Res {
+        pub fn call(comptime rctx: ReqCtx, req: rctx.T()) !Res {
             if (req.paramValue(.id) == 0) return Res.text(400, "bad");
             return try rctx.next(req);
         }
 
-        pub fn Override(comptime _: anytype) type {
+        pub fn Override(comptime _: ReqCtx) type {
             return struct {};
         }
     };
@@ -1398,13 +1412,13 @@ test "middleware data: set in middleware and handler access" {
             .data = Data,
         };
 
-        pub fn call(comptime rctx: anytype, req: rctx.T()) !Res {
+        pub fn call(comptime rctx: ReqCtx, req: rctx.T()) !Res {
             const data = req.middlewareData("auth");
             data.user_id = 7;
             return rctx.next(req);
         }
 
-        pub fn Override(comptime _: anytype) type {
+        pub fn Override(comptime _: ReqCtx) type {
             return struct {};
         }
     };

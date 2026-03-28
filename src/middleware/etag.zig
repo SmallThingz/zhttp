@@ -2,6 +2,7 @@ const std = @import("std");
 
 const Res = @import("../response.zig").Res;
 const MiddlewareInfo = @import("../middleware.zig").MiddlewareInfo;
+const ReqCtx = @import("../req_ctx.zig").ReqCtx;
 const parse = @import("../parse.zig");
 const util = @import("util.zig");
 
@@ -48,7 +49,7 @@ pub fn Etag(comptime opts: anytype) type {
             },
         };
 
-        pub fn call(comptime rctx: anytype, req: rctx.T()) !Res {
+        pub fn call(comptime rctx: ReqCtx, req: rctx.T()) !Res {
             var res = try rctx.next(req);
             if (res.body.len == 0) return res;
             if (util.hasHeader(res.headers, "etag")) return res;
@@ -64,7 +65,7 @@ pub fn Etag(comptime opts: anytype) type {
             return res;
         }
 
-        pub fn Override(comptime _: anytype) type {
+        pub fn Override(comptime _: ReqCtx) type {
             return struct {};
         }
     };

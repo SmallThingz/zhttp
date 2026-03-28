@@ -1,6 +1,7 @@
 const std = @import("std");
 const zhttp = @import("zhttp");
 const common = @import("common.zig");
+const ReqCtx = zhttp.ReqCtx;
 
 fn usage() void {
     std.debug.print(
@@ -30,23 +31,23 @@ const Auth = struct {
         },
     };
 
-    pub fn call(comptime rctx: anytype, req: rctx.T()) !zhttp.Res {
+    pub fn call(comptime rctx: ReqCtx, req: rctx.T()) !zhttp.Res {
         const auth = req.header(.authorization) orelse return zhttp.Res.text(401, "missing auth\n");
         if (!std.mem.eql(u8, auth, "bearer ok")) return zhttp.Res.text(403, "bad auth\n");
         return try rctx.next(req);
     }
 
-    pub fn Override(comptime _: anytype) type {
+    pub fn Override(comptime _: ReqCtx) type {
         return struct {};
     }
 };
 
-fn public(comptime rctx: anytype, req: rctx.T()) !zhttp.Res {
+fn public(comptime rctx: ReqCtx, req: rctx.T()) !zhttp.Res {
     _ = req;
     return zhttp.Res.text(200, "public\n");
 }
 
-fn private(comptime rctx: anytype, req: rctx.T()) !zhttp.Res {
+fn private(comptime rctx: ReqCtx, req: rctx.T()) !zhttp.Res {
     _ = req;
     return zhttp.Res.text(200, "private\n");
 }

@@ -1,6 +1,7 @@
 const std = @import("std");
 const zhttp = @import("zhttp");
 const common = @import("common.zig");
+const ReqCtx = zhttp.ReqCtx;
 
 fn usage() void {
     std.debug.print(
@@ -21,7 +22,7 @@ fn usage() void {
     , .{});
 }
 
-fn echo(comptime rctx: anytype, req: rctx.T()) !zhttp.Res {
+fn echo(comptime rctx: ReqCtx, req: rctx.T()) !zhttp.Res {
     const body = try req.bodyAll(1024 * 1024);
     return zhttp.Res.text(200, body);
 }

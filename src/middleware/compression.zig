@@ -9,7 +9,12 @@ const util = @import("util.zig");
 
 const flate = std.compress.flate;
 
-fn qIsZero(params: []const u8) bool {
+const ContentEncoding = enum {
+    gzip,
+    deflate,
+};
+
+fn qValue(params: []const u8) f32 {
     var it = std.mem.splitScalar(u8, params, ';');
     while (it.next()) |raw| {
         const part = std.mem.trim(u8, raw, " \t");
@@ -18,25 +23,39 @@ fn qIsZero(params: []const u8) bool {
         const k = std.mem.trim(u8, part[0..eq], " \t");
         if (!std.ascii.eqlIgnoreCase(k, "q")) continue;
         const v = std.mem.trim(u8, part[eq + 1 ..], " \t");
-        const q = std.fmt.parseFloat(f32, v) catch return false;
-        return q == 0.0;
+        const q = std.fmt.parseFloat(f32, v) catch return 0.0;
+        return std.math.clamp(q, 0.0, 1.0);
     }
-    return false;
+    return 1.0;
 }
 
-fn acceptsGzip(header_value: []const u8) bool {
+fn negotiateEncoding(header_value: []const u8) ?ContentEncoding {
+    var gzip_q: ?f32 = null;
+    var deflate_q: ?f32 = null;
+    var star_q: ?f32 = null;
+
     var it = std.mem.splitScalar(u8, header_value, ',');
     while (it.next()) |raw| {
         const part = std.mem.trim(u8, raw, " \t");
         if (part.len == 0) continue;
         const semi = std.mem.indexOfScalar(u8, part, ';') orelse part.len;
         const token = std.mem.trim(u8, part[0..semi], " \t");
-        if (std.ascii.eqlIgnoreCase(token, "gzip") or std.ascii.eqlIgnoreCase(token, "*")) {
-            if (semi == part.len) return true;
-            if (!qIsZero(part[semi + 1 ..])) return true;
+        const q = if (semi == part.len) 1.0 else qValue(part[semi + 1 ..]);
+
+        if (std.ascii.eqlIgnoreCase(token, "gzip")) {
+            gzip_q = q;
+        } else if (std.ascii.eqlIgnoreCase(token, "deflate")) {
+            deflate_q = q;
+        } else if (std.ascii.eqlIgnoreCase(token, "*")) {
+            star_q = q;
         }
     }
-    return false;
+
+    const gzip = gzip_q orelse star_q orelse 0.0;
+    const deflate = deflate_q orelse star_q orelse 0.0;
+    if (gzip <= 0 and deflate <= 0) return null;
+    if (gzip >= deflate) return .gzip;
+    return .deflate;
 }
 
 fn runMiddlewareTest(
@@ -81,7 +100,7 @@ pub const CompressionOptions = struct {
     vary_behavior: util.HeaderSetBehavior = .assert_absent,
 };
 
-/// Compresses response bodies with gzip when the client advertises support.
+/// Compresses response bodies when the client advertises `gzip` or `deflate`.
 ///
 /// Use this middleware to reduce response payload size/bandwidth for text-heavy responses.
 pub fn Compression(comptime opts: CompressionOptions) type {
@@ -105,12 +124,16 @@ pub fn Compression(comptime opts: CompressionOptions) type {
             if (!util.shouldAddHeader(res.headers, "content-encoding", content_encoding_behavior)) return res;
 
             const ae = req.header(.accept_encoding) orelse return res;
-            if (!acceptsGzip(ae)) return res;
+            const encoding = negotiateEncoding(ae) orelse return res;
 
             const a = req.allocator();
             var out = try std.Io.Writer.Allocating.initCapacity(a, res.body.len + 64);
             const window = try a.alloc(u8, flate.max_window_len);
-            var comp = try flate.Compress.init(&out.writer, window, .gzip, opts.level);
+            const container: flate.Container = switch (encoding) {
+                .gzip => .gzip,
+                .deflate => .zlib,
+            };
+            var comp = try flate.Compress.init(&out.writer, window, container, opts.level);
             try comp.writer.writeAll(res.body);
             try comp.writer.flush();
 
@@ -119,7 +142,13 @@ pub fn Compression(comptime opts: CompressionOptions) type {
 
             var hdrs: [2]Header = undefined;
             var n: usize = 0;
-            hdrs[n] = .{ .name = "content-encoding", .value = "gzip" };
+            hdrs[n] = .{
+                .name = "content-encoding",
+                .value = switch (encoding) {
+                    .gzip => "gzip",
+                    .deflate => "deflate",
+                },
+            };
             n += 1;
             if (util.shouldAddHeader(res.headers, "vary", vary_behavior)) {
                 hdrs[n] = .{ .name = "vary", .value = "accept-encoding" };
@@ -132,11 +161,15 @@ pub fn Compression(comptime opts: CompressionOptions) type {
     };
 }
 
-test "compression: acceptsGzip honors q=0" {
-    try std.testing.expect(acceptsGzip("gzip"));
-    try std.testing.expect(!acceptsGzip("gzip;q=0"));
-    try std.testing.expect(acceptsGzip("br, gzip;q=0.5"));
-    try std.testing.expect(acceptsGzip("*;q=0.1"));
+test "compression: negotiateEncoding honors q and wildcard precedence" {
+    try std.testing.expectEqual(ContentEncoding.gzip, negotiateEncoding("gzip").?);
+    try std.testing.expectEqual(ContentEncoding.deflate, negotiateEncoding("deflate").?);
+    try std.testing.expectEqual(null, negotiateEncoding("gzip;q=0"));
+    try std.testing.expectEqual(ContentEncoding.deflate, negotiateEncoding("gzip;q=0, deflate").?);
+    try std.testing.expectEqual(ContentEncoding.gzip, negotiateEncoding("gzip;q=0.5, deflate;q=0.5").?);
+    try std.testing.expectEqual(ContentEncoding.gzip, negotiateEncoding("*;q=0.1").?);
+    try std.testing.expectEqual(ContentEncoding.deflate, negotiateEncoding("*;q=0.7, gzip;q=0, deflate;q=0.3").?);
+    try std.testing.expectEqual(null, negotiateEncoding("*;q=0"));
 }
 
 test "compression: check_then_add skips when content-encoding exists" {
@@ -229,4 +262,51 @@ test "compression: check_then_add skips duplicate vary" {
     const res = try runMiddlewareTest(Mw, ReqT, Next, &reqv, line.method);
     try std.testing.expectEqual(@as(usize, 2), res.headers.len);
     try std.testing.expectEqualStrings("content-encoding", res.headers[1].name);
+}
+
+test "compression: selects deflate when preferred" {
+    const Mw = Compression(.{ .min_size = 0 });
+    const MwCtx = struct {};
+    const ReqT = @import("../request.zig").Request(
+        struct { accept_encoding: parse.Optional(parse.String) },
+        struct {},
+        &.{},
+        MwCtx,
+    );
+
+    const Next = struct {
+        /// Test helper next-handler implementation with compressible payload.
+        pub const function = call;
+        pub fn call(comptime rctx: ReqCtx, _: rctx.T()) !Res {
+            return .{
+                .status = .ok,
+                .headers = &.{},
+                .body = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            };
+        }
+    };
+
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    const path_buf = "/".*;
+    const query_buf: [0]u8 = .{};
+    const line: @import("../request.zig").RequestLine = .{
+        .method = "GET",
+        .version = .http11,
+        .path = @constCast(path_buf[0..]),
+        .query = @constCast(query_buf[0..]),
+    };
+    const mw_ctx: MwCtx = .{};
+    var reqv = ReqT.init(a, std.testing.io, line, mw_ctx);
+    defer reqv.deinit(a);
+    var r = std.Io.Reader.fixed("Accept-Encoding: gzip;q=0, deflate\r\n\r\n");
+    try reqv.parseHeaders(a, &r, 1024);
+
+    const res = try runMiddlewareTest(Mw, ReqT, Next, &reqv, line.method);
+    try std.testing.expectEqual(@as(usize, 2), res.headers.len);
+    try std.testing.expectEqualStrings("content-encoding", res.headers[0].name);
+    try std.testing.expectEqualStrings("deflate", res.headers[0].value);
+    try std.testing.expect(res.body.len > 2);
+    try std.testing.expectEqual(@as(u8, 0x78), res.body[0]);
 }

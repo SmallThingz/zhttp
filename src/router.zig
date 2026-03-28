@@ -529,105 +529,113 @@ pub fn Compiled(
     const route_count = route_fields.len;
     const global_mw_list = comptime middleware.typeList(global_middlewares);
 
-    const compiled = comptime blk: {
-        var patterns: [route_count]Pattern = undefined;
-        var max_params: usize = 0;
+    const RouterBuilder = struct {
+        const Self = @This();
 
-        for (route_fields, 0..) |f, i| {
-            const rd = @field(routes, f.name);
+        patterns: [route_count]Pattern = undefined,
+        max_params: usize = 0,
+        method_names: [route_count][]const u8 = undefined,
+        method_count: usize = 0,
+        route_method_ids: [route_count]u8 = undefined,
+
+        fn ensureMethodId(self: *Self, method: []const u8) u8 {
+            var i: usize = 0;
+            while (i < self.method_count) : (i += 1) {
+                if (std.mem.eql(u8, self.method_names[i], method)) return @intCast(i);
+            }
+            self.method_names[self.method_count] = method;
+            const id: u8 = @intCast(self.method_count);
+            self.method_count += 1;
+            return id;
+        }
+
+        fn addRoute(self: *Self, comptime route_index: usize, rd: anytype) void {
             if (!@hasField(@TypeOf(rd), "method") or !@hasField(@TypeOf(rd), "pattern") or !@hasField(@TypeOf(rd), "handler")) {
                 @compileError("route() value must have fields: method, pattern, handler");
             }
-            patterns[i] = compilePattern(rd.pattern);
-            if (patterns[i].param_names.len > max_params) max_params = patterns[i].param_names.len;
+
+            self.patterns[route_index] = compilePattern(rd.pattern);
+            if (self.patterns[route_index].param_names.len > self.max_params) {
+                self.max_params = self.patterns[route_index].param_names.len;
+            }
+            self.route_method_ids[route_index] = self.ensureMethodId(rd.method);
         }
 
-        break :blk .{ .patterns = patterns, .max_params = max_params };
-    };
+        fn compile(
+            comptime self: Self,
+            comptime routes_value: anytype,
+            comptime fields: anytype,
+        ) struct {
+            patterns: [route_count]Pattern,
+            max_params: usize,
+            method_names: [route_count][]const u8,
+            method_count: usize,
+            route_method_ids: [route_count]u8,
+            exact_storage: [self.method_count][route_count]ExactEntry,
+            exact_counts: [self.method_count]usize,
+            pattern_storage: [self.method_count][route_count]u16,
+            pattern_counts: [self.method_count]usize,
+        } {
+            const method_count: usize = self.method_count;
+            var exact_storage: [method_count][route_count]ExactEntry = undefined;
+            var exact_counts: [method_count]usize = .{0} ** method_count;
+            var pattern_storage: [method_count][route_count]u16 = undefined;
+            var pattern_counts: [method_count]usize = .{0} ** method_count;
 
-    const method_names = comptime blk: {
-        var out: [route_count][]const u8 = undefined;
-        var n: usize = 0;
-        for (route_fields) |f| {
-            const rd = @field(routes, f.name);
-            const m = rd.method;
-            var found: bool = false;
-            for (out[0..n]) |e| {
-                if (std.mem.eql(u8, e, m)) {
-                    found = true;
-                    break;
+            for (0..method_count) |mid| {
+                const mid_u8: u8 = @intCast(mid);
+                var exact_n: usize = 0;
+                var pat_n: usize = 0;
+
+                for (fields, 0..) |f, i| {
+                    if (self.route_method_ids[i] != mid_u8) continue;
+                    const rd = @field(routes_value, f.name);
+                    const p = self.patterns[i];
+                    const exact = p.param_names.len == 0 and
+                        !p.glob and
+                        std.mem.indexOfScalar(u8, rd.pattern, '{') == null and
+                        std.mem.indexOfScalar(u8, rd.pattern, '*') == null;
+                    if (exact) {
+                        exact_storage[mid][exact_n] = .{
+                            .path = rd.pattern,
+                            .hash = fnv1a64(rd.pattern),
+                            .route_index = @intCast(i),
+                        };
+                        exact_n += 1;
+                    } else {
+                        pattern_storage[mid][pat_n] = @intCast(i);
+                        pat_n += 1;
+                    }
                 }
-            }
-            if (!found) {
-                out[n] = m;
-                n += 1;
-            }
-        }
-        break :blk .{ .arr = out, .len = n };
-    };
-    const method_count: usize = method_names.len;
 
-    const route_method_ids: [route_count]u8 = comptime blk: {
-        const Methods0 = method_names.arr[0..method_names.len];
-        var out: [route_count]u8 = undefined;
+                exact_counts[mid] = exact_n;
+                pattern_counts[mid] = pat_n;
+            }
+
+            return .{
+                .patterns = self.patterns,
+                .max_params = self.max_params,
+                .method_names = self.method_names,
+                .method_count = method_count,
+                .route_method_ids = self.route_method_ids,
+                .exact_storage = exact_storage,
+                .exact_counts = exact_counts,
+                .pattern_storage = pattern_storage,
+                .pattern_counts = pattern_counts,
+            };
+        }
+    };
+
+    const compiled = comptime blk: {
+        var router = RouterBuilder{};
         for (route_fields, 0..) |f, i| {
-            const rd = @field(routes, f.name);
-            var id: ?u8 = null;
-            for (Methods0, 0..) |m, mi| {
-                if (std.mem.eql(u8, m, rd.method)) {
-                    id = @intCast(mi);
-                    break;
-                }
-            }
-            out[i] = id orelse @compileError("internal: missing method id");
+            router.addRoute(i, @field(routes, f.name));
         }
-        break :blk out;
+        break :blk router.compile(routes, route_fields);
     };
 
-    // Build per-registered-method exact maps and pattern lists.
-    const tables = comptime blk: {
-        var exact_storage: [method_count][route_count]ExactEntry = undefined;
-        var exact_counts: [method_count]usize = .{0} ** method_count;
-        var pattern_storage: [method_count][route_count]u16 = undefined;
-        var pattern_counts: [method_count]usize = .{0} ** method_count;
-
-        for (0..method_count) |mid| {
-            const mid_u8: u8 = @intCast(mid);
-            var exact_n: usize = 0;
-            var pat_n: usize = 0;
-
-            for (route_fields, 0..) |f, i| {
-                if (route_method_ids[i] != mid_u8) continue;
-                const rd = @field(routes, f.name);
-                const p = compiled.patterns[i];
-                const exact = p.param_names.len == 0 and !p.glob and std.mem.indexOfScalar(u8, rd.pattern, '{') == null and std.mem.indexOfScalar(u8, rd.pattern, '*') == null;
-                if (exact) {
-                    exact_storage[mid][exact_n] = .{ .path = rd.pattern, .hash = fnv1a64(rd.pattern), .route_index = @intCast(i) };
-                    exact_n += 1;
-                } else {
-                    pattern_storage[mid][pat_n] = @intCast(i);
-                    pat_n += 1;
-                }
-            }
-
-            exact_counts[mid] = exact_n;
-            pattern_counts[mid] = pat_n;
-        }
-
-        break :blk .{
-            .exact_storage = exact_storage,
-            .exact_counts = exact_counts,
-            .pattern_storage = pattern_storage,
-            .pattern_counts = pattern_counts,
-        };
-    };
-
-    const exact_storage: [method_count][route_count]ExactEntry = tables.exact_storage;
-    const exact_counts: [method_count]usize = tables.exact_counts;
-    const pattern_storage: [method_count][route_count]u16 = tables.pattern_storage;
-    const pattern_counts: [method_count]usize = tables.pattern_counts;
-
-    const single_method: []const u8 = if (route_count == 1) @field(routes, route_fields[0].name).method else "";
+    const method_count: usize = compiled.method_count;
+    const single_method: []const u8 = if (route_count == 1) compiled.method_names[@as(usize, compiled.route_method_ids[0])] else "";
     const single_pattern: []const u8 = if (route_count == 1) @field(routes, route_fields[0].name).pattern else "";
     const single_exact: bool = route_count == 1 and
         compiled.patterns[0].param_names.len == 0 and
@@ -636,7 +644,7 @@ pub fn Compiled(
         std.mem.indexOfScalar(u8, single_pattern, '*') == null;
 
     const head_id: ?u8 = comptime blk: {
-        const Methods0 = method_names.arr[0..method_names.len];
+        const Methods0 = compiled.method_names[0..compiled.method_count];
         var out: ?u8 = null;
         for (Methods0, 0..) |m, i| {
             if (std.mem.eql(u8, m, "HEAD")) {
@@ -647,7 +655,7 @@ pub fn Compiled(
         break :blk out;
     };
     const get_id: ?u8 = comptime blk: {
-        const Methods0 = method_names.arr[0..method_names.len];
+        const Methods0 = compiled.method_names[0..compiled.method_count];
         var out: ?u8 = null;
         for (Methods0, 0..) |m, i| {
             if (std.mem.eql(u8, m, "GET")) {
@@ -725,7 +733,7 @@ pub fn Compiled(
         fn maxLenForIds(comptime ids: []const u8) usize {
             var m: usize = 0;
             for (ids) |id| {
-                const len = method_names.arr[@as(usize, id)].len;
+                const len = compiled.method_names[@as(usize, id)].len;
                 if (len > m) m = len;
             }
             return m;
@@ -735,7 +743,7 @@ pub fn Compiled(
             var out: [ids.len]u32 = undefined;
             var n: usize = 0;
             for (ids) |id| {
-                const k = pack4(method_names.arr[@as(usize, id)], offset);
+                const k = pack4(compiled.method_names[@as(usize, id)], offset);
                 var found = false;
                 for (out[0..n]) |e| {
                     if (e == k) {
@@ -755,7 +763,7 @@ pub fn Compiled(
             var out: [ids.len]u8 = undefined;
             var n: usize = 0;
             for (ids) |id| {
-                const k = pack4(method_names.arr[@as(usize, id)], offset);
+                const k = pack4(compiled.method_names[@as(usize, id)], offset);
                 if (k == key) {
                     out[n] = id;
                     n += 1;
@@ -766,13 +774,13 @@ pub fn Compiled(
 
         fn matchMethod(comptime mid: u8, path: []u8) ?u16 {
             const mid_usize: usize = mid;
-            const Exact = ExactMap(exact_storage[mid_usize], exact_counts[mid_usize]);
+            const Exact = ExactMap(compiled.exact_storage[mid_usize], compiled.exact_counts[mid_usize]);
             if (Exact.find(path)) |rid| return rid;
 
-            const n: usize = pattern_counts[mid_usize];
+            const n: usize = compiled.pattern_counts[mid_usize];
             var j: usize = 0;
             while (j < n) : (j += 1) {
-                const rid = pattern_storage[mid_usize][j];
+                const rid = compiled.pattern_storage[mid_usize][j];
                 const p = compiled.patterns[rid];
                 if (matchPatternNoCapture(p, path)) return rid;
             }
@@ -796,14 +804,14 @@ pub fn Compiled(
             if (ids.len == 0) return null;
             if (ids.len == 1) {
                 const mid: u8 = ids[0];
-                const name: []const u8 = method_names.arr[@as(usize, mid)];
+                const name: []const u8 = compiled.method_names[@as(usize, mid)];
                 if (!std.mem.eql(u8, method_token, name)) return null;
                 return matchMethod(mid, path);
             }
 
             if (offset >= comptime maxLenForIds(ids)) {
                 inline for (ids) |mid| {
-                    const name: []const u8 = method_names.arr[@as(usize, mid)];
+                    const name: []const u8 = compiled.method_names[@as(usize, mid)];
                     if (std.mem.eql(u8, method_token, name)) {
                         return matchMethod(mid, path);
                     }

@@ -22,7 +22,7 @@ pub fn RequestId(comptime opts: anytype) type {
             if (util.hasHeader(res.headers, header_name)) return res;
 
             var raw: [bytes]u8 = undefined;
-            req.io.random(&raw);
+            req.io().random(&raw);
 
             const a = req.allocator();
             var id_buf: []u8 = undefined;

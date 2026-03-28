@@ -62,7 +62,6 @@ pub fn build(b: *std.Build) void {
     const origin_bench_step = b.step("bench-origin", "Benchmark origin decision tree against a hash map baseline");
     origin_bench_step.dependOn(&origin_bench_run.step);
 
-
     const bench_step = b.step("bench", "Run benchmarks");
     const bench_zhttp_exe = b.addExecutable(.{
         .name = "zhttp-bench-zhttp",

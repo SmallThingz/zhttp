@@ -108,7 +108,7 @@ pub fn Static(comptime opts: anytype) type {
         }
 
         fn serve(req: anytype) !Res {
-            var rel = req.base.path_raw;
+            var rel = req.baseConst().path_raw;
             if (!std.mem.startsWith(u8, rel, mount)) return Res.text(404, "not found");
             rel = rel[mount.len..];
             if (rel.len != 0 and rel[0] == '/') rel = rel[1..];
@@ -131,19 +131,19 @@ pub fn Static(comptime opts: anytype) type {
             if (!isSafeRelative(file_rel)) return Res.text(404, "not found");
 
             var base_dir = if (Io.Dir.path.isAbsolute(dir_path))
-                try Io.Dir.openDirAbsolute(req.io, dir_path, .{})
+                try Io.Dir.openDirAbsolute(req.io(), dir_path, .{})
             else
-                try Io.Dir.cwd().openDir(req.io, dir_path, .{});
-            defer base_dir.close(req.io);
+                try Io.Dir.cwd().openDir(req.io(), dir_path, .{});
+            defer base_dir.close(req.io());
 
-            var file = base_dir.openFile(req.io, file_rel, .{}) catch |err| switch (err) {
+            var file = base_dir.openFile(req.io(), file_rel, .{}) catch |err| switch (err) {
                 error.FileNotFound, error.NotDir => return Res.text(404, "not found"),
                 error.AccessDenied, error.PermissionDenied => return Res.text(403, "forbidden"),
                 else => return err,
             };
-            defer file.close(req.io);
+            defer file.close(req.io());
 
-            const st = file.stat(req.io) catch |err| switch (err) {
+            const st = file.stat(req.io()) catch |err| switch (err) {
                 error.AccessDenied, error.PermissionDenied => return Res.text(403, "forbidden"),
                 else => return err,
             };
@@ -154,7 +154,7 @@ pub fn Static(comptime opts: anytype) type {
 
             const body = try a.alloc(u8, size);
             var read_buf: [8 * 1024]u8 = undefined;
-            var fr = Io.File.Reader.init(file, req.io, read_buf[0..]);
+            var fr = Io.File.Reader.init(file, req.io(), read_buf[0..]);
             try fr.interface.readSliceAll(body);
 
             var headers_buf: [3]Header = undefined;

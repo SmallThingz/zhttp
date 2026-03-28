@@ -329,7 +329,7 @@ test "origin middleware allows configured origin" {
     const mw_ctx: MwCtx = .{};
     var reqv = ReqT.init(gpa, std.testing.io, line, mw_ctx);
     defer reqv.deinit(gpa);
-    reqv.headers.origin = .{
+    reqv.headersMut().origin = .{
         .present = true,
         .inner = .{ .value = "https://app.example.com" },
     };

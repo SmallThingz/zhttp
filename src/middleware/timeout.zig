@@ -27,7 +27,7 @@ pub fn Timeout(comptime opts: anytype) type {
         pub const Data = DataT;
 
         fn handle(comptime Next: type, next: Next, ctx: anytype, req: anytype, data_opt: ?*DataT) !Res {
-            const start = Io.Timestamp.now(req.io, clock);
+            const start = Io.Timestamp.now(req.io(), clock);
             if (store) {
                 if (data_opt) |d| {
                     d.deadline = start.addDuration(timeout);
@@ -36,7 +36,7 @@ pub fn Timeout(comptime opts: anytype) type {
             }
 
             const res = try next.call(ctx, req);
-            const elapsed = start.untilNow(req.io, clock);
+            const elapsed = start.untilNow(req.io(), clock);
 
             if (store) {
                 if (data_opt) |d| {

@@ -3,13 +3,7 @@
     .version = "0.0.0",
     .fingerprint = 0xc37cddddbdfecc23, // Changing this has security and trust implications.
     .minimum_zig_version = "0.16.0-dev.2736+3b515fbed",
-    .dependencies = .{
-        .zwebsocket = .{
-            .url = "git+https://github.com/SmallThingz/zws#8bee168382b97e5cf3ca24476142710a86047be0",
-            .hash = "zwebsocket-0.0.0-DxX8cOEXAwBvuyKN8kxJgxbJGpYY5oomkc6eQAfjnu4q",
-            .lazy = true,
-        },
-    },
+    .dependencies = .{},
     .paths = .{
         "benchmark",
         "build.zig",
@@ -18,7 +12,5 @@
         "src",
         "test_root.zig",
         "test_runner.zig",
-        "websocket_support.zig",
-        "websocket_test.zig",
     },
 }

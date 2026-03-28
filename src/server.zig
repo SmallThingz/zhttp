@@ -138,7 +138,7 @@ pub fn Server(comptime def: anytype) type {
                     error.ConnectionAborted, error.BlockedByFirewall, error.ProtocolFailure => continue,
                     error.SocketNotListening, error.Canceled => return error.Canceled,
                     error.NetworkDown => return,
-                    error.WouldBlock => return, // maybe should be unreachable; idk
+                    error.WouldBlock => return,
                     error.Unexpected => return,
                 };
                 self.group.concurrent(self.io, handleConn, .{ self, stream }) catch {
@@ -219,8 +219,12 @@ pub fn Server(comptime def: anytype) type {
                                 self.writeSimple(&sw.interface, 414, "bad request");
                                 break :blk2 .close;
                             },
-                            else => blk2: {
+                            error.BadRequest => blk2: {
                                 self.writeSimple(&sw.interface, 400, "bad request");
+                                break :blk2 .close;
+                            },
+                            error.OutOfMemory => blk2: {
+                                self.writeSimple(&sw.interface, 500, "internal error");
                                 break :blk2 .close;
                             },
                         };
@@ -651,8 +655,8 @@ test "custom error_handler handles handler errors only" {
             return error.Boom;
         }
 
-        fn onError(_: anytype, w: *Io.Writer, comptime ErrorSet: type, err: ErrorSet) router.Action {
-            const body = if (std.mem.eql(u8, @errorName(err), "Boom")) "custom boom" else "custom parse";
+        fn onError(_: anytype, w: *Io.Writer, comptime ErrorSet: type, _: ErrorSet) router.Action {
+            const body = "custom boom";
             response.write(w, response.Res.text(499, body), false, true) catch unreachable;
             w.flush() catch unreachable;
             return .close;

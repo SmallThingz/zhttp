@@ -22,7 +22,8 @@ fn testLog(method: []const u8, path: []const u8, status: u16, _: Io.Duration) vo
 
 pub fn Logger(comptime opts: anytype) type {
     const store: bool = @hasField(@TypeOf(opts), "name");
-    const log_fn = if (@hasField(@TypeOf(opts), "log")) opts.log else null;
+    const LogFn = *const fn ([]const u8, []const u8, u16, Io.Duration) void;
+    const log_fn: ?LogFn = if (@hasField(@TypeOf(opts), "log")) opts.log else null;
     const clock: Io.Clock = if (@hasField(@TypeOf(opts), "clock")) opts.clock else .awake;
 
     const DataT = if (store) struct {
@@ -35,9 +36,9 @@ pub fn Logger(comptime opts: anytype) type {
         pub const Data = DataT;
 
         fn handle(comptime Next: type, next: Next, ctx: anytype, req: anytype, data_opt: ?*DataT) !Res {
-            const start = Io.Timestamp.now(req.io, clock);
+            const start = Io.Timestamp.now(req.io(), clock);
             const res = try next.call(ctx, req);
-            const elapsed = start.untilNow(req.io, clock);
+            const elapsed = start.untilNow(req.io(), clock);
 
             if (store) {
                 if (data_opt) |d| {
@@ -48,10 +49,10 @@ pub fn Logger(comptime opts: anytype) type {
             }
 
             if (log_fn) |f| {
-                @call(.auto, f, .{ req.method, req.base.path_raw, res.status, elapsed });
+                @call(.auto, f, .{ req.method, req.baseConst().path_raw, @intFromEnum(res.status), elapsed });
             } else {
                 const ms = elapsed.toMilliseconds();
-                std.debug.print("{s} {s} {d} {d}ms\n", .{ req.method, req.base.path_raw, res.status, ms });
+                std.debug.print("{s} {s} {d} {d}ms\n", .{ req.method, req.baseConst().path_raw, res.status, ms });
             }
             return res;
         }

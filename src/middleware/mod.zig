@@ -1,11 +1,14 @@
-pub const Static = @import("static.zig").Static;
-pub const Cors = @import("cors.zig").Cors;
-pub const Logger = @import("logger.zig").Logger;
-pub const Compression = @import("compression.zig").Compression;
-pub const Origin = @import("origin.zig").Origin;
-pub const OriginDecisionTree = @import("origin.zig").DecisionTree;
-pub const OriginHashMatcher = @import("origin.zig").HashMatcher;
-pub const Timeout = @import("timeout.zig").Timeout;
-pub const Etag = @import("etag.zig").Etag;
-pub const RequestId = @import("request_id.zig").RequestId;
-pub const SecurityHeaders = @import("security_headers.zig").SecurityHeaders;
+const middleware = @import("../middleware.zig");
+
+pub const MiddlewareInfo = middleware.MiddlewareInfo;
+pub const Static = middleware.Static;
+pub const Cors = middleware.Cors;
+pub const Logger = middleware.Logger;
+pub const Compression = middleware.Compression;
+pub const Origin = middleware.Origin;
+pub const OriginDecisionTree = middleware.OriginDecisionTree;
+pub const OriginHashMatcher = middleware.OriginHashMatcher;
+pub const Timeout = middleware.Timeout;
+pub const Etag = middleware.Etag;
+pub const RequestId = middleware.RequestId;
+pub const SecurityHeaders = middleware.SecurityHeaders;

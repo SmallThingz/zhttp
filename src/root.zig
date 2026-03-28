@@ -44,7 +44,7 @@ pub const router = @import("router.zig");
 
 pub const Res = response.Res;
 pub const Server = @import("server.zig").Server;
-pub const middleware = @import("middleware/mod.zig");
+pub const middleware = @import("middleware.zig");
 
 pub const route = router.route;
 pub const get = router.get;
@@ -125,6 +125,6 @@ test {
     _ = @import("response.zig");
     _ = @import("router.zig");
     _ = @import("server.zig");
-    _ = @import("middleware/mod.zig");
+    _ = @import("middleware.zig");
     _ = @import("urldecode.zig");
 }

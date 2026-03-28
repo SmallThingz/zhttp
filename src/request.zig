@@ -12,6 +12,10 @@ pub const Version = enum { http10, http11 };
 pub const BodyKind = enum { none, content_length, chunked };
 
 pub const Base = struct {
+    io: Io,
+    arena: Allocator,
+    reader: ?*Io.Reader = null,
+
     version: Version,
     path_raw: []u8,
     // Backing storage for query parsing. Values may be percent-decoded in place,
@@ -223,83 +227,164 @@ fn RequestPWithPatternExt(
     return struct {
         comptime path: []const u8 = route_pattern,
         comptime method: []const u8 = method_name,
-        base: Base,
-        reader: ?*Io.Reader = null,
-        io: Io,
-        arena: Allocator,
-        mw_ctx: MwCtx,
-        headers: Headers = parse.emptyStruct(Headers),
-        query: Query = parse.emptyStruct(Query),
-        params: ParamsEffective = parse.emptyStruct(ParamsEffective),
+        _base: Base,
+        _mw_ctx: MwCtx,
+        _headers: Headers = parse.emptyStruct(Headers),
+        _query: Query = parse.emptyStruct(Query),
+        _params: ParamsEffective = parse.emptyStruct(ParamsEffective),
 
         const Self = @This();
 
         pub const ParamNames: []const []const u8 = param_names;
 
-        pub fn init(arena: Allocator, io: Io, line: RequestLine, mw_ctx: MwCtx) Self {
+        pub fn init(init_arena: Allocator, init_io: Io, line: RequestLine, mw_ctx: MwCtx) Self {
             return .{
-                .arena = arena,
-                .io = io,
-                .base = .{
+                ._base = .{
+                    .io = init_io,
+                    .arena = init_arena,
                     .version = line.version,
                     .path_raw = line.path,
                     .query_raw = line.query,
                 },
-                .mw_ctx = mw_ctx,
+                ._mw_ctx = mw_ctx,
             };
         }
 
         pub fn allocator(self: *const Self) Allocator {
-            return self.arena;
+            return self._base.arena;
+        }
+
+        pub fn base(self: *Self) *Base {
+            return &self._base;
+        }
+
+        pub fn baseConst(self: *const Self) *const Base {
+            return &self._base;
+        }
+
+        pub fn setBase(self: *Self, value: Base) void {
+            self._base = value;
+        }
+
+        pub fn io(self: *const Self) Io {
+            return self._base.io;
+        }
+
+        pub fn setIo(self: *Self, value: Io) void {
+            self._base.io = value;
+        }
+
+        pub fn arena(self: *const Self) Allocator {
+            return self._base.arena;
+        }
+
+        pub fn setArena(self: *Self, value: Allocator) void {
+            self._base.arena = value;
+        }
+
+        pub fn reader(self: *const Self) ?*Io.Reader {
+            return self._base.reader;
+        }
+
+        pub fn setReader(self: *Self, value: ?*Io.Reader) void {
+            self._base.reader = value;
+        }
+
+        pub fn mwCtxMut(self: *Self) *MwCtx {
+            return &self._mw_ctx;
+        }
+
+        pub fn mwCtxConst(self: *const Self) *const MwCtx {
+            return &self._mw_ctx;
+        }
+
+        pub fn setMwCtx(self: *Self, value: MwCtx) void {
+            self._mw_ctx = value;
+        }
+
+        pub fn headersMut(self: *Self) *Headers {
+            return &self._headers;
+        }
+
+        pub fn headersConst(self: *const Self) *const Headers {
+            return &self._headers;
+        }
+
+        pub fn setHeaders(self: *Self, value: Headers) void {
+            self._headers = value;
+        }
+
+        pub fn queryMut(self: *Self) *Query {
+            return &self._query;
+        }
+
+        pub fn queryConst(self: *const Self) *const Query {
+            return &self._query;
+        }
+
+        pub fn setQuery(self: *Self, value: Query) void {
+            self._query = value;
+        }
+
+        pub fn paramsMut(self: *Self) *ParamsEffective {
+            return &self._params;
+        }
+
+        pub fn paramsConst(self: *const Self) *const ParamsEffective {
+            return &self._params;
+        }
+
+        pub fn setParams(self: *Self, value: ParamsEffective) void {
+            self._params = value;
         }
 
         pub fn deinit(self: *Self, a: Allocator) void {
-            parse.destroyStruct(&self.headers, a);
-            parse.destroyStruct(&self.query, a);
-            parse.destroyStruct(&self.params, a);
+            parse.destroyStruct(&self._headers, a);
+            parse.destroyStruct(&self._query, a);
+            parse.destroyStruct(&self._params, a);
         }
 
         /// Get a captured header by field name, e.g. `req.header(.host)`.
-        pub fn header(self: *const Self, comptime field: @EnumLiteral()) @TypeOf(@field(self.headers, @tagName(field)).get()) {
-            return @field(self.headers, @tagName(field)).get();
+        pub fn header(self: *const Self, comptime field: @EnumLiteral()) @TypeOf(@field(self._headers, @tagName(field)).get()) {
+            return @field(self._headers, @tagName(field)).get();
         }
 
         /// Get a captured query param by field name, e.g. `req.queryParam(.page)`.
-        pub fn queryParam(self: *const Self, comptime field: @EnumLiteral()) @TypeOf(@field(self.query, @tagName(field)).get()) {
-            return @field(self.query, @tagName(field)).get();
+        pub fn queryParam(self: *const Self, comptime field: @EnumLiteral()) @TypeOf(@field(self._query, @tagName(field)).get()) {
+            return @field(self._query, @tagName(field)).get();
         }
 
         /// Get a typed path param value (declared in route `opts.params` or middleware `Needs.params`).
         /// If a route param is not declared, it defaults to a string.
         ///
         /// e.g. `req.paramValue(.id)`.
-        pub fn paramValue(self: *const Self, comptime field: @EnumLiteral()) @TypeOf(@field(self.params, @tagName(field)).get()) {
-            return @field(self.params, @tagName(field)).get();
+        pub fn paramValue(self: *const Self, comptime field: @EnumLiteral()) @TypeOf(@field(self._params, @tagName(field)).get()) {
+            return @field(self._params, @tagName(field)).get();
         }
 
         /// Get a pointer to middleware data by name, e.g. `req.middlewareData(.auth)`.
         pub fn middlewareData(self: *Self, comptime name: @EnumLiteral()) *middlewareContextFieldType(MwCtx, name) {
-            return &@field(self.mw_ctx, middlewareContextFieldName(MwCtx, name));
+            return &@field(self._mw_ctx, middlewareContextFieldName(MwCtx, name));
         }
 
         /// Get a const pointer to middleware data by name, e.g. `req.middlewareDataConst(.auth)`.
         pub fn middlewareDataConst(self: *const Self, comptime name: @EnumLiteral()) *const middlewareContextFieldType(MwCtx, name) {
-            return &@field(self.mw_ctx, middlewareContextFieldName(MwCtx, name));
+            return &@field(self._mw_ctx, middlewareContextFieldName(MwCtx, name));
         }
 
         pub fn keepAlive(self: *const Self) bool {
-            return self.base.version == .http11 and !self.base.connection_close;
+            return self._base.version == .http11 and !self._base.connection_close;
         }
 
         pub fn parseParams(self: *Self, a: Allocator, params_in: []const []u8) !void {
             if (param_names.len == 0) return;
             std.debug.assert(params_in.len == param_names.len);
             // reset captures each request
-            self.params = parse.emptyStruct(ParamsEffective);
+            self._params = parse.emptyStruct(ParamsEffective);
             inline for (param_names, 0..) |pn, i| {
-                try @field(self.params, pn).parse(a, params_in[i]);
+                try @field(self._params, pn).parse(a, params_in[i]);
             }
-            try parse.doneParsingStruct(&self.params, &([_]bool{true} ** param_names.len));
+            try parse.doneParsingStruct(&self._params, &([_]bool{true} ** param_names.len));
         }
 
         pub fn parseQuery(self: *Self, a: Allocator) !void {
@@ -307,7 +392,7 @@ fn RequestPWithPatternExt(
             var present: [QueryLookup.count]bool = .{false} ** QueryLookup.count;
 
             var i: usize = 0;
-            const q = self.base.query_raw;
+            const q = self._base.query_raw;
             while (i <= q.len) {
                 const amp = std.mem.indexOfScalarPos(u8, q, i, '&') orelse q.len;
                 const part = q[i..amp];
@@ -323,21 +408,21 @@ fn RequestPWithPatternExt(
                     const q_fields = comptime parse.structFields(Query);
                     inline for (q_fields, 0..) |f, fi| {
                         if (idx == @as(u16, @intCast(fi))) {
-                            try @field(self.query, f.name).parse(a, v);
+                            try @field(self._query, f.name).parse(a, v);
                             break;
                         }
                     }
                 }
             }
 
-            try parse.doneParsingStruct(&self.query, present[0..]);
+            try parse.doneParsingStruct(&self._query, present[0..]);
         }
 
         pub fn parseHeaders(self: *Self, a: Allocator, r: *Io.Reader, max_header_bytes: usize) ParseHeadersError!void {
-            self.reader = r;
+            self._base.reader = r;
             if (HeaderLookup.count != 0) {
                 // reset captures each request
-                self.headers = parse.emptyStruct(Headers);
+                self._headers = parse.emptyStruct(Headers);
             }
             var present: [HeaderLookup.count]bool = .{false} ** HeaderLookup.count;
 
@@ -352,10 +437,10 @@ fn RequestPWithPatternExt(
             };
             if (peek.len >= 2 and peek[0] == '\r' and peek[1] == '\n') {
                 r.toss(2);
-                self.base.body_kind = .none;
-                self.base.body_remaining = 0;
+                self._base.body_kind = .none;
+                self._base.body_remaining = 0;
                 if (HeaderLookup.count != 0) {
-                    try parse.doneParsingStruct(&self.headers, present[0..]);
+                    try parse.doneParsingStruct(&self._headers, present[0..]);
                 }
                 return;
             }
@@ -406,7 +491,7 @@ fn RequestPWithPatternExt(
                     value = trimSpaces(value);
 
                     if (headerIs(name, "connection")) {
-                        if (containsTokenIgnoreCase(value, "close")) self.base.connection_close = true;
+                        if (containsTokenIgnoreCase(value, "close")) self._base.connection_close = true;
                     } else if (headerIs(name, "content-length")) {
                         const parsed = std.fmt.parseInt(usize, value, 10) catch return error.BadRequest;
                         if (content_length) |prev| {
@@ -424,7 +509,7 @@ fn RequestPWithPatternExt(
                             const h_fields = comptime parse.structFields(Headers);
                             inline for (h_fields, 0..) |f, fi| {
                                 if (idx == @as(u16, @intCast(fi))) {
-                                    try @field(self.headers, f.name).parse(a, value);
+                                    try @field(self._headers, f.name).parse(a, value);
                                     break;
                                 }
                             }
@@ -463,16 +548,16 @@ fn RequestPWithPatternExt(
 
             if (has_chunked and content_length != null) return error.BadRequest;
             if (has_chunked) {
-                self.base.body_kind = .chunked;
+                self._base.body_kind = .chunked;
             } else if (content_length) |cl| {
-                self.base.body_kind = if (cl == 0) .none else .content_length;
-                self.base.body_remaining = cl;
+                self._base.body_kind = if (cl == 0) .none else .content_length;
+                self._base.body_remaining = cl;
             } else {
-                self.base.body_kind = .none;
+                self._base.body_kind = .none;
             }
 
             if (HeaderLookup.count != 0) {
-                try parse.doneParsingStruct(&self.headers, present[0..]);
+                try parse.doneParsingStruct(&self._headers, present[0..]);
             }
         }
 
@@ -481,14 +566,14 @@ fn RequestPWithPatternExt(
         }
 
         fn bodyAllFrom(self: *Self, a: Allocator, r: *Io.Reader, max_bytes: usize) ![]const u8 {
-            return switch (self.base.body_kind) {
+            return switch (self._base.body_kind) {
                 .none => "",
                 .content_length => blk: {
-                    const n = self.base.body_remaining;
+                    const n = self._base.body_remaining;
                     if (n > max_bytes) return error.PayloadTooLarge;
                     const buf = try a.alloc(u8, n);
                     try readExact(r, buf);
-                    self.base.body_remaining = 0;
+                    self._base.body_remaining = 0;
                     break :blk buf;
                 },
                 .chunked => blk: {
@@ -525,7 +610,7 @@ fn RequestPWithPatternExt(
                         try readExact(r, crlf[0..]);
                         if (crlf[0] != '\r' or crlf[1] != '\n') return error.BadRequest;
                     }
-                    self.base.body_kind = .none;
+                    self._base.body_kind = .none;
                     break :blk try out.toOwnedSlice(a);
                 },
             };
@@ -535,21 +620,21 @@ fn RequestPWithPatternExt(
         ///
         /// Requires headers to have been parsed for this request.
         pub fn bodyAll(self: *Self, max_bytes: usize) ![]const u8 {
-            const r = self.reader orelse return error.BadRequest;
-            return bodyAllFrom(self, self.arena, r, max_bytes);
+            const r = self._base.reader orelse return error.BadRequest;
+            return bodyAllFrom(self, self._base.arena, r, max_bytes);
         }
 
         fn discardUnreadBodyFrom(self: *Self, r: *Io.Reader) !void {
-            switch (self.base.body_kind) {
+            switch (self._base.body_kind) {
                 .none => return,
                 .content_length => {
-                    var remaining = self.base.body_remaining;
+                    var remaining = self._base.body_remaining;
                     while (remaining != 0) {
                         const tossed = try r.discard(.limited(remaining));
                         remaining -= tossed;
                     }
-                    self.base.body_remaining = 0;
-                    self.base.body_kind = .none;
+                    self._base.body_remaining = 0;
+                    self._base.body_kind = .none;
                 },
                 .chunked => {
                     while (true) {
@@ -581,7 +666,7 @@ fn RequestPWithPatternExt(
                         try readExact(r, crlf[0..]);
                         if (crlf[0] != '\r' or crlf[1] != '\n') return error.BadRequest;
                     }
-                    self.base.body_kind = .none;
+                    self._base.body_kind = .none;
                 },
             }
         }
@@ -590,7 +675,7 @@ fn RequestPWithPatternExt(
         ///
         /// Requires headers to have been parsed for this request.
         pub fn discardUnreadBody(self: *Self) !void {
-            const r = self.reader orelse return error.BadRequest;
+            const r = self._base.reader orelse return error.BadRequest;
             return discardUnreadBodyFrom(self, r);
         }
     };
@@ -901,7 +986,7 @@ test "headers: transfer-encoding list sets chunked" {
     defer reqv.deinit(gpa);
     var r = Io.Reader.fixed("Transfer-Encoding: gzip, chunked\r\n\r\n");
     try reqv.parseHeaders(gpa, &r, 8 * 1024);
-    try std.testing.expectEqual(BodyKind.chunked, reqv.base.body_kind);
+    try std.testing.expectEqual(BodyKind.chunked, reqv.baseConst().body_kind);
 }
 
 test "chunked: invalid chunk CRLF rejected" {

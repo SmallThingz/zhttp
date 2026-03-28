@@ -430,6 +430,87 @@ fn primeSocketBackend() void {
     }
 }
 
+fn renderTextResponse(
+    status: u16,
+    body: []const u8,
+    keep_alive: bool,
+    send_body: bool,
+    out: []u8,
+) ![]const u8 {
+    var w = Io.Writer.fixed(out);
+    try response.write(&w, response.Res.text(status, body), keep_alive, send_body);
+    return out[0..w.end];
+}
+
+fn renderUpgradeResponse(headers: []const response.Header, out: []u8) ![]const u8 {
+    var w = Io.Writer.fixed(out);
+    const res: response.Res = .{
+        .status = .switching_protocols,
+        .headers = headers,
+    };
+    try response.writeUpgrade(&w, res);
+    return out[0..w.end];
+}
+
+fn expectReadEquals(r: *Io.Reader, expected: []const u8) !void {
+    var got_buf: [8192]u8 = undefined;
+    std.debug.assert(expected.len <= got_buf.len);
+    try r.readSliceAll(got_buf[0..expected.len]);
+    try std.testing.expectEqualStrings(expected, got_buf[0..expected.len]);
+}
+
+fn expectClosed(r: *Io.Reader) !void {
+    var one: [1]u8 = undefined;
+    try std.testing.expectError(error.EndOfStream, r.readSliceAll(one[0..]));
+}
+
+fn sendOneShotExpect(io: Io, port: u16, req: []const u8, expected: []const u8) !void {
+    var stream = try Io.net.IpAddress.connect(&.{ .ip4 = Io.net.Ip4Address.loopback(port) }, io, .{ .mode = .stream });
+    defer stream.close(io);
+
+    var rb: [8 * 1024]u8 = undefined;
+    var wb: [2 * 1024]u8 = undefined;
+    var sr = stream.reader(io, &rb);
+    var sw = stream.writer(io, &wb);
+
+    try sw.interface.writeAll(req);
+    try sw.interface.flush();
+    try expectReadEquals(&sr.interface, expected);
+    try expectClosed(&sr.interface);
+}
+
+fn sendAndCloseEarly(io: Io, port: u16, req_prefix: []const u8) !void {
+    var stream = try Io.net.IpAddress.connect(&.{ .ip4 = Io.net.Ip4Address.loopback(port) }, io, .{ .mode = .stream });
+    defer stream.close(io);
+
+    var wb: [2 * 1024]u8 = undefined;
+    var sw = stream.writer(io, &wb);
+    try sw.interface.writeAll(req_prefix);
+    try sw.interface.flush();
+}
+
+fn randomAscii(random: std.Random, buf: []u8) void {
+    for (buf) |*b| b.* = 'a' + random.uintLessThan(u8, 26);
+}
+
+fn appendChunkedBody(buf: []u8, body: []const u8, random: std.Random) ![]const u8 {
+    var w = Io.Writer.fixed(buf);
+    var start: usize = 0;
+    while (start < body.len) {
+        const remaining = body.len - start;
+        const chunk_len = 1 + random.uintLessThan(usize, remaining);
+        var len_buf: [16]u8 = undefined;
+        const len_hex = try std.fmt.bufPrint(&len_buf, "{x}", .{chunk_len});
+        try w.writeAll(len_hex);
+        try w.writeAll("\r\n");
+        try w.writeAll(body[start .. start + chunk_len]);
+        try w.writeAll("\r\n");
+        start += chunk_len;
+    }
+    try w.writeAll("0\r\n\r\n");
+    return buf[0..w.end];
+}
+
 test "Connection: close header closes socket" {
     const Bench = struct {
         fn plaintext(_: anytype) !response.Res {
@@ -1705,6 +1786,448 @@ test "server variation: unbuffered writer config works" {
     var got: [resp.len]u8 = undefined;
     try sr.interface.readSliceAll(got[0..]);
     try std.testing.expectEqualStrings(resp, got[0..]);
+
+    group.cancel(io);
+    group.await(io) catch {};
+}
+
+test "server adversarial malformed clients recover and keep serving" {
+    const Endpoints = struct {
+        const Ok = struct {
+            pub const Info: router.EndpointInfo = .{};
+            pub fn call(comptime _: ReqCtx, _: anytype) !response.Res {
+                return response.Res.text(200, "ok");
+            }
+        };
+
+        const Drain = struct {
+            pub const Info: router.EndpointInfo = .{};
+            pub fn call(comptime _: ReqCtx, _: anytype) !response.Res {
+                return response.Res.text(200, "drain");
+            }
+        };
+
+        const Item = struct {
+            pub const Info: router.EndpointInfo = .{
+                .path = struct {
+                    id: parse.Int(u32),
+                },
+            };
+            pub fn call(comptime rctx: ReqCtx, req: rctx.T()) !response.Res {
+                const body = try std.fmt.allocPrint(req.allocator(), "{d}", .{req.paramValue(.id)});
+                return response.Res.text(200, body);
+            }
+        };
+
+        const Search = struct {
+            pub const Info: router.EndpointInfo = .{
+                .query = struct {
+                    name: parse.Optional(parse.String),
+                },
+            };
+            pub fn call(comptime _: ReqCtx, req: anytype) !response.Res {
+                return response.Res.text(200, req.queryParam(.name) orelse "none");
+            }
+        };
+    };
+
+    const io = std.testing.io;
+    primeSocketBackend();
+
+    const SrvT = Server(.{
+        .routes = .{
+            router.get("/ok", Endpoints.Ok),
+            router.post("/drain", Endpoints.Drain),
+            router.get("/item/{id}", Endpoints.Item),
+            router.get("/search", Endpoints.Search),
+        },
+        .config = .{
+            .read_buffer = 1024,
+            .write_buffer = 1024,
+            .max_request_line = 128,
+            .max_single_header_size = 128,
+            .max_header_bytes = 512,
+        },
+    });
+
+    const addr0: Io.net.IpAddress = .{ .ip4 = Io.net.Ip4Address.loopback(0) };
+    var server = try SrvT.init(std.testing.allocator, io, addr0, {});
+    defer server.deinit();
+    const port: u16 = server.listener.socket.address.getPort();
+
+    var group: Io.Group = .init;
+    defer group.cancel(io);
+    try group.concurrent(io, SrvT.run, .{&server});
+
+    var bad_400_buf: [256]u8 = undefined;
+    const bad_400 = try renderTextResponse(400, "bad request", false, true, bad_400_buf[0..]);
+    var bad_414_buf: [256]u8 = undefined;
+    const bad_414 = try renderTextResponse(414, "bad request", false, true, bad_414_buf[0..]);
+    var bad_431_buf: [256]u8 = undefined;
+    const bad_431 = try renderTextResponse(431, "bad request", false, true, bad_431_buf[0..]);
+    var ok_close_buf: [256]u8 = undefined;
+    const ok_close = try renderTextResponse(200, "ok", false, true, ok_close_buf[0..]);
+
+    try sendOneShotExpect(io, port, "GET http://x HTTP/1.1\r\n\r\n", bad_400);
+
+    var long_uri_req_buf: [256]u8 = undefined;
+    {
+        var w = Io.Writer.fixed(long_uri_req_buf[0..]);
+        try w.writeAll("GET /");
+        var i: usize = 0;
+        while (i < 150) : (i += 1) try w.writeByte('a');
+        try w.writeAll(" HTTP/1.1\r\n\r\n");
+        try sendOneShotExpect(io, port, long_uri_req_buf[0..w.end], bad_414);
+    }
+
+    var huge_header_req_buf: [512]u8 = undefined;
+    {
+        var w = Io.Writer.fixed(huge_header_req_buf[0..]);
+        try w.writeAll("GET /ok HTTP/1.1\r\nX: ");
+        var i: usize = 0;
+        while (i < 180) : (i += 1) try w.writeByte('b');
+        try w.writeAll("\r\n\r\n");
+        try sendOneShotExpect(io, port, huge_header_req_buf[0..w.end], bad_431);
+    }
+
+    try sendOneShotExpect(io, port, "GET /ok HTTP/1.1\r\nBroken\r\n\r\n", bad_400);
+    try sendOneShotExpect(io, port, "POST /drain HTTP/1.1\r\nHost: x\r\nContent-Length: 1\r\nContent-Length: 2\r\n\r\n", bad_400);
+    try sendOneShotExpect(io, port, "POST /drain HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\nContent-Length: 0\r\n\r\n", bad_400);
+    try sendOneShotExpect(io, port, "POST /drain HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n1\r\naXY0\r\n\r\n", bad_400);
+    try sendOneShotExpect(io, port, "GET /item/%ZZ HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n", bad_400);
+    try sendOneShotExpect(io, port, "GET /search?name=%ZZ HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n", bad_400);
+    try sendAndCloseEarly(io, port, "GET /ok HTTP/1.1\r\nHost: x");
+    try sendAndCloseEarly(io, port, "POST /drain HTTP/1.1\r\nHost: x\r\nContent-Length: 8\r\n\r\nabc");
+    try sendAndCloseEarly(io, port, "POST /drain HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nab");
+
+    try sendOneShotExpect(io, port, "GET /ok HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n", ok_close);
+
+    group.cancel(io);
+    group.await(io) catch {};
+}
+
+test "server soak: one second real-socket variety including malformed keepalive and upgrade flows" {
+    const Ctx = struct {
+        upgrades: usize = 0,
+    };
+
+    const Endpoints = struct {
+        const Ok = struct {
+            pub const Info: router.EndpointInfo = .{};
+            pub fn call(comptime _: ReqCtx, _: anytype) !response.Res {
+                return response.Res.text(200, "ok");
+            }
+        };
+
+        const Echo = struct {
+            pub const Info: router.EndpointInfo = .{};
+            pub fn call(comptime _: ReqCtx, req: anytype) !response.Res {
+                const body = try req.bodyAll(1024);
+                const out = try std.fmt.allocPrint(req.allocator(), "echo:{s}", .{body});
+                return response.Res.text(200, out);
+            }
+        };
+
+        const Drain = struct {
+            pub const Info: router.EndpointInfo = .{};
+            pub fn call(comptime _: ReqCtx, _: anytype) !response.Res {
+                return response.Res.text(200, "drain");
+            }
+        };
+
+        const Item = struct {
+            pub const Info: router.EndpointInfo = .{
+                .path = struct {
+                    id: parse.Int(u32),
+                },
+            };
+            pub fn call(comptime _: ReqCtx, req: anytype) !response.Res {
+                const out = try std.fmt.allocPrint(req.allocator(), "{d}", .{req.paramValue(.id)});
+                return response.Res.text(200, out);
+            }
+        };
+
+        const Search = struct {
+            pub const Info: router.EndpointInfo = .{
+                .query = struct {
+                    name: parse.Optional(parse.String),
+                },
+            };
+            pub fn call(comptime _: ReqCtx, req: anytype) !response.Res {
+                return response.Res.text(200, req.queryParam(.name) orelse "none");
+            }
+        };
+
+        const Upgrade = struct {
+            pub const Info: router.EndpointInfo = .{};
+            pub fn call(comptime _: ReqCtx, _: anytype) !response.Res {
+                return .{
+                    .status = .switching_protocols,
+                    .headers = &.{
+                        .{ .name = "connection", .value = "Upgrade" },
+                        .{ .name = "upgrade", .value = "testproto" },
+                    },
+                };
+            }
+            pub fn upgrade(server: anytype, stream: *const std.Io.net.Stream, r: *Io.Reader, w: *Io.Writer, _: request.RequestLine, _: response.Res) void {
+                server.ctx.upgrades += 1;
+                var msg: [4]u8 = undefined;
+                r.readSliceAll(msg[0..]) catch {
+                    stream.close(server.io);
+                    return;
+                };
+                if (std.mem.eql(u8, msg[0..], "ping")) {
+                    w.writeAll("pong") catch {};
+                    w.flush() catch {};
+                }
+                stream.close(server.io);
+            }
+        };
+    };
+
+    const io = std.testing.io;
+    primeSocketBackend();
+
+    var ctx: Ctx = .{};
+    const SrvT = Server(.{
+        .Context = Ctx,
+        .routes = .{
+            router.get("/ok", Endpoints.Ok),
+            router.head("/ok", Endpoints.Ok),
+            router.post("/echo", Endpoints.Echo),
+            router.post("/drain", Endpoints.Drain),
+            router.get("/item/{id}", Endpoints.Item),
+            router.get("/search", Endpoints.Search),
+            router.get("/up", Endpoints.Upgrade),
+        },
+        .config = .{
+            .read_buffer = 1024,
+            .write_buffer = 1024,
+            .max_request_line = 256,
+            .max_single_header_size = 256,
+            .max_header_bytes = 1024,
+        },
+    });
+
+    const addr0: Io.net.IpAddress = .{ .ip4 = Io.net.Ip4Address.loopback(0) };
+    var server = try SrvT.init(std.testing.allocator, io, addr0, &ctx);
+    defer server.deinit();
+    const port: u16 = server.listener.socket.address.getPort();
+
+    var group: Io.Group = .init;
+    defer group.cancel(io);
+    try group.concurrent(io, SrvT.run, .{&server});
+
+    var prng = std.Random.DefaultPrng.init(0x5eed_cafe_1234_5678);
+    const random = prng.random();
+    const start = Io.Clock.awake.now(io);
+
+    var iterations: usize = 0;
+    var upgrade_cases: usize = 0;
+    var malformed_cases: usize = 0;
+    var keepalive_cases: usize = 0;
+
+    while (start.untilNow(io, .awake).nanoseconds < std.time.ns_per_s) : (iterations += 1) {
+        const case_id = iterations % 18;
+        switch (case_id) {
+            0 => {
+                var expected_buf: [256]u8 = undefined;
+                const expected = try renderTextResponse(200, "ok", false, true, expected_buf[0..]);
+                try sendOneShotExpect(io, port, "GET /ok HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n", expected);
+            },
+            1 => {
+                var expected_buf: [256]u8 = undefined;
+                const expected = try renderTextResponse(200, "ok", false, false, expected_buf[0..]);
+                try sendOneShotExpect(io, port, "HEAD /ok HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n", expected);
+            },
+            2 => {
+                var body: [32]u8 = undefined;
+                const len = random.uintLessThan(usize, body.len + 1);
+                randomAscii(random, body[0..len]);
+
+                var req_buf: [512]u8 = undefined;
+                const req = try std.fmt.bufPrint(
+                    &req_buf,
+                    "POST /echo HTTP/1.1\r\nHost: x\r\nConnection: close\r\nContent-Length: {d}\r\n\r\n{s}",
+                    .{ len, body[0..len] },
+                );
+                var resp_body: [64]u8 = undefined;
+                const body_out = try std.fmt.bufPrint(&resp_body, "echo:{s}", .{body[0..len]});
+                var expected_buf: [256]u8 = undefined;
+                const expected = try renderTextResponse(200, body_out, false, true, expected_buf[0..]);
+                try sendOneShotExpect(io, port, req, expected);
+            },
+            3 => {
+                var body: [32]u8 = undefined;
+                const len = random.uintLessThan(usize, body.len + 1);
+                randomAscii(random, body[0..len]);
+                var chunk_buf: [512]u8 = undefined;
+                const chunks = try appendChunkedBody(chunk_buf[0..], body[0..len], random);
+
+                var req_buf: [768]u8 = undefined;
+                const req = try std.fmt.bufPrint(
+                    &req_buf,
+                    "POST /echo HTTP/1.1\r\nHost: x\r\nConnection: close\r\nTransfer-Encoding: chunked\r\n\r\n{s}",
+                    .{chunks},
+                );
+                var resp_body: [64]u8 = undefined;
+                const body_out = try std.fmt.bufPrint(&resp_body, "echo:{s}", .{body[0..len]});
+                var expected_buf: [256]u8 = undefined;
+                const expected = try renderTextResponse(200, body_out, false, true, expected_buf[0..]);
+                try sendOneShotExpect(io, port, req, expected);
+            },
+            4 => {
+                var expected_buf: [256]u8 = undefined;
+                const expected = try renderTextResponse(200, "123", false, true, expected_buf[0..]);
+                try sendOneShotExpect(io, port, "GET /item/123 HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n", expected);
+            },
+            5 => {
+                var expected_buf: [256]u8 = undefined;
+                const expected = try renderTextResponse(200, "123", false, true, expected_buf[0..]);
+                try sendOneShotExpect(io, port, "GET /item/%31%32%33 HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n", expected);
+            },
+            6 => {
+                var expected_buf: [256]u8 = undefined;
+                const expected = try renderTextResponse(200, "a b", false, true, expected_buf[0..]);
+                try sendOneShotExpect(io, port, "GET /search?name=a%20b HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n", expected);
+            },
+            7 => {
+                var expected_buf: [256]u8 = undefined;
+                const expected = try renderTextResponse(404, "not found", false, true, expected_buf[0..]);
+                try sendOneShotExpect(io, port, "GET /missing HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n", expected);
+            },
+            8 => {
+                malformed_cases += 1;
+                var expected_buf: [256]u8 = undefined;
+                const expected = try renderTextResponse(400, "bad request", false, true, expected_buf[0..]);
+                try sendOneShotExpect(io, port, "POST /drain HTTP/1.1\r\nHost: x\r\nContent-Length: 1\r\nContent-Length: 2\r\n\r\n", expected);
+            },
+            9 => {
+                malformed_cases += 1;
+                var expected_buf: [256]u8 = undefined;
+                const expected = try renderTextResponse(400, "bad request", false, true, expected_buf[0..]);
+                try sendOneShotExpect(io, port, "POST /drain HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\nContent-Length: 0\r\n\r\n", expected);
+            },
+            10 => {
+                malformed_cases += 1;
+                var expected_buf: [256]u8 = undefined;
+                const expected = try renderTextResponse(400, "bad request", false, true, expected_buf[0..]);
+                try sendOneShotExpect(io, port, "GET /ok HTTP/1.1\r\nBroken\r\n\r\n", expected);
+            },
+            11 => {
+                malformed_cases += 1;
+                var req_buf: [512]u8 = undefined;
+                var w = Io.Writer.fixed(req_buf[0..]);
+                try w.writeAll("GET /ok HTTP/1.1\r\nX: ");
+                var i: usize = 0;
+                while (i < 300) : (i += 1) try w.writeByte('z');
+                try w.writeAll("\r\n\r\n");
+                var expected_buf: [256]u8 = undefined;
+                const expected = try renderTextResponse(431, "bad request", false, true, expected_buf[0..]);
+                try sendOneShotExpect(io, port, req_buf[0..w.end], expected);
+            },
+            12 => {
+                upgrade_cases += 1;
+                var stream = try Io.net.IpAddress.connect(&.{ .ip4 = Io.net.Ip4Address.loopback(port) }, io, .{ .mode = .stream });
+                defer stream.close(io);
+
+                var rb: [4 * 1024]u8 = undefined;
+                var wb: [512]u8 = undefined;
+                var sr = stream.reader(io, &rb);
+                var sw = stream.writer(io, &wb);
+
+                try sw.interface.writeAll(
+                    "GET /up HTTP/1.1\r\n" ++
+                        "Host: x\r\n" ++
+                        "Connection: Upgrade\r\n" ++
+                        "Upgrade: testproto\r\n" ++
+                        "\r\n",
+                );
+                try sw.interface.flush();
+
+                var expected_buf: [256]u8 = undefined;
+                const expected = try renderUpgradeResponse(&.{
+                    .{ .name = "connection", .value = "Upgrade" },
+                    .{ .name = "upgrade", .value = "testproto" },
+                }, expected_buf[0..]);
+                try expectReadEquals(&sr.interface, expected);
+                try sw.interface.writeAll("ping");
+                try sw.interface.flush();
+                try expectReadEquals(&sr.interface, "pong");
+                try expectClosed(&sr.interface);
+            },
+            13 => {
+                keepalive_cases += 1;
+                var body: [24]u8 = undefined;
+                const len = 1 + random.uintLessThan(usize, body.len);
+                randomAscii(random, body[0..len]);
+
+                var req_buf: [768]u8 = undefined;
+                const req = try std.fmt.bufPrint(
+                    &req_buf,
+                    "POST /drain HTTP/1.1\r\nHost: x\r\nContent-Length: {d}\r\n\r\n{s}" ++
+                        "GET /ok HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n",
+                    .{ len, body[0..len] },
+                );
+
+                var resp1_buf: [256]u8 = undefined;
+                const resp1 = try renderTextResponse(200, "drain", true, true, resp1_buf[0..]);
+                var resp2_buf: [256]u8 = undefined;
+                const resp2 = try renderTextResponse(200, "ok", false, true, resp2_buf[0..]);
+                var expected_concat: [512]u8 = undefined;
+                @memcpy(expected_concat[0..resp1.len], resp1);
+                @memcpy(expected_concat[resp1.len .. resp1.len + resp2.len], resp2);
+                try sendOneShotExpect(io, port, req, expected_concat[0 .. resp1.len + resp2.len]);
+            },
+            14 => {
+                malformed_cases += 1;
+                var expected_buf: [256]u8 = undefined;
+                const expected = try renderTextResponse(400, "bad request", false, true, expected_buf[0..]);
+                try sendOneShotExpect(io, port, "POST /drain HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n1\r\naXY0\r\n\r\n", expected);
+            },
+            15 => {
+                malformed_cases += 1;
+                try sendAndCloseEarly(io, port, "GET /ok HTTP/1.1\r\nHost: x");
+            },
+            16 => {
+                malformed_cases += 1;
+                try sendAndCloseEarly(io, port, "POST /drain HTTP/1.1\r\nHost: x\r\nContent-Length: 8\r\n\r\nabc");
+            },
+            17 => {
+                upgrade_cases += 1;
+                var stream = try Io.net.IpAddress.connect(&.{ .ip4 = Io.net.Ip4Address.loopback(port) }, io, .{ .mode = .stream });
+                defer stream.close(io);
+
+                var rb: [4 * 1024]u8 = undefined;
+                var wb: [512]u8 = undefined;
+                var sr = stream.reader(io, &rb);
+                var sw = stream.writer(io, &wb);
+
+                try sw.interface.writeAll(
+                    "GET /up HTTP/1.1\r\n" ++
+                        "Host: x\r\n" ++
+                        "Connection: Upgrade\r\n" ++
+                        "Upgrade: testproto\r\n" ++
+                        "\r\n",
+                );
+                try sw.interface.flush();
+
+                var expected_buf: [256]u8 = undefined;
+                const expected = try renderUpgradeResponse(&.{
+                    .{ .name = "connection", .value = "Upgrade" },
+                    .{ .name = "upgrade", .value = "testproto" },
+                }, expected_buf[0..]);
+                try expectReadEquals(&sr.interface, expected);
+            },
+            else => unreachable,
+        }
+    }
+
+    try std.testing.expect(iterations >= 18);
+    try std.testing.expect(upgrade_cases != 0);
+    try std.testing.expect(malformed_cases != 0);
+    try std.testing.expect(keepalive_cases != 0);
+    try std.testing.expect(ctx.upgrades == upgrade_cases);
 
     group.cancel(io);
     group.await(io) catch {};

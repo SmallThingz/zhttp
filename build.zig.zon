@@ -4,7 +4,7 @@
     .fingerprint = 0xc37cddddbdfecc23, // Changing this has security and trust implications.
     .minimum_zig_version = "0.16.0-dev.2736+3b515fbed",
     .dependencies = .{
-        .zcompress = .{
+        .libzstd = .{
             .path = "../zcompress",
             .lazy = true,
         },

@@ -6,7 +6,7 @@ const MiddlewareInfo = @import("../middleware.zig").MiddlewareInfo;
 const ReqCtx = @import("../req_ctx.zig").ReqCtx;
 const parse = @import("../parse.zig");
 const util = @import("util.zig");
-const zstd = @import("zcompress");
+const zstd = @import("libzstd");
 const brotli = @import("libbrotli");
 
 const flate = std.compress.flate;
@@ -144,7 +144,7 @@ pub const CompressionOptions = struct {
     min_size: usize = 256,
     /// Deflate/gzip compression level/options passed to `std.compress.flate`.
     level: flate.Compress.Options = flate.Compress.Options.default,
-    /// Compression level used for zstd (`zcompress`).
+    /// Compression level used for zstd (`libzstd`).
     zstd_level: i32 = zstd.default_level,
     /// Compression options used for brotli (`libbrotli`).
     brotli_options: brotli.CompressOptions = .{},

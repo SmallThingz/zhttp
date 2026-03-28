@@ -12,7 +12,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
-    const zstd_dep = b.lazyDependency("zcompress", .{
+    const zstd_dep = b.lazyDependency("libzstd", .{
         .target = target,
         .optimize = optimize,
         .static_libc = false,
@@ -24,14 +24,14 @@ pub fn build(b: *std.Build) void {
     });
 
     const zstd_mod = if (zstd_dep) |dep|
-        dep.module("zcompress")
+        dep.module("libzstd")
     else
-        @panic("missing 'zcompress' dependency; run `zig fetch --save ../zcompress`");
+        @panic("missing 'libzstd' dependency; run `zig fetch --save ../zcompress`");
     const brotli_mod = if (brotli_dep) |dep|
         dep.module("libbrotli")
     else
         @panic("missing 'libbrotli' dependency; run `zig fetch --save ../libbrotli.zig`");
-    mod.addImport("zcompress", zstd_mod);
+    mod.addImport("libzstd", zstd_mod);
     mod.addImport("libbrotli", brotli_mod);
 
     const mod_tests = b.addTest(.{
@@ -41,7 +41,7 @@ pub fn build(b: *std.Build) void {
         }),
         .test_runner = .{ .path = b.path("test_runner.zig"), .mode = .simple },
     });
-    mod_tests.root_module.addImport("zcompress", zstd_mod);
+    mod_tests.root_module.addImport("libzstd", zstd_mod);
     mod_tests.root_module.addImport("libbrotli", brotli_mod);
     const run_mod_tests = b.addRunArtifact(mod_tests);
     run_mod_tests.addArgs(&.{ "--jobs", "1", "--exclude-filter", "server.test.", "--exclude-filter", "loopback listen preflight" });

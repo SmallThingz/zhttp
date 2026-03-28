@@ -57,6 +57,7 @@ const builtin = @import("builtin");
 pub const parse = @import("parse.zig");
 pub const request = @import("request.zig");
 pub const response = @import("response.zig");
+pub const route_decl = @import("route_decl.zig");
 pub const upgrade = @import("upgrade.zig");
 pub const router = @import("router.zig");
 
@@ -150,6 +151,7 @@ test {
     _ = @import("parse.zig");
     _ = @import("request.zig");
     _ = @import("response.zig");
+    _ = @import("route_decl.zig");
     _ = @import("upgrade.zig");
     _ = @import("router.zig");
     _ = @import("server.zig");

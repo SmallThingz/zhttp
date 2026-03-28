@@ -105,14 +105,38 @@ test "logger: invokes log function" {
     const Mw = Logger(.{ .log = testLog });
     const MwCtx = struct {};
     const req = @import("../request.zig");
-    const ReqDecl: req.RequestRouteDecl = .{
+    const rd: @import("../route_decl.zig").RouteDecl = .{
+        .method = "GET",
+        .pattern = "/x",
+        .endpoint = struct {},
         .headers = struct {},
         .query = struct {},
         .params = struct {},
-        .pattern = "/x",
-        .method = "GET",
+        .middlewares = &.{},
+        .operations = &.{},
     };
-    const ReqT = req.RequestPWithPatternCtxStatic(ReqDecl, &.{}, MwCtx, struct {}, *struct { io: Io, ctx: void });
+    const ServerT = struct {
+        const RouteStaticCtx = struct {};
+        io: Io,
+        ctx: void,
+        route_static_ctx: RouteStaticCtx = .{},
+
+        pub fn RouteStaticType(comptime route_index: usize) type {
+            if (route_index != 0) @compileError("route index out of bounds");
+            return RouteStaticCtx;
+        }
+
+        pub fn routeStatic(self: *@This(), comptime route_index: usize) *RouteStaticCtx {
+            if (route_index != 0) @compileError("route index out of bounds");
+            return &self.route_static_ctx;
+        }
+
+        pub fn routeStaticConst(self: *const @This(), comptime route_index: usize) *const RouteStaticCtx {
+            if (route_index != 0) @compileError("route index out of bounds");
+            return &self.route_static_ctx;
+        }
+    };
+    const ReqT = req.RequestPWithPatternExt(*ServerT, 0, rd, MwCtx);
 
     const Next = struct {
         /// Test helper next-handler implementation.
@@ -132,7 +156,8 @@ test "logger: invokes log function" {
         .query = @constCast(query_buf[0..]),
     };
     const mw_ctx: MwCtx = .{};
-    var reqv = ReqT.init(gpa, std.testing.io, line, mw_ctx);
+    var server: ServerT = .{ .io = std.testing.io, .ctx = {} };
+    var reqv = ReqT.initWithServer(gpa, line, mw_ctx, &server);
     defer reqv.deinit(gpa);
 
     const res = try test_helpers.runMiddlewareTest(Mw, ReqT, Next, &reqv, line.method);

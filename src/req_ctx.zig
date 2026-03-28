@@ -75,25 +75,21 @@ pub const ReqCtx = struct {
     }
 
     fn assertHandlerType(comptime Handler: type) void {
-        const has_function = @hasDecl(Handler, "function");
-        const has_call = @hasDecl(Handler, "call");
-        if (!has_function and !has_call) {
-            @compileError("ReqCtx.handler must expose `pub const function = <handler>` or `pub fn call(comptime rctx: ReqCtx, req: rctx.T()) ...`");
+        if (!@hasDecl(Handler, "function")) {
+            @compileError("ReqCtx.handler must expose `pub const function = <handler>`");
         }
-        const fn_t = @TypeOf(if (has_function) @field(Handler, "function") else @field(Handler, "call"));
+        const fn_t = @TypeOf(@field(Handler, "function"));
         if (@typeInfo(fn_t) != .@"fn") {
-            @compileError("ReqCtx handler entrypoint must be a function");
+            @compileError("ReqCtx.handler.function must be a function");
         }
     }
 
     fn handlerFn(comptime Handler: type) type {
-        if (@hasDecl(Handler, "function")) return @TypeOf(@field(Handler, "function"));
-        return @TypeOf(@field(Handler, "call"));
+        return @TypeOf(@field(Handler, "function"));
     }
 
     fn handlerEntry(comptime Handler: type) handlerFn(Handler) {
-        if (@hasDecl(Handler, "function")) return @field(Handler, "function");
-        return @field(Handler, "call");
+        return @field(Handler, "function");
     }
 
     /// Implements with idx.

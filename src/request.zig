@@ -4,6 +4,7 @@ const Allocator = std.mem.Allocator;
 const Io = std.Io;
 
 const parse = @import("parse.zig");
+const route_decl = @import("route_decl.zig");
 const urldecode = @import("urldecode.zig");
 const util = @import("util.zig");
 
@@ -15,9 +16,9 @@ pub const Base = struct {
     /// Stores `arena`.
     arena: Allocator,
     /// Stores `reader`.
-    reader: ?*Io.Reader = null,
+    reader: *Io.Reader,
     /// Stores `writer`.
-    writer: ?*Io.Writer = null,
+    writer: *Io.Writer,
 
     /// Stores `version`.
     version: Version,
@@ -28,6 +29,7 @@ pub const Base = struct {
     /// Stores `body_kind`.
     body_kind: BodyKind = .none,
     body_remaining: usize = 0, // for content-length bodies
+    headers_parsed: bool = false,
 };
 
 pub const ParseLineError = error{
@@ -40,15 +42,6 @@ pub const ParseHeadersError = error{
     BadRequest,
     HeadersTooLarge,
 } || Io.Reader.Error || parse.CaptureError || urldecode.DecodeError || Allocator.Error;
-
-/// Concrete route declaration shape used by request type generation.
-pub const RequestRouteDecl = struct {
-    headers: type,
-    query: type,
-    params: type,
-    pattern: []const u8,
-    method: []const u8,
-};
 
 fn trimCR(line: []u8) []u8 {
     if (line.len != 0 and line[line.len - 1] == '\r') return line[0 .. line.len - 1];
@@ -197,16 +190,48 @@ fn containsTokenIgnoreCase(value: []const u8, comptime token: []const u8) bool {
     return false;
 }
 
-fn RequestPWithPatternExt(
-    comptime Headers: type,
-    comptime Query: type,
-    comptime Params: type,
-    comptime param_names: []const []const u8,
-    comptime MwCtx: type,
-    comptime MwStaticCtx: type,
-    comptime route_pattern: []const u8,
-    comptime method_name: []const u8,
+fn routeParamNames(comptime pattern: []const u8) []const []const u8 {
+    if (pattern.len == 0 or pattern[0] != '/') @compileError("route pattern must start with '/'");
+    if (std.mem.eql(u8, pattern, "/")) return &.{};
+
+    comptime var count: usize = 0;
+    comptime {
+        var start: usize = 1;
+        while (start <= pattern.len) {
+            const end = std.mem.indexOfScalarPos(u8, pattern, start, '/') orelse pattern.len;
+            const seg = pattern[start..end];
+            if (seg.len != 0 and seg[0] == '{' and seg[seg.len - 1] == '}') count += 1;
+            if (end == pattern.len) break;
+            start = end + 1;
+        }
+    }
+    if (count == 0) return &.{};
+
+    const out: [count][]const u8 = comptime blk: {
+        var names: [count][]const u8 = undefined;
+        var i: usize = 0;
+        var start: usize = 1;
+        while (start <= pattern.len) {
+            const end = std.mem.indexOfScalarPos(u8, pattern, start, '/') orelse pattern.len;
+            const seg = pattern[start..end];
+            if (seg.len != 0 and seg[0] == '{' and seg[seg.len - 1] == '}') {
+                const inner = seg[1 .. seg.len - 1];
+                names[i] = if (inner.len != 0 and inner[0] == '*') inner[1..] else inner;
+                i += 1;
+            }
+            if (end == pattern.len) break;
+            start = end + 1;
+        }
+        break :blk names;
+    };
+    return out[0..];
+}
+
+pub fn RequestPWithPatternExt(
     comptime ServerPtr: type,
+    comptime route_index: usize,
+    comptime rd: route_decl.RouteDecl,
+    comptime MwCtx: type,
 ) type {
     comptime {
         const ptr_info = @typeInfo(ServerPtr);
@@ -218,7 +243,15 @@ fn RequestPWithPatternExt(
     comptime {
         if (!@hasField(ServerT, "io")) @compileError("ServerPtr pointee must have field `io`");
         if (!@hasField(ServerT, "ctx")) @compileError("ServerPtr pointee must have field `ctx`");
+        if (!@hasDecl(ServerT, "RouteStaticType")) @compileError("ServerPtr pointee must expose `pub fn RouteStaticType(comptime route_index: usize) type`");
+        if (!@hasDecl(ServerT, "routeStatic")) @compileError("ServerPtr pointee must expose `pub fn routeStatic(self: *Server, comptime route_index: usize) *RouteStaticType(route_index)`");
+        if (!@hasDecl(ServerT, "routeStaticConst")) @compileError("ServerPtr pointee must expose `pub fn routeStaticConst(self: *const Server, comptime route_index: usize) *const RouteStaticType(route_index)`");
     }
+    const Headers = rd.headers;
+    const Query = rd.query;
+    const Params = rd.params;
+    const param_names = routeParamNames(rd.pattern);
+    const MwStaticCtx = ServerT.RouteStaticType(route_index);
     const CtxPtr = @FieldType(ServerT, "ctx");
     const HeaderLookup = parse.Lookup(Headers, .header);
     const QueryLookup = parse.Lookup(Query, .query);
@@ -255,16 +288,14 @@ fn RequestPWithPatternExt(
     };
 
     return struct {
-        pub const path: []const u8 = route_pattern;
-        pub const method: []const u8 = method_name;
+        pub const path: []const u8 = rd.pattern;
+        pub const method: []const u8 = rd.method;
         /// Stores internal `_base` state.
         _base: Base,
         /// Stores internal `_server` state.
         _server: ServerPtr,
         /// Stores internal `_mw_ctx` state.
         _mw_ctx: MwCtx,
-        /// Stores internal `_mw_static_ctx` state.
-        _mw_static_ctx: *MwStaticCtx,
         /// Stores internal `_headers` state.
         _headers: Headers = parse.emptyStruct(Headers),
         /// Stores internal `_query` state.
@@ -273,8 +304,11 @@ fn RequestPWithPatternExt(
         _params: ParamsEffective = parse.emptyStruct(ParamsEffective),
 
         const Self = @This();
-        var default_mw_static_ctx: MwStaticCtx = std.mem.zeroes(MwStaticCtx);
         var default_server: ServerT = undefined;
+        var default_reader_buf: [0]u8 = .{};
+        var default_reader: Io.Reader = Io.Reader.fixed(default_reader_buf[0..]);
+        var default_writer_buf: [0]u8 = .{};
+        var default_writer: Io.Writer = Io.Writer.fixed(default_writer_buf[0..]);
 
         pub const ParamNames: []const []const u8 = param_names;
 
@@ -284,16 +318,16 @@ fn RequestPWithPatternExt(
             line: RequestLine,
             mw_ctx: MwCtx,
             srv: ServerPtr,
-            mw_static_ctx: ?*MwStaticCtx,
         ) Self {
             return .{
                 ._base = .{
                     .arena = init_arena,
+                    .reader = &default_reader,
+                    .writer = &default_writer,
                     .version = line.version,
                 },
                 ._server = srv,
                 ._mw_ctx = mw_ctx,
-                ._mw_static_ctx = mw_static_ctx orelse &default_mw_static_ctx,
             };
         }
 
@@ -304,18 +338,18 @@ fn RequestPWithPatternExt(
             line: RequestLine,
             mw_ctx: MwCtx,
             app_ctx: CtxPtr,
-            mw_static_ctx: ?*MwStaticCtx,
         ) Self {
             default_server = undefined;
             default_server.io = init_io;
             default_server.ctx = app_ctx;
-            return initWithServer(init_arena, line, mw_ctx, &default_server, mw_static_ctx);
+            default_server.routeStatic(route_index).* = std.mem.zeroes(MwStaticCtx);
+            return initWithServer(init_arena, line, mw_ctx, &default_server);
         }
 
         /// Initializes this value.
         pub fn init(init_arena: Allocator, init_io: Io, line: RequestLine, mw_ctx: MwCtx) Self {
             if (CtxPtr != void) @compileError("Request.init requires void app context; use initWithCtx for non-void context");
-            return initWithCtx(init_arena, init_io, line, mw_ctx, {}, null);
+            return initWithCtx(init_arena, init_io, line, mw_ctx, {});
         }
 
         /// Implements ctx.
@@ -374,22 +408,22 @@ fn RequestPWithPatternExt(
         }
 
         /// Implements reader.
-        pub fn reader(self: *const Self) ?*Io.Reader {
+        pub fn reader(self: *const Self) *Io.Reader {
             return self._base.reader;
         }
 
         /// Implements set reader.
-        pub fn setReader(self: *Self, value: ?*Io.Reader) void {
+        pub fn setReader(self: *Self, value: *Io.Reader) void {
             self._base.reader = value;
         }
 
         /// Implements writer.
-        pub fn writer(self: *const Self) ?*Io.Writer {
+        pub fn writer(self: *const Self) *Io.Writer {
             return self._base.writer;
         }
 
         /// Implements set writer.
-        pub fn setWriter(self: *Self, value: ?*Io.Writer) void {
+        pub fn setWriter(self: *Self, value: *Io.Writer) void {
             self._base.writer = value;
         }
 
@@ -420,17 +454,12 @@ fn RequestPWithPatternExt(
 
         /// Implements mw static ctx mut.
         pub fn mwStaticCtxMut(self: *Self) *MwStaticCtx {
-            return self._mw_static_ctx;
+            return self._server.routeStatic(route_index);
         }
 
         /// Implements mw static ctx const.
         pub fn mwStaticCtxConst(self: *const Self) *const MwStaticCtx {
-            return self._mw_static_ctx;
-        }
-
-        /// Implements set mw static ctx.
-        pub fn setMwStaticCtx(self: *Self, value: *MwStaticCtx) void {
-            self._mw_static_ctx = value;
+            return self._server.routeStaticConst(route_index);
         }
 
         /// Implements headers mut.
@@ -515,12 +544,12 @@ fn RequestPWithPatternExt(
 
         /// Get a pointer to middleware static context by name, e.g. `req.middlewareStatic(.cache)`.
         pub fn middlewareStatic(self: *Self, comptime name: anytype) *middlewareContextFieldType(MwStaticCtx, name) {
-            return &@field(self._mw_static_ctx.*, middlewareContextFieldName(MwStaticCtx, name));
+            return &@field(self.mwStaticCtxMut().*, middlewareContextFieldName(MwStaticCtx, name));
         }
 
         /// Get a const pointer to middleware static context by name.
         pub fn middlewareStaticConst(self: *const Self, comptime name: anytype) *const middlewareContextFieldType(MwStaticCtx, name) {
-            return &@field(self._mw_static_ctx.*, middlewareContextFieldName(MwStaticCtx, name));
+            return &@field(self.mwStaticCtxConst().*, middlewareContextFieldName(MwStaticCtx, name));
         }
 
         /// Implements keep alive.
@@ -590,6 +619,7 @@ fn RequestPWithPatternExt(
             max_single_header_bytes: usize,
         ) ParseHeadersError!void {
             self._base.reader = r;
+            self._base.headers_parsed = false;
             if (HeaderLookup.count != 0) {
                 // reset captures each request
                 parse.destroyStruct(&self._headers, a);
@@ -659,6 +689,7 @@ fn RequestPWithPatternExt(
             if (HeaderLookup.count != 0) {
                 try parse.doneParsingStruct(&self._headers, present[0..]);
             }
+            self._base.headers_parsed = true;
         }
 
         fn readExact(r: *Io.Reader, buf: []u8) Io.Reader.Error!void {
@@ -720,8 +751,8 @@ fn RequestPWithPatternExt(
         ///
         /// Requires headers to have been parsed for this request.
         pub fn bodyAll(self: *Self, max_bytes: usize) ![]const u8 {
-            const r = self._base.reader orelse return error.BadRequest;
-            return bodyAllFrom(self, self._base.arena, r, max_bytes);
+            if (!self._base.headers_parsed) return error.BadRequest;
+            return bodyAllFrom(self, self._base.arena, self._base.reader, max_bytes);
         }
 
         fn discardUnreadBodyFrom(self: *Self, r: *Io.Reader) !void {
@@ -775,46 +806,56 @@ fn RequestPWithPatternExt(
         ///
         /// Requires headers to have been parsed for this request.
         pub fn discardUnreadBody(self: *Self) !void {
-            const r = self._base.reader orelse return error.BadRequest;
-            return discardUnreadBodyFrom(self, r);
+            if (!self._base.headers_parsed) return error.BadRequest;
+            return discardUnreadBodyFrom(self, self._base.reader);
         }
     };
 }
 
-/// Implements request pwith pattern ctx static.
-pub fn RequestPWithPatternCtxStatic(
-    comptime route_decl: RequestRouteDecl,
-    comptime param_names: []const []const u8,
-    comptime MwCtx: type,
-    comptime MwStaticCtx: type,
-    comptime ServerPtr: type,
-) type {
-    return RequestPWithPatternExt(
-        route_decl.headers,
-        route_decl.query,
-        route_decl.params,
-        param_names,
-        MwCtx,
-        MwStaticCtx,
-        route_decl.pattern,
-        route_decl.method,
-        ServerPtr,
-    );
+fn syntheticPatternFromParamNames(comptime param_names: []const []const u8) []const u8 {
+    if (param_names.len == 0) return "/";
+    comptime var out: []const u8 = "";
+    inline for (param_names) |pn| {
+        out = out ++ "/{" ++ pn ++ "}";
+    }
+    return out;
 }
 
 /// Implements request.
 pub fn Request(comptime Headers: type, comptime Query: type, comptime param_names: []const []const u8, comptime MwCtx: type) type {
-    return RequestPWithPatternExt(
-        Headers,
-        Query,
-        struct {},
-        param_names,
-        MwCtx,
-        struct {},
-        "",
-        "GET",
-        *struct { io: Io, ctx: void },
-    );
+    const route_pattern = syntheticPatternFromParamNames(param_names);
+    const rd: route_decl.RouteDecl = .{
+        .method = "GET",
+        .pattern = route_pattern,
+        .endpoint = struct {},
+        .headers = Headers,
+        .query = Query,
+        .params = struct {},
+        .middlewares = &.{},
+        .operations = &.{},
+    };
+    const StandaloneServer = struct {
+        const RouteStaticCtx = struct {};
+        io: Io,
+        ctx: void,
+        route_static_ctx: RouteStaticCtx = .{},
+
+        pub fn RouteStaticType(comptime route_index: usize) type {
+            if (route_index != 0) @compileError("route index out of bounds");
+            return RouteStaticCtx;
+        }
+
+        pub fn routeStatic(self: *@This(), comptime route_index: usize) *RouteStaticCtx {
+            if (route_index != 0) @compileError("route index out of bounds");
+            return &self.route_static_ctx;
+        }
+
+        pub fn routeStaticConst(self: *const @This(), comptime route_index: usize) *const RouteStaticCtx {
+            if (route_index != 0) @compileError("route index out of bounds");
+            return &self.route_static_ctx;
+        }
+    };
+    return RequestPWithPatternExt(*StandaloneServer, 0, rd, MwCtx);
 }
 
 const TestMwCtx = struct {};

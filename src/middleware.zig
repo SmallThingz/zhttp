@@ -1,7 +1,7 @@
 const std = @import("std");
 const parse = @import("parse.zig");
 const req_ctx = @import("req_ctx.zig");
-const request = @import("request.zig");
+const route_decl = @import("route_decl.zig");
 
 comptime {
     @setEvalBranchQuota(200_000);
@@ -16,7 +16,7 @@ pub const MiddlewareInfo = struct {
     ///
     /// If set, initialization runs once at server startup per route.
     /// When this type exposes
-    /// `pub fn init(io: std.Io, allocator: std.mem.Allocator, route_decl: zhttp.request.RequestRouteDecl) Self|!Self`,
+    /// `pub fn init(io: std.Io, allocator: std.mem.Allocator, route_decl: zhttp.router.RouteDecl) Self|!Self`,
     /// that function is used to build the route-local context value and any init error
     /// is returned from `Server.init`.
     static_context: ?type = null,
@@ -28,7 +28,7 @@ pub const MiddlewareInfo = struct {
     header: ?type = null,
 };
 
-pub const StaticContextRouteDecl = request.RequestRouteDecl;
+pub const StaticContextRouteDecl = route_decl.RouteDecl;
 
 /// Validates and returns middleware metadata.
 pub fn info(comptime Mw: type) MiddlewareInfo {
@@ -159,10 +159,10 @@ fn initData(comptime Mw: type) dataType(Mw) {
     return std.mem.zeroes(Data);
 }
 
-fn initStaticContextValue(comptime StaticContext: type, io: std.Io, allocator: std.mem.Allocator, route_decl: StaticContextRouteDecl) !StaticContext {
+fn initStaticContextValue(comptime StaticContext: type, io: std.Io, allocator: std.mem.Allocator, rd: StaticContextRouteDecl) !StaticContext {
     if (@hasDecl(StaticContext, "init")) {
         const init_fn = StaticContext.init;
-        const ret = @call(.auto, init_fn, .{ io, allocator, route_decl });
+        const ret = @call(.auto, init_fn, .{ io, allocator, rd });
         const RetT = @TypeOf(ret);
         if (RetT == StaticContext) return ret;
         if (@typeInfo(RetT) == .error_union and @typeInfo(RetT).error_union.payload == StaticContext) {
@@ -325,11 +325,11 @@ pub fn initStaticContext(
     comptime Ctx: type,
     io: std.Io,
     allocator: std.mem.Allocator,
-    route_decl: StaticContextRouteDecl,
+    rd: StaticContextRouteDecl,
 ) !Ctx {
     var ctx: Ctx = std.mem.zeroes(Ctx);
     inline for (std.meta.fields(Ctx)) |f| {
-        @field(ctx, f.name) = try initStaticContextValue(f.type, io, allocator, route_decl);
+        @field(ctx, f.name) = try initStaticContextValue(f.type, io, allocator, rd);
     }
     return ctx;
 }

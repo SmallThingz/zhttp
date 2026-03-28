@@ -27,7 +27,7 @@ const RouteStaticCtx = struct {
     pattern: []const u8,
     touched: usize = 0,
 
-    pub fn init(_: std.Io, _: std.mem.Allocator, route_decl: zhttp.request.RequestRouteDecl) @This() {
+    pub fn init(_: std.Io, _: std.mem.Allocator, route_decl: zhttp.router.RouteDecl) @This() {
         return .{
             .pattern = route_decl.pattern,
         };

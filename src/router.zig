@@ -10,6 +10,7 @@ const response = @import("response.zig");
 const urldecode = @import("urldecode.zig");
 const middleware = @import("middleware.zig");
 const req_ctx = @import("req_ctx.zig");
+const route_decl = @import("route_decl.zig");
 const ReqCtx = req_ctx.ReqCtx;
 
 comptime {
@@ -22,40 +23,8 @@ pub const Action = enum {
     upgraded,
 };
 
-/// Compile-time endpoint metadata.
-///
-/// Endpoint types must expose `pub const Info: router.EndpointInfo = .{ ... };`.
-pub const EndpointInfo = struct {
-    /// Optional request header capture schema.
-    headers: ?type = null,
-    /// Optional query capture schema.
-    query: ?type = null,
-    /// Optional path-param capture schema.
-    path: ?type = null,
-    /// Per-endpoint middleware types.
-    middlewares: []const type = &.{},
-    /// Per-endpoint operation types.
-    operations: []const type = &.{},
-};
-
-pub const RouteDecl = struct {
-    /// Stores `method`.
-    method: []const u8,
-    /// Stores `pattern`.
-    pattern: []const u8,
-    /// Stores endpoint type exposing `pub fn call(comptime rctx: ReqCtx, req: rctx.T()) !rctx.Response(Body)`.
-    endpoint: type,
-    /// Stores `headers`.
-    headers: type,
-    /// Stores `query`.
-    query: type,
-    /// Stores `params`.
-    params: type,
-    /// Stores `middlewares`.
-    middlewares: []const type,
-    /// Stores `operations`.
-    operations: []const type,
-};
+pub const EndpointInfo = route_decl.EndpointInfo;
+pub const RouteDecl = route_decl.RouteDecl;
 
 fn validateStructTypeOpt(comptime field_name: []const u8, comptime maybe_t: ?type) void {
     if (maybe_t) |T| {
@@ -587,6 +556,13 @@ pub fn Compiled(
 
     return struct {
         pub const RouteCount: usize = route_count;
+        pub const RouteDeclList: [route_count]RouteDecl = blk: {
+            var out: [route_count]RouteDecl = undefined;
+            for (route_fields, 0..) |f, i| {
+                out[i] = @field(routes, f.name);
+            }
+            break :blk out;
+        };
         pub const MaxParams: usize = compiled.max_params;
         pub const DispatchError = error{
             EndOfStream,
@@ -810,7 +786,6 @@ pub fn Compiled(
             r: *Io.Reader,
             w: *Io.Writer,
             stream: *const std.Io.net.Stream,
-            route_static_ctx: *anyopaque,
             line: request.RequestLine,
             route_index: u16,
             params_buf: [][]u8,
@@ -830,19 +805,23 @@ pub fn Compiled(
                     const P = parse.mergeStructs(NeedP, rd.params);
                     const MwCtx = comptime middleware.contextType(MwList);
                     const mw_ctx = comptime middleware.initContext(MwList, MwCtx);
-                    const MwStaticCtx = comptime middleware.staticContextType(MwList);
-                    const route_mw_static_ctx: *MwStaticCtx = @ptrCast(@alignCast(route_static_ctx));
-                    const ReqDecl: request.RequestRouteDecl = .{
+                    const req_rd: route_decl.RouteDecl = .{
+                        .method = rd.method,
+                        .pattern = rd.pattern,
+                        .endpoint = rd.endpoint,
                         .headers = H,
                         .query = Q,
                         .params = P,
-                        .pattern = rd.pattern,
-                        .method = rd.method,
+                        .middlewares = rd.middlewares,
+                        .operations = rd.operations,
                     };
-                    const ReqT = request.RequestPWithPatternCtxStatic(ReqDecl, p.param_names, MwCtx, MwStaticCtx, @TypeOf(server));
+                    const ReqT = request.RequestPWithPatternExt(@TypeOf(server), i, req_rd, MwCtx);
+                    const EndpointHandler = struct {
+                        pub const function = rd.endpoint.call;
+                    };
                     const ReqCtxT = req_ctx.ReqCtx;
                     const rctx: ReqCtxT = comptime .{
-                        .handler = rd.endpoint,
+                        .handler = EndpointHandler,
                         .middlewares = MwList,
                         .path = structFieldsToST(P),
                         .query = structFieldsToST(Q),
@@ -868,7 +847,7 @@ pub fn Compiled(
                         }
                     }
 
-                    var reqv = ReqT.initWithServer(allocator, line, mw_ctx, server, route_mw_static_ctx);
+                    var reqv = ReqT.initWithServer(allocator, line, mw_ctx, server);
                     reqv.setReader(r);
                     reqv.setWriter(w);
                     defer reqv.deinit(allocator);
@@ -930,10 +909,31 @@ fn dispatchForTest(
     out: []u8,
 ) !struct { action: Action, len: usize } {
     const ServerT = struct {
+        const RouteStaticCtx = struct {};
         /// Stores `io`.
         io: Io,
         /// Stores `ctx`.
         ctx: @TypeOf(ctx),
+        /// Stores `route_static_ctx`.
+        route_static_ctx: RouteStaticCtx = .{},
+
+        /// Returns static context type for route index.
+        pub fn RouteStaticType(comptime route_index: usize) type {
+            _ = route_index;
+            return RouteStaticCtx;
+        }
+
+        /// Returns mutable route static context by route index.
+        pub fn routeStatic(self: *@This(), comptime route_index: usize) *RouteStaticCtx {
+            _ = route_index;
+            return &self.route_static_ctx;
+        }
+
+        /// Returns const route static context by route index.
+        pub fn routeStaticConst(self: *const @This(), comptime route_index: usize) *const RouteStaticCtx {
+            _ = route_index;
+            return &self.route_static_ctx;
+        }
 
         /// Implements handle handler error.
         pub fn handleHandlerError(_: *@This(), _: *Io.Writer, comptime _: type, _: anytype) Action {
@@ -947,9 +947,8 @@ fn dispatchForTest(
     var params: [S.MaxParams][]u8 = undefined;
     var w = Io.Writer.fixed(out);
     var stream: std.Io.net.Stream = undefined;
-    var route_static_ctx: struct {} = .{};
     const rid = S.match(line.method, line.path).?;
-    const action = try S.dispatch(&server, allocator, r, &w, &stream, @ptrCast(&route_static_ctx), line, rid, params[0..S.MaxParams], 8 * 1024, 8 * 1024);
+    const action = try S.dispatch(&server, allocator, r, &w, &stream, line, rid, params[0..S.MaxParams], 8 * 1024, 8 * 1024);
     return .{ .action = action, .len = w.end };
 }
 
@@ -1412,10 +1411,31 @@ test "dispatch: typed path params bad value errors" {
     var w = Io.Writer.fixed(out[0..]);
     var stream: std.Io.net.Stream = undefined;
     const ServerT = struct {
+        const RouteStaticCtx = struct {};
         /// Stores `io`.
         io: Io,
         /// Stores `ctx`.
         ctx: void,
+        /// Stores `route_static_ctx`.
+        route_static_ctx: RouteStaticCtx = .{},
+
+        /// Returns static context type for route index.
+        pub fn RouteStaticType(comptime route_index: usize) type {
+            if (route_index != 0) @compileError("route index out of bounds");
+            return RouteStaticCtx;
+        }
+
+        /// Returns mutable route static context by route index.
+        pub fn routeStatic(self: *@This(), comptime route_index: usize) *RouteStaticCtx {
+            if (route_index != 0) @compileError("route index out of bounds");
+            return &self.route_static_ctx;
+        }
+
+        /// Returns const route static context by route index.
+        pub fn routeStaticConst(self: *const @This(), comptime route_index: usize) *const RouteStaticCtx {
+            if (route_index != 0) @compileError("route index out of bounds");
+            return &self.route_static_ctx;
+        }
 
         /// Implements handle handler error.
         pub fn handleHandlerError(_: *@This(), _: *Io.Writer, comptime _: type, _: anytype) Action {
@@ -1424,8 +1444,7 @@ test "dispatch: typed path params bad value errors" {
     };
     var server: ServerT = .{ .io = std.testing.io, .ctx = {} };
     const rid = S.match(line.method, line.path).?;
-    var route_static_ctx: struct {} = .{};
-    try std.testing.expectError(error.BadValue, S.dispatch(&server, a, &r, &w, &stream, @ptrCast(&route_static_ctx), line, rid, params[0..S.MaxParams], 8 * 1024, 8 * 1024));
+    try std.testing.expectError(error.BadValue, S.dispatch(&server, a, &r, &w, &stream, line, rid, params[0..S.MaxParams], 8 * 1024, 8 * 1024));
 }
 
 test "dispatch: typed path params with non-string parsers allocate zero" {
@@ -1676,12 +1695,33 @@ test "dispatch: handler error uses callback" {
     var w = Io.Writer.fixed(out[0..]);
     var stream: std.Io.net.Stream = undefined;
     const ServerT = struct {
+        const RouteStaticCtx = struct {};
         /// Stores `io`.
         io: Io,
         /// Stores `ctx`.
         ctx: void,
         /// Stores `called`.
         called: *bool,
+        /// Stores `route_static_ctx`.
+        route_static_ctx: RouteStaticCtx = .{},
+
+        /// Returns static context type for route index.
+        pub fn RouteStaticType(comptime route_index: usize) type {
+            if (route_index != 0) @compileError("route index out of bounds");
+            return RouteStaticCtx;
+        }
+
+        /// Returns mutable route static context by route index.
+        pub fn routeStatic(self: *@This(), comptime route_index: usize) *RouteStaticCtx {
+            if (route_index != 0) @compileError("route index out of bounds");
+            return &self.route_static_ctx;
+        }
+
+        /// Returns const route static context by route index.
+        pub fn routeStaticConst(self: *const @This(), comptime route_index: usize) *const RouteStaticCtx {
+            if (route_index != 0) @compileError("route index out of bounds");
+            return &self.route_static_ctx;
+        }
 
         /// Implements handle handler error.
         pub fn handleHandlerError(self: *@This(), _: *Io.Writer, comptime _: type, _: anytype) Action {
@@ -1695,8 +1735,7 @@ test "dispatch: handler error uses callback" {
         .called = &called,
     };
     const rid = S.match(line.method, line.path).?;
-    var route_static_ctx: struct {} = .{};
-    const action = try S.dispatch(&server, a, &r, &w, &stream, @ptrCast(&route_static_ctx), line, rid, params[0..S.MaxParams], 8 * 1024, 8 * 1024);
+    const action = try S.dispatch(&server, a, &r, &w, &stream, line, rid, params[0..S.MaxParams], 8 * 1024, 8 * 1024);
     try std.testing.expect(called);
     try std.testing.expectEqual(.close, action);
     try std.testing.expectEqual(@as(usize, 0), w.end);
@@ -1843,10 +1882,31 @@ test "dispatch: invalid path percent-encoding rejected" {
     var w = Io.Writer.fixed(out[0..]);
     var stream: std.Io.net.Stream = undefined;
     const ServerT = struct {
+        const RouteStaticCtx = struct {};
         /// Stores `io`.
         io: Io,
         /// Stores `ctx`.
         ctx: void,
+        /// Stores `route_static_ctx`.
+        route_static_ctx: RouteStaticCtx = .{},
+
+        /// Returns static context type for route index.
+        pub fn RouteStaticType(comptime route_index: usize) type {
+            if (route_index != 0) @compileError("route index out of bounds");
+            return RouteStaticCtx;
+        }
+
+        /// Returns mutable route static context by route index.
+        pub fn routeStatic(self: *@This(), comptime route_index: usize) *RouteStaticCtx {
+            if (route_index != 0) @compileError("route index out of bounds");
+            return &self.route_static_ctx;
+        }
+
+        /// Returns const route static context by route index.
+        pub fn routeStaticConst(self: *const @This(), comptime route_index: usize) *const RouteStaticCtx {
+            if (route_index != 0) @compileError("route index out of bounds");
+            return &self.route_static_ctx;
+        }
 
         /// Implements handle handler error.
         pub fn handleHandlerError(_: *@This(), _: *Io.Writer, comptime _: type, _: anytype) Action {
@@ -1855,18 +1915,38 @@ test "dispatch: invalid path percent-encoding rejected" {
     };
     var server: ServerT = .{ .io = std.testing.io, .ctx = {} };
     const rid = S.match(line.method, line.path).?;
-    var route_static_ctx: struct {} = .{};
-    try std.testing.expectError(error.InvalidPercentEncoding, S.dispatch(&server, a, &r, &w, &stream, @ptrCast(&route_static_ctx), line, rid, params[0..S.MaxParams], 8 * 1024, 8 * 1024));
+    try std.testing.expectError(error.InvalidPercentEncoding, S.dispatch(&server, a, &r, &w, &stream, line, rid, params[0..S.MaxParams], 8 * 1024, 8 * 1024));
 }
 
 test "dispatch: endpoint upgrade handles 101 and returns upgraded action" {
     const ServerT = struct {
+        const RouteStaticCtx = struct {};
         /// Stores `io`.
         io: Io,
         /// Stores `ctx`.
         ctx: void,
         /// Stores `upgraded`.
         upgraded: bool,
+        /// Stores `route_static_ctx`.
+        route_static_ctx: RouteStaticCtx = .{},
+
+        /// Returns static context type for route index.
+        pub fn RouteStaticType(comptime route_index: usize) type {
+            if (route_index != 0) @compileError("route index out of bounds");
+            return RouteStaticCtx;
+        }
+
+        /// Returns mutable route static context by route index.
+        pub fn routeStatic(self: *@This(), comptime route_index: usize) *RouteStaticCtx {
+            if (route_index != 0) @compileError("route index out of bounds");
+            return &self.route_static_ctx;
+        }
+
+        /// Returns const route static context by route index.
+        pub fn routeStaticConst(self: *const @This(), comptime route_index: usize) *const RouteStaticCtx {
+            if (route_index != 0) @compileError("route index out of bounds");
+            return &self.route_static_ctx;
+        }
 
         /// Implements handle handler error.
         pub fn handleHandlerError(_: *@This(), _: *Io.Writer, comptime _: type, _: anytype) Action {
@@ -1916,8 +1996,7 @@ test "dispatch: endpoint upgrade handles 101 and returns upgraded action" {
     var w = Io.Writer.fixed(out[0..]);
     var stream: std.Io.net.Stream = undefined;
     const rid = S.match(line.method, line.path).?;
-    var route_static_ctx: struct {} = .{};
-    const action = try S.dispatch(&server, a, &r, &w, &stream, @ptrCast(&route_static_ctx), line, rid, params[0..S.MaxParams], 8 * 1024, 8 * 1024);
+    const action = try S.dispatch(&server, a, &r, &w, &stream, line, rid, params[0..S.MaxParams], 8 * 1024, 8 * 1024);
 
     try std.testing.expectEqual(Action.upgraded, action);
     try std.testing.expect(server.upgraded);
@@ -1947,10 +2026,31 @@ test "dispatch: endpoint without upgrade does not check status" {
     }, .{});
 
     const ServerT = struct {
+        const RouteStaticCtx = struct {};
         /// Stores `io`.
         io: Io,
         /// Stores `ctx`.
         ctx: void,
+        /// Stores `route_static_ctx`.
+        route_static_ctx: RouteStaticCtx = .{},
+
+        /// Returns static context type for route index.
+        pub fn RouteStaticType(comptime route_index: usize) type {
+            if (route_index != 0) @compileError("route index out of bounds");
+            return RouteStaticCtx;
+        }
+
+        /// Returns mutable route static context by route index.
+        pub fn routeStatic(self: *@This(), comptime route_index: usize) *RouteStaticCtx {
+            if (route_index != 0) @compileError("route index out of bounds");
+            return &self.route_static_ctx;
+        }
+
+        /// Returns const route static context by route index.
+        pub fn routeStaticConst(self: *const @This(), comptime route_index: usize) *const RouteStaticCtx {
+            if (route_index != 0) @compileError("route index out of bounds");
+            return &self.route_static_ctx;
+        }
 
         /// Implements handle handler error.
         pub fn handleHandlerError(_: *@This(), _: *Io.Writer, comptime _: type, _: anytype) Action {
@@ -1970,8 +2070,7 @@ test "dispatch: endpoint without upgrade does not check status" {
     var w = Io.Writer.fixed(out[0..]);
     var stream: std.Io.net.Stream = undefined;
     const rid = S.match(line.method, line.path).?;
-    var route_static_ctx: struct {} = .{};
-    const action = try S.dispatch(&server, a, &r, &w, &stream, @ptrCast(&route_static_ctx), line, rid, params[0..S.MaxParams], 8 * 1024, 8 * 1024);
+    const action = try S.dispatch(&server, a, &r, &w, &stream, line, rid, params[0..S.MaxParams], 8 * 1024, 8 * 1024);
 
     try std.testing.expectEqual(Action.@"continue", action);
     try std.testing.expect(std.mem.indexOf(u8, out[0..w.end], "content-length: 0\r\n") != null);
@@ -1979,9 +2078,26 @@ test "dispatch: endpoint without upgrade does not check status" {
 
 test "dispatch: endpoint with upgrade but non-101 does not call upgrade" {
     const ServerT = struct {
+        const RouteStaticCtx = struct {};
         io: Io,
         ctx: void,
         called: bool = false,
+        route_static_ctx: RouteStaticCtx = .{},
+
+        pub fn RouteStaticType(comptime route_index: usize) type {
+            if (route_index != 0) @compileError("route index out of bounds");
+            return RouteStaticCtx;
+        }
+
+        pub fn routeStatic(self: *@This(), comptime route_index: usize) *RouteStaticCtx {
+            if (route_index != 0) @compileError("route index out of bounds");
+            return &self.route_static_ctx;
+        }
+
+        pub fn routeStaticConst(self: *const @This(), comptime route_index: usize) *const RouteStaticCtx {
+            if (route_index != 0) @compileError("route index out of bounds");
+            return &self.route_static_ctx;
+        }
 
         pub fn handleHandlerError(_: *@This(), _: *Io.Writer, comptime _: type, _: anytype) Action {
             unreachable;
@@ -2017,8 +2133,7 @@ test "dispatch: endpoint with upgrade but non-101 does not call upgrade" {
     var w = Io.Writer.fixed(out[0..]);
     var stream: std.Io.net.Stream = undefined;
     const rid = S.match(line.method, line.path).?;
-    var route_static_ctx: struct {} = .{};
-    const action = try S.dispatch(&server, a, &r, &w, &stream, @ptrCast(&route_static_ctx), line, rid, params[0..S.MaxParams], 8 * 1024, 8 * 1024);
+    const action = try S.dispatch(&server, a, &r, &w, &stream, line, rid, params[0..S.MaxParams], 8 * 1024, 8 * 1024);
 
     try std.testing.expectEqual(Action.@"continue", action);
     try std.testing.expect(!server.called);

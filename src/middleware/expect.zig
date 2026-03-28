@@ -78,7 +78,7 @@ pub fn Expect(comptime opts: ExpectOptions) type {
                     const base = req.baseMut();
                     if (base.body_kind == .none) return;
 
-                    const w = req.raw().writer() orelse return;
+                    const w = req.raw().writer();
                     w.writeAll("HTTP/1.1 100 Continue\r\n\r\n") catch return;
                     if (w.buffered().len != 0) {
                         w.flush() catch return;

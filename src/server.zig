@@ -210,22 +210,12 @@ pub fn Server(comptime def: anytype) type {
             return &@field(self.route_static_ctx, routeFieldName(route_index));
         }
 
-        fn staticContextRouteDecl(rd: router.RouteDecl) middleware.StaticContextRouteDecl {
-            return .{
-                .headers = rd.headers,
-                .query = rd.query,
-                .params = rd.params,
-                .pattern = rd.pattern,
-                .method = rd.method,
-            };
-        }
-
         fn initRouteStaticContexts(io: Io, gpa: Allocator) !RouteStaticCtxTuple {
             var out: RouteStaticCtxTuple = undefined;
             inline for (route_fields, 0..) |f, i| {
                 const rd = @field(Routes, f.name);
                 const StaticCtx = comptime @TypeOf(@field(out, std.fmt.comptimePrint("{d}", .{i})));
-                @field(out, std.fmt.comptimePrint("{d}", .{i})) = try middleware.initStaticContext(StaticCtx, io, gpa, staticContextRouteDecl(rd));
+                @field(out, std.fmt.comptimePrint("{d}", .{i})) = try middleware.initStaticContext(StaticCtx, io, gpa, rd);
             }
             return out;
         }
@@ -240,7 +230,7 @@ pub fn Server(comptime def: anytype) type {
             var listener = try std.Io.net.IpAddress.listen(&address, io, .{ .reuse_address = true });
             errdefer listener.deinit(io);
             const route_static_ctx = try initRouteStaticContexts(io, gpa);
-            const not_found_static_ctx = try middleware.initStaticContext(NotFoundStaticCtx, io, gpa, staticContextRouteDecl(NotFoundRoute));
+            const not_found_static_ctx = try middleware.initStaticContext(NotFoundStaticCtx, io, gpa, NotFoundRoute);
             return .{
                 .io = io,
                 .gpa = gpa,
@@ -380,14 +370,12 @@ pub fn Server(comptime def: anytype) type {
                     a: Allocator,
                 ) Compiled.DispatchError!Action {
                     var params_buf: [Compiled.RouteParamCounts[route_index]][]u8 = undefined;
-                    const route_static_ctx: *anyopaque = @ptrCast(&@field(server.route_static_ctx, std.fmt.comptimePrint("{d}", .{route_index})));
                     return Compiled.dispatch(
                         server,
                         a,
                         r,
                         w,
                         stream,
-                        route_static_ctx,
                         line,
                         route_index,
                         params_buf[0..Compiled.RouteParamCounts[route_index]],
@@ -409,14 +397,12 @@ pub fn Server(comptime def: anytype) type {
                     a: Allocator,
                 ) NotFoundCompiled.DispatchError!Action {
                     var params_buf: [NotFoundCompiled.RouteParamCounts[0]][]u8 = undefined;
-                    const route_static_ctx: *anyopaque = @ptrCast(&server.not_found_static_ctx);
                     return NotFoundCompiled.dispatch(
                         server,
                         a,
                         r,
                         w,
                         stream,
-                        route_static_ctx,
                         line,
                         0,
                         params_buf[0..NotFoundCompiled.RouteParamCounts[0]],
@@ -1117,7 +1103,7 @@ test "middleware static_context: per-route init and request access" {
         pattern: []const u8,
         method: []const u8,
 
-        pub fn init(_: Io, _: Allocator, route_decl: request.RequestRouteDecl) @This() {
+        pub fn init(_: Io, _: Allocator, route_decl: router.RouteDecl) @This() {
             return .{
                 .pattern = route_decl.pattern,
                 .method = route_decl.method,
@@ -1225,7 +1211,7 @@ test "middleware static_context: per-route init and request access" {
 
 test "middleware static_context: init errors propagate from Server.init" {
     const FailingStaticCtx = struct {
-        pub fn init(_: Io, _: Allocator, _: request.RequestRouteDecl) !@This() {
+        pub fn init(_: Io, _: Allocator, _: router.RouteDecl) !@This() {
             return error.StaticContextInitFailed;
         }
     };
@@ -1272,7 +1258,7 @@ test "ReqCtx.Server allows cross-route static context access" {
         pattern: []const u8,
         touched: usize = 0,
 
-        pub fn init(_: Io, _: Allocator, route_decl: request.RequestRouteDecl) @This() {
+        pub fn init(_: Io, _: Allocator, route_decl: router.RouteDecl) @This() {
             return .{
                 .pattern = route_decl.pattern,
             };

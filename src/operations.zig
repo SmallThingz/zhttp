@@ -64,10 +64,7 @@ fn opAddedBudget(comptime Op: type, comptime base_route_count: usize) usize {
         return out;
     }
     if (@hasDecl(Op, "MaxAddedRoutes")) {
-        if (@TypeOf(Op.MaxAddedRoutes) != usize) {
-            @compileError("operation type " ++ @typeName(Op) ++ " MaxAddedRoutes must be usize");
-        }
-        return Op.MaxAddedRoutes;
+        @compileError("operation type " ++ @typeName(Op) ++ " uses legacy `MaxAddedRoutes`; rename it to `maxAddedRoutes(comptime base_route_count: usize) usize`");
     }
     return 0;
 }
@@ -451,7 +448,9 @@ pub const Static = @import("operations/static.zig").Static;
 
 test "operations: add and remove routes" {
     const Ops = struct {
-        pub const MaxAddedRoutes: usize = 1;
+        pub fn maxAddedRoutes(comptime _: usize) usize {
+            return 1;
+        }
         pub fn operation(comptime opctx: OperationCtx, r: opctx.T()) void {
             r.add(router_mod.get("/b", struct {
                 pub const Info: router_mod.EndpointInfo = .{};
@@ -484,7 +483,9 @@ test "operations: add and remove routes" {
 test "operations: order is tuple order and later ops see latest table" {
     const Res = @import("response.zig").Res;
     const OpA = struct {
-        pub const MaxAddedRoutes: usize = 1;
+        pub fn maxAddedRoutes(comptime _: usize) usize {
+            return 1;
+        }
         pub fn operation(comptime opctx: OperationCtx, r: opctx.T()) void {
             r.add(router_mod.get("/later", struct {
                 pub const Info: router_mod.EndpointInfo = .{};

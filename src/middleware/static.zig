@@ -5,6 +5,7 @@ const Header = @import("../response.zig").Header;
 const MiddlewareInfo = @import("../middleware.zig").MiddlewareInfo;
 const ReqCtx = @import("../req_ctx.zig").ReqCtx;
 const parse = @import("../parse.zig");
+const request = @import("../request.zig");
 const router = @import("../router.zig");
 const test_helpers = @import("test_helpers.zig");
 
@@ -257,7 +258,7 @@ pub fn Static(comptime opts: StaticOptions) type {
         const StaticContext = struct {
             cache: ?*CacheState = null,
 
-            pub fn init(_: Io, _: std.mem.Allocator, _: anytype) !@This() {
+            pub fn init(_: Io, _: std.mem.Allocator, _: request.RequestRouteDecl) !@This() {
                 const cache_a = std.heap.page_allocator;
                 const cache = try cache_a.create(CacheState);
                 cache.* = .{};
@@ -275,7 +276,7 @@ pub fn Static(comptime opts: StaticOptions) type {
                 .headers = StaticHeaders,
                 .middlewares = &.{Self},
             };
-            pub fn call(comptime _: ReqCtx, req: anytype) !Res {
+            pub fn call(comptime rctx: ReqCtx, req: rctx.T()) !Res {
                 return serve(req);
             }
         };
@@ -628,13 +629,20 @@ fn initStaticRouteCtx(comptime S: type, allocator: std.mem.Allocator, comptime p
     const RouteStaticCtx = mw.staticContextType(.{S});
     const Ep = struct {
         pub const Info: router.EndpointInfo = .{};
-        pub fn call(comptime _: ReqCtx, req: anytype) !Res {
+        pub fn call(comptime rctx: ReqCtx, req: rctx.T()) !Res {
             _ = req;
             return Res.text(200, "ok");
         }
     };
     const rd = router.get(pattern, Ep);
-    return mw.initStaticContext(RouteStaticCtx, std.testing.io, allocator, rd);
+    const init_rd: request.RequestRouteDecl = .{
+        .headers = rd.headers,
+        .query = rd.query,
+        .params = rd.params,
+        .pattern = rd.pattern,
+        .method = rd.method,
+    };
+    return mw.initStaticContext(RouteStaticCtx, std.testing.io, allocator, init_rd);
 }
 
 test "static: contentTypeFor covers common web/media types" {
@@ -652,16 +660,14 @@ test "static: serves file and index, blocks traversal" {
     const S = Static(.{ .dir = "testdata/static", .mount = "/static" });
     const RouteStaticCtx = @import("../middleware.zig").staticContextType(.{S});
     const MwCtx = struct {};
-    const ReqT = @import("../request.zig").RequestPWithPatternStatic(
-        struct { if_none_match: parse.Optional(parse.String) },
-        struct {},
-        struct {},
-        &.{"path"},
-        MwCtx,
-        RouteStaticCtx,
-        "/static/{*path}",
-        "GET",
-    );
+    const ReqDecl: request.RequestRouteDecl = .{
+        .headers = struct { if_none_match: parse.Optional(parse.String) },
+        .query = struct {},
+        .params = struct {},
+        .pattern = "/static/{*path}",
+        .method = "GET",
+    };
+    const ReqT = request.RequestPWithPatternCtxStatic(ReqDecl, &.{"path"}, MwCtx, RouteStaticCtx, *struct { io: Io, ctx: void });
 
     {
         var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
@@ -740,16 +746,14 @@ test "static: explicit glob_param_name works with multiple path params" {
     });
     const RouteStaticCtx = @import("../middleware.zig").staticContextType(.{S});
     const MwCtx = struct {};
-    const ReqT = @import("../request.zig").RequestPWithPatternStatic(
-        struct { if_none_match: parse.Optional(parse.String) },
-        struct {},
-        struct {},
-        &.{ "prefix", "rest" },
-        MwCtx,
-        RouteStaticCtx,
-        "/x/{prefix}/{*rest}",
-        "GET",
-    );
+    const ReqDecl: request.RequestRouteDecl = .{
+        .headers = struct { if_none_match: parse.Optional(parse.String) },
+        .query = struct {},
+        .params = struct {},
+        .pattern = "/x/{prefix}/{*rest}",
+        .method = "GET",
+    };
+    const ReqT = request.RequestPWithPatternCtxStatic(ReqDecl, &.{ "prefix", "rest" }, MwCtx, RouteStaticCtx, *struct { io: Io, ctx: void });
 
     var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena_state.deinit();
@@ -778,16 +782,14 @@ test "static: etag returns 304 on match" {
     const S = Static(.{ .dir = "testdata/static", .mount = "/static" });
     const RouteStaticCtx = @import("../middleware.zig").staticContextType(.{S});
     const MwCtx = struct {};
-    const ReqT = @import("../request.zig").RequestPWithPatternStatic(
-        struct { if_none_match: parse.Optional(parse.String) },
-        struct {},
-        struct {},
-        &.{"path"},
-        MwCtx,
-        RouteStaticCtx,
-        "/static/{*path}",
-        "GET",
-    );
+    const ReqDecl: request.RequestRouteDecl = .{
+        .headers = struct { if_none_match: parse.Optional(parse.String) },
+        .query = struct {},
+        .params = struct {},
+        .pattern = "/static/{*path}",
+        .method = "GET",
+    };
+    const ReqT = request.RequestPWithPatternCtxStatic(ReqDecl, &.{"path"}, MwCtx, RouteStaticCtx, *struct { io: Io, ctx: void });
 
     const path_buf = "/static/hello.txt".*;
     const query_buf: [0]u8 = .{};
@@ -842,16 +844,14 @@ test "static: in-memory cache serves stale bytes when fs watch is disabled" {
     });
     const RouteStaticCtx = @import("../middleware.zig").staticContextType(.{S});
     const MwCtx = struct {};
-    const ReqT = @import("../request.zig").RequestPWithPatternStatic(
-        struct { if_none_match: parse.Optional(parse.String) },
-        struct {},
-        struct {},
-        &.{"path"},
-        MwCtx,
-        RouteStaticCtx,
-        "/static/{*path}",
-        "GET",
-    );
+    const ReqDecl: request.RequestRouteDecl = .{
+        .headers = struct { if_none_match: parse.Optional(parse.String) },
+        .query = struct {},
+        .params = struct {},
+        .pattern = "/static/{*path}",
+        .method = "GET",
+    };
+    const ReqT = request.RequestPWithPatternCtxStatic(ReqDecl, &.{"path"}, MwCtx, RouteStaticCtx, *struct { io: Io, ctx: void });
     var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena_state.deinit();
     const a = arena_state.allocator();
@@ -916,16 +916,14 @@ test "static: in-memory cache refreshes when fs watch is enabled" {
     });
     const RouteStaticCtx = @import("../middleware.zig").staticContextType(.{S});
     const MwCtx = struct {};
-    const ReqT = @import("../request.zig").RequestPWithPatternStatic(
-        struct { if_none_match: parse.Optional(parse.String) },
-        struct {},
-        struct {},
-        &.{"path"},
-        MwCtx,
-        RouteStaticCtx,
-        "/static/{*path}",
-        "GET",
-    );
+    const ReqDecl: request.RequestRouteDecl = .{
+        .headers = struct { if_none_match: parse.Optional(parse.String) },
+        .query = struct {},
+        .params = struct {},
+        .pattern = "/static/{*path}",
+        .method = "GET",
+    };
+    const ReqT = request.RequestPWithPatternCtxStatic(ReqDecl, &.{"path"}, MwCtx, RouteStaticCtx, *struct { io: Io, ctx: void });
     var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena_state.deinit();
     const a = arena_state.allocator();

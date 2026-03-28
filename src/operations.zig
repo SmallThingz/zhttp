@@ -455,7 +455,7 @@ test "operations: add and remove routes" {
         pub fn operation(comptime opctx: OperationCtx, r: opctx.T()) void {
             r.add(router_mod.get("/b", struct {
                 pub const Info: router_mod.EndpointInfo = .{};
-                pub fn call(comptime _: @import("req_ctx.zig").ReqCtx, req: anytype) !@import("response.zig").Res {
+                pub fn call(comptime rctx: @import("req_ctx.zig").ReqCtx, req: rctx.T()) !@import("response.zig").Res {
                     _ = req;
                     return @import("response.zig").Res.text(200, "b");
                 }
@@ -469,7 +469,7 @@ test "operations: add and remove routes" {
             pub const Info: router_mod.EndpointInfo = .{
                 .operations = &.{Ops},
             };
-            pub fn call(comptime _: @import("req_ctx.zig").ReqCtx, req: anytype) !@import("response.zig").Res {
+            pub fn call(comptime rctx: @import("req_ctx.zig").ReqCtx, req: rctx.T()) !@import("response.zig").Res {
                 _ = req;
                 return @import("response.zig").Res.text(200, "a");
             }
@@ -488,7 +488,7 @@ test "operations: order is tuple order and later ops see latest table" {
         pub fn operation(comptime opctx: OperationCtx, r: opctx.T()) void {
             r.add(router_mod.get("/later", struct {
                 pub const Info: router_mod.EndpointInfo = .{};
-                pub fn call(comptime _: @import("req_ctx.zig").ReqCtx, req: anytype) !Res {
+                pub fn call(comptime rctx: @import("req_ctx.zig").ReqCtx, req: rctx.T()) !Res {
                     _ = req;
                     return Res.text(200, "later");
                 }
@@ -500,7 +500,7 @@ test "operations: order is tuple order and later ops see latest table" {
             if (r.hasMethodPath("GET", "/later")) {
                 _ = r.replace(0, router_mod.get("/first-replaced", struct {
                     pub const Info: router_mod.EndpointInfo = .{};
-                    pub fn call(comptime _: @import("req_ctx.zig").ReqCtx, req: anytype) !Res {
+                    pub fn call(comptime rctx: @import("req_ctx.zig").ReqCtx, req: rctx.T()) !Res {
                         _ = req;
                         return Res.text(200, "first");
                     }
@@ -514,7 +514,7 @@ test "operations: order is tuple order and later ops see latest table" {
             pub const Info: router_mod.EndpointInfo = .{
                 .operations = &.{ OpA, OpB },
             };
-            pub fn call(comptime _: @import("req_ctx.zig").ReqCtx, req: anytype) !Res {
+            pub fn call(comptime rctx: @import("req_ctx.zig").ReqCtx, req: rctx.T()) !Res {
                 _ = req;
                 return Res.text(200, "first");
             }
@@ -536,7 +536,7 @@ test "operations: operation receives only routes tagged in endpoint Info.operati
             const idx = op_indices[0];
             _ = r.replace(idx, router_mod.get("/tagged-replaced", struct {
                 pub const Info: router_mod.EndpointInfo = .{};
-                pub fn call(comptime _: @import("req_ctx.zig").ReqCtx, req: anytype) !Res {
+                pub fn call(comptime rctx: @import("req_ctx.zig").ReqCtx, req: rctx.T()) !Res {
                     _ = req;
                     return Res.text(200, "tagged");
                 }
@@ -547,7 +547,7 @@ test "operations: operation receives only routes tagged in endpoint Info.operati
     const out = apply(.{
         router_mod.get("/untagged", struct {
             pub const Info: router_mod.EndpointInfo = .{};
-            pub fn call(comptime _: @import("req_ctx.zig").ReqCtx, req: anytype) !Res {
+            pub fn call(comptime rctx: @import("req_ctx.zig").ReqCtx, req: rctx.T()) !Res {
                 _ = req;
                 return Res.text(200, "u");
             }
@@ -556,7 +556,7 @@ test "operations: operation receives only routes tagged in endpoint Info.operati
             pub const Info: router_mod.EndpointInfo = .{
                 .operations = &.{TaggedOp},
             };
-            pub fn call(comptime _: @import("req_ctx.zig").ReqCtx, req: anytype) !Res {
+            pub fn call(comptime rctx: @import("req_ctx.zig").ReqCtx, req: rctx.T()) !Res {
                 _ = req;
                 return Res.text(200, "t");
             }

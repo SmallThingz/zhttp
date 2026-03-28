@@ -815,6 +815,7 @@ pub fn Compiled(
             route_index: u16,
             params_buf: [][]u8,
             max_header_bytes: usize,
+            max_single_header_bytes: usize,
         ) DispatchError!Action {
             inline for (route_fields, 0..) |f, i| {
                 if (route_index == i) {
@@ -831,13 +832,17 @@ pub fn Compiled(
                     const mw_ctx = comptime middleware.initContext(MwList, MwCtx);
                     const MwStaticCtx = comptime middleware.staticContextType(MwList);
                     const route_mw_static_ctx: *MwStaticCtx = @ptrCast(@alignCast(route_static_ctx));
-                    const ReqT = request.RequestPWithPatternCtxStatic(H, Q, P, p.param_names, MwCtx, MwStaticCtx, rd.pattern, rd.method, @TypeOf(server.ctx));
-                    const ReqCtxT = req_ctx.ReqCtx;
-                    const EndpointBridge = struct {
-                        pub const function = rd.endpoint.call;
+                    const ReqDecl: request.RequestRouteDecl = .{
+                        .headers = H,
+                        .query = Q,
+                        .params = P,
+                        .pattern = rd.pattern,
+                        .method = rd.method,
                     };
+                    const ReqT = request.RequestPWithPatternCtxStatic(ReqDecl, p.param_names, MwCtx, MwStaticCtx, @TypeOf(server));
+                    const ReqCtxT = req_ctx.ReqCtx;
                     const rctx: ReqCtxT = comptime .{
-                        .handler = EndpointBridge,
+                        .handler = rd.endpoint,
                         .middlewares = MwList,
                         .path = structFieldsToST(P),
                         .query = structFieldsToST(Q),
@@ -845,6 +850,7 @@ pub fn Compiled(
                         .middleware_contexts = middleware.contextST(MwList),
                         .idx = 0,
                         ._base_req_type = ReqT,
+                        ._server_type = @TypeOf(server.*),
                     };
                     comptime {
                         const ReqW = rctx.T();
@@ -862,7 +868,7 @@ pub fn Compiled(
                         }
                     }
 
-                    var reqv = ReqT.initWithCtx(allocator, server.io, line, mw_ctx, server.ctx, route_mw_static_ctx);
+                    var reqv = ReqT.initWithServer(allocator, line, mw_ctx, server, route_mw_static_ctx);
                     reqv.setReader(r);
                     reqv.setWriter(w);
                     defer reqv.deinit(allocator);
@@ -879,21 +885,27 @@ pub fn Compiled(
                         try reqv.parseQuery(allocator, line.query);
                     }
 
-                    try reqv.parseHeaders(allocator, r, max_header_bytes);
+                    try reqv.parseHeadersWithLimits(allocator, r, max_header_bytes, max_single_header_bytes);
 
                     const req0: rctx.T() = .{
                         ._base = &reqv,
                         .path = line.path,
                         .method = line.method,
                     };
+                    const tail_rctx = comptime rctx.withIdx(MwList.len);
+                    const req_tail: tail_rctx.T() = .{
+                        ._base = &reqv,
+                        .path = line.path,
+                        .method = line.method,
+                    };
                     const res = rctx.run(req0) catch |err| {
-                        reqv.discardUnreadBody() catch return .close;
+                        req_tail.discardUnreadBody() catch return .close;
                         const ServerT = @TypeOf(server.*);
                         return ServerT.handleHandlerError(server, w, @TypeOf(err), err);
                     };
 
                     // Ensure unread body is discarded before next request.
-                    try reqv.discardUnreadBody();
+                    try req_tail.discardUnreadBody();
                     if (try maybeHandleUpgradeEntry(rd.endpoint, server, stream, r, w, line, res)) |act| return act;
                     const send_body = !(line.method.len == 4 and line.method[0] == 'H' and line.method[1] == 'E' and line.method[2] == 'A' and line.method[3] == 'D');
                     return finishResponse(w, res, reqv.keepAlive(), send_body);
@@ -937,7 +949,7 @@ fn dispatchForTest(
     var stream: std.Io.net.Stream = undefined;
     var route_static_ctx: struct {} = .{};
     const rid = S.match(line.method, line.path).?;
-    const action = try S.dispatch(&server, allocator, r, &w, &stream, @ptrCast(&route_static_ctx), line, rid, params[0..S.MaxParams], 8 * 1024);
+    const action = try S.dispatch(&server, allocator, r, &w, &stream, @ptrCast(&route_static_ctx), line, rid, params[0..S.MaxParams], 8 * 1024, 8 * 1024);
     return .{ .action = action, .len = w.end };
 }
 
@@ -946,28 +958,28 @@ test "router: exact + param + glob" {
     const S = Compiled(App, .{
         get("/a", struct {
             pub const Info: EndpointInfo = .{};
-            pub fn call(comptime _: ReqCtx, req: anytype) !Res {
+            pub fn call(comptime rctx: ReqCtx, req: rctx.T()) !Res {
                 _ = req;
                 return Res.text(200, "a");
             }
         }),
         get("/u/{id}", struct {
             pub const Info: EndpointInfo = .{};
-            pub fn call(comptime _: ReqCtx, req: anytype) !Res {
+            pub fn call(comptime rctx: ReqCtx, req: rctx.T()) !Res {
                 _ = req;
                 return Res.text(200, "u");
             }
         }),
         get("/g/*", struct {
             pub const Info: EndpointInfo = .{};
-            pub fn call(comptime _: ReqCtx, req: anytype) !Res {
+            pub fn call(comptime rctx: ReqCtx, req: rctx.T()) !Res {
                 _ = req;
                 return Res.text(200, "g");
             }
         }),
         get("/ng/{*rest}", struct {
             pub const Info: EndpointInfo = .{};
-            pub fn call(comptime _: ReqCtx, req: anytype) !Res {
+            pub fn call(comptime rctx: ReqCtx, req: rctx.T()) !Res {
                 _ = req;
                 return Res.text(200, "ng");
             }
@@ -994,7 +1006,7 @@ test "router: trailing slash does not match exact literal" {
     const S = Compiled(void, .{
         get("/a", struct {
             pub const Info: EndpointInfo = .{};
-            pub fn call(comptime _: ReqCtx, req: anytype) !Res {
+            pub fn call(comptime rctx: ReqCtx, req: rctx.T()) !Res {
                 _ = req;
                 return Res.text(200, "a");
             }
@@ -1009,7 +1021,7 @@ test "router: HEAD falls back to GET handler" {
     const S = Compiled(void, .{
         get("/x", struct {
             pub const Info: EndpointInfo = .{};
-            pub fn call(comptime _: ReqCtx, req: anytype) !Res {
+            pub fn call(comptime rctx: ReqCtx, req: rctx.T()) !Res {
                 _ = req;
                 return Res.text(200, "ok");
             }
@@ -1040,7 +1052,7 @@ test "middleware Info: supports 'header: type = ...' form" {
     _ = Compiled(void, .{
         get("/x", struct {
             pub const Info: EndpointInfo = .{};
-            pub fn call(comptime _: ReqCtx, req: anytype) !Res {
+            pub fn call(comptime rctx: ReqCtx, req: rctx.T()) !Res {
                 _ = req;
                 return Res.text(200, "x");
             }
@@ -1085,7 +1097,7 @@ test "middleware Info: supports header/query/path/data captures" {
     const S = Compiled(void, .{
         get("/u/{id}", struct {
             pub const Info: EndpointInfo = .{};
-            pub fn call(comptime _: ReqCtx, req: anytype) !Res {
+            pub fn call(comptime rctx: ReqCtx, req: rctx.T()) !Res {
                 const auth = req.middlewareDataConst(.auth);
                 return Res.text(200, if (auth.seen) "ok" else "bad-data");
             }
@@ -1108,14 +1120,14 @@ test "dispatch: pipelined request discards unread content-length body" {
     const S = Compiled(void, .{
         post("/x", struct {
             pub const Info: EndpointInfo = .{};
-            pub fn call(comptime _: ReqCtx, req: anytype) !Res {
+            pub fn call(comptime rctx: ReqCtx, req: rctx.T()) !Res {
                 _ = req;
                 return Res.text(200, "p");
             }
         }),
         get("/x", struct {
             pub const Info: EndpointInfo = .{};
-            pub fn call(comptime _: ReqCtx, req: anytype) !Res {
+            pub fn call(comptime rctx: ReqCtx, req: rctx.T()) !Res {
                 _ = req;
                 return Res.text(200, "g");
             }
@@ -1153,7 +1165,7 @@ test "dispatch: expect middleware emits interim 100-continue before final respon
     const S = Compiled(void, .{
         post("/echo", struct {
             pub const Info: EndpointInfo = .{};
-            pub fn call(comptime _: ReqCtx, req: anytype) !Res {
+            pub fn call(comptime rctx: ReqCtx, req: rctx.T()) !Res {
                 const body = try req.bodyAll(1024);
                 return Res.text(200, body);
             }
@@ -1187,7 +1199,7 @@ test "dispatch: expect middleware rejects unsupported expectation with 417" {
     const S = Compiled(void, .{
         post("/x", struct {
             pub const Info: EndpointInfo = .{};
-            pub fn call(comptime _: ReqCtx, req: anytype) !Res {
+            pub fn call(comptime rctx: ReqCtx, req: rctx.T()) !Res {
                 _ = req;
                 return Res.text(200, "ok");
             }
@@ -1216,18 +1228,52 @@ test "dispatch: expect middleware rejects unsupported expectation with 417" {
     try std.testing.expect(std.mem.endsWith(u8, got, "\r\n\r\nexpectation failed\n"));
 }
 
+test "dispatch: expect middleware emits interim 100-continue on post-handler drain" {
+    const ExpectMw = @import("middleware/expect.zig").Expect(.{});
+    const S = Compiled(void, .{
+        post("/x", struct {
+            pub const Info: EndpointInfo = .{};
+            pub fn call(comptime rctx: ReqCtx, req: rctx.T()) !Res {
+                _ = req;
+                return Res.text(200, "ok");
+            }
+        }),
+    }, .{ExpectMw});
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    var r = Io.Reader.fixed(
+        "POST /x HTTP/1.1\r\n" ++
+            "Expect: 100-continue\r\n" ++
+            "Content-Length: 5\r\n" ++
+            "\r\n" ++
+            "hello",
+    );
+
+    const line = try request.parseRequestLineBorrowed(&r, 8 * 1024);
+    var out: [512]u8 = undefined;
+    const res = try dispatchForTest(S, {}, a, &r, line, out[0..]);
+    try std.testing.expectEqual(.@"continue", res.action);
+    const got = out[0..res.len];
+    try std.testing.expect(std.mem.startsWith(u8, got, "HTTP/1.1 100 Continue\r\n\r\n"));
+    try std.testing.expect(std.mem.indexOf(u8, got, "HTTP/1.1 200 OK\r\n") != null);
+    try std.testing.expect(std.mem.endsWith(u8, got, "\r\n\r\nok"));
+}
+
 test "dispatch: pipelined request discards unread chunked body" {
     const S = Compiled(void, .{
         post("/x", struct {
             pub const Info: EndpointInfo = .{};
-            pub fn call(comptime _: ReqCtx, req: anytype) !Res {
+            pub fn call(comptime rctx: ReqCtx, req: rctx.T()) !Res {
                 _ = req;
                 return Res.text(200, "p");
             }
         }),
         get("/x", struct {
             pub const Info: EndpointInfo = .{};
-            pub fn call(comptime _: ReqCtx, req: anytype) !Res {
+            pub fn call(comptime rctx: ReqCtx, req: rctx.T()) !Res {
                 _ = req;
                 return Res.text(200, "g");
             }
@@ -1267,7 +1313,7 @@ test "dispatch: path param percent-decodes" {
     const S = Compiled(void, .{
         get("/u/{id}", struct {
             pub const Info: EndpointInfo = .{};
-            pub fn call(comptime _: ReqCtx, req: anytype) !Res {
+            pub fn call(comptime rctx: ReqCtx, req: rctx.T()) !Res {
                 return Res.text(200, req.paramValue(.id));
             }
         }),
@@ -1292,7 +1338,7 @@ test "dispatch: named glob captures and percent-decodes" {
     const S = Compiled(void, .{
         get("/g/{*rest}", struct {
             pub const Info: EndpointInfo = .{};
-            pub fn call(comptime _: ReqCtx, req: anytype) !Res {
+            pub fn call(comptime rctx: ReqCtx, req: rctx.T()) !Res {
                 return Res.text(200, req.paramValue(.rest));
             }
         }),
@@ -1321,7 +1367,7 @@ test "dispatch: typed path params via endpoint Info.path" {
                     id: parse.Int(u32),
                 },
             };
-            pub fn call(comptime _: ReqCtx, req: anytype) !Res {
+            pub fn call(comptime rctx: ReqCtx, req: rctx.T()) !Res {
                 const body = try std.fmt.allocPrint(req.allocator(), "{d}", .{req.paramValue(.id)});
                 return Res.text(200, body);
             }
@@ -1347,7 +1393,7 @@ test "dispatch: typed path params bad value errors" {
                     id: parse.Int(u32),
                 },
             };
-            pub fn call(comptime _: ReqCtx, req: anytype) !Res {
+            pub fn call(comptime rctx: ReqCtx, req: rctx.T()) !Res {
                 _ = req;
                 return Res.text(200, "ok");
             }
@@ -1379,7 +1425,7 @@ test "dispatch: typed path params bad value errors" {
     var server: ServerT = .{ .io = std.testing.io, .ctx = {} };
     const rid = S.match(line.method, line.path).?;
     var route_static_ctx: struct {} = .{};
-    try std.testing.expectError(error.BadValue, S.dispatch(&server, a, &r, &w, &stream, @ptrCast(&route_static_ctx), line, rid, params[0..S.MaxParams], 8 * 1024));
+    try std.testing.expectError(error.BadValue, S.dispatch(&server, a, &r, &w, &stream, @ptrCast(&route_static_ctx), line, rid, params[0..S.MaxParams], 8 * 1024, 8 * 1024));
 }
 
 test "dispatch: typed path params with non-string parsers allocate zero" {
@@ -1444,7 +1490,7 @@ test "dispatch: typed path params with non-string parsers allocate zero" {
                     d: parse.Int(u32),
                 },
             };
-            pub fn call(comptime _: ReqCtx, req: anytype) !Res {
+            pub fn call(comptime rctx: ReqCtx, req: rctx.T()) !Res {
                 const sum: u32 = req.paramValue(.a) + req.paramValue(.b) + req.paramValue(.c) + req.paramValue(.d);
                 return Res.text(200, if (sum == 10) "ok" else "bad");
             }
@@ -1485,7 +1531,7 @@ test "dispatch: middleware Info.path works" {
     const S = Compiled(void, .{
         get("/u/{id}", struct {
             pub const Info: EndpointInfo = .{};
-            pub fn call(comptime _: ReqCtx, req: anytype) !Res {
+            pub fn call(comptime rctx: ReqCtx, req: rctx.T()) !Res {
                 const body = try std.fmt.allocPrint(req.allocator(), "{d}", .{req.paramValue(.id)});
                 return Res.text(200, body);
             }
@@ -1588,7 +1634,7 @@ test "middleware data: set in middleware and handler access" {
     const S = Compiled(void, .{
         get("/x", struct {
             pub const Info: EndpointInfo = .{};
-            pub fn call(comptime _: ReqCtx, req: anytype) !Res {
+            pub fn call(comptime rctx: ReqCtx, req: rctx.T()) !Res {
                 const data = req.middlewareData(.auth);
                 data.user_id += 1;
                 return Res.text(200, if (data.user_id == 8) "ok" else "bad");
@@ -1611,7 +1657,7 @@ test "dispatch: handler error uses callback" {
     const S = Compiled(void, .{
         get("/x", struct {
             pub const Info: EndpointInfo = .{};
-            pub fn call(comptime _: ReqCtx, req: anytype) !Res {
+            pub fn call(comptime rctx: ReqCtx, req: rctx.T()) !Res {
                 _ = req;
                 return error.Boom;
             }
@@ -1650,7 +1696,7 @@ test "dispatch: handler error uses callback" {
     };
     const rid = S.match(line.method, line.path).?;
     var route_static_ctx: struct {} = .{};
-    const action = try S.dispatch(&server, a, &r, &w, &stream, @ptrCast(&route_static_ctx), line, rid, params[0..S.MaxParams], 8 * 1024);
+    const action = try S.dispatch(&server, a, &r, &w, &stream, @ptrCast(&route_static_ctx), line, rid, params[0..S.MaxParams], 8 * 1024, 8 * 1024);
     try std.testing.expect(called);
     try std.testing.expectEqual(.close, action);
     try std.testing.expectEqual(@as(usize, 0), w.end);
@@ -1660,21 +1706,21 @@ test "fuzz: router match does not crash" {
     const S = Compiled(void, .{
         get("/a", struct {
             pub const Info: EndpointInfo = .{};
-            pub fn call(comptime _: ReqCtx, req: anytype) !Res {
+            pub fn call(comptime rctx: ReqCtx, req: rctx.T()) !Res {
                 _ = req;
                 return Res.text(200, "a");
             }
         }),
         post("/b/{id}", struct {
             pub const Info: EndpointInfo = .{};
-            pub fn call(comptime _: ReqCtx, req: anytype) !Res {
+            pub fn call(comptime rctx: ReqCtx, req: rctx.T()) !Res {
                 _ = req;
                 return Res.text(200, "b");
             }
         }),
         put("/c/*", struct {
             pub const Info: EndpointInfo = .{};
-            pub fn call(comptime _: ReqCtx, req: anytype) !Res {
+            pub fn call(comptime rctx: ReqCtx, req: rctx.T()) !Res {
                 _ = req;
                 return Res.text(200, "c");
             }
@@ -1709,7 +1755,7 @@ test "endpoint: call can ignore request data" {
     const S = Compiled(void, .{
         get("/a", struct {
             pub const Info: EndpointInfo = .{};
-            pub fn call(comptime _: ReqCtx, req: anytype) !Res {
+            pub fn call(comptime rctx: ReqCtx, req: rctx.T()) !Res {
                 _ = req;
                 return Res.text(200, "x");
             }
@@ -1732,7 +1778,7 @@ test "handler: app ctx accessible through req" {
     const S = Compiled(Ctx, .{
         get("/a", struct {
             pub const Info: EndpointInfo = .{};
-            pub fn call(comptime _: ReqCtx, req: anytype) !Res {
+            pub fn call(comptime rctx: ReqCtx, req: rctx.T()) !Res {
                 const ctx = req.ctx();
                 return Res.text(200, if (ctx.v == 1) "ok" else "bad");
             }
@@ -1779,7 +1825,7 @@ test "dispatch: invalid path percent-encoding rejected" {
     const S = Compiled(void, .{
         get("/u/{id}", struct {
             pub const Info: EndpointInfo = .{};
-            pub fn call(comptime _: ReqCtx, req: anytype) !Res {
+            pub fn call(comptime rctx: ReqCtx, req: rctx.T()) !Res {
                 _ = req;
                 return Res.text(200, "x");
             }
@@ -1810,7 +1856,7 @@ test "dispatch: invalid path percent-encoding rejected" {
     var server: ServerT = .{ .io = std.testing.io, .ctx = {} };
     const rid = S.match(line.method, line.path).?;
     var route_static_ctx: struct {} = .{};
-    try std.testing.expectError(error.InvalidPercentEncoding, S.dispatch(&server, a, &r, &w, &stream, @ptrCast(&route_static_ctx), line, rid, params[0..S.MaxParams], 8 * 1024));
+    try std.testing.expectError(error.InvalidPercentEncoding, S.dispatch(&server, a, &r, &w, &stream, @ptrCast(&route_static_ctx), line, rid, params[0..S.MaxParams], 8 * 1024, 8 * 1024));
 }
 
 test "dispatch: endpoint upgrade handles 101 and returns upgraded action" {
@@ -1830,7 +1876,7 @@ test "dispatch: endpoint upgrade handles 101 and returns upgraded action" {
 
     const Routes = struct {
         pub const Info: EndpointInfo = .{};
-        pub fn call(comptime _: ReqCtx, req: anytype) !Res {
+        pub fn call(comptime rctx: ReqCtx, req: rctx.T()) !Res {
             _ = req;
             return .{
                 .status = .switching_protocols,
@@ -1871,7 +1917,7 @@ test "dispatch: endpoint upgrade handles 101 and returns upgraded action" {
     var stream: std.Io.net.Stream = undefined;
     const rid = S.match(line.method, line.path).?;
     var route_static_ctx: struct {} = .{};
-    const action = try S.dispatch(&server, a, &r, &w, &stream, @ptrCast(&route_static_ctx), line, rid, params[0..S.MaxParams], 8 * 1024);
+    const action = try S.dispatch(&server, a, &r, &w, &stream, @ptrCast(&route_static_ctx), line, rid, params[0..S.MaxParams], 8 * 1024, 8 * 1024);
 
     try std.testing.expectEqual(Action.upgraded, action);
     try std.testing.expect(server.upgraded);
@@ -1887,7 +1933,7 @@ test "dispatch: endpoint without upgrade does not check status" {
     const S = Compiled(void, .{
         get("/ws", struct {
             pub const Info: EndpointInfo = .{};
-            pub fn call(comptime _: ReqCtx, req: anytype) !Res {
+            pub fn call(comptime rctx: ReqCtx, req: rctx.T()) !Res {
                 _ = req;
                 return .{
                     .status = .switching_protocols,
@@ -1925,7 +1971,7 @@ test "dispatch: endpoint without upgrade does not check status" {
     var stream: std.Io.net.Stream = undefined;
     const rid = S.match(line.method, line.path).?;
     var route_static_ctx: struct {} = .{};
-    const action = try S.dispatch(&server, a, &r, &w, &stream, @ptrCast(&route_static_ctx), line, rid, params[0..S.MaxParams], 8 * 1024);
+    const action = try S.dispatch(&server, a, &r, &w, &stream, @ptrCast(&route_static_ctx), line, rid, params[0..S.MaxParams], 8 * 1024, 8 * 1024);
 
     try std.testing.expectEqual(Action.@"continue", action);
     try std.testing.expect(std.mem.indexOf(u8, out[0..w.end], "content-length: 0\r\n") != null);
@@ -1945,7 +1991,7 @@ test "dispatch: endpoint with upgrade but non-101 does not call upgrade" {
     const Endpoint = struct {
         pub const Info: EndpointInfo = .{};
 
-        pub fn call(comptime _: ReqCtx, req: anytype) !Res {
+        pub fn call(comptime rctx: ReqCtx, req: rctx.T()) !Res {
             _ = req;
             return Res.text(200, "ok");
         }
@@ -1972,7 +2018,7 @@ test "dispatch: endpoint with upgrade but non-101 does not call upgrade" {
     var stream: std.Io.net.Stream = undefined;
     const rid = S.match(line.method, line.path).?;
     var route_static_ctx: struct {} = .{};
-    const action = try S.dispatch(&server, a, &r, &w, &stream, @ptrCast(&route_static_ctx), line, rid, params[0..S.MaxParams], 8 * 1024);
+    const action = try S.dispatch(&server, a, &r, &w, &stream, @ptrCast(&route_static_ctx), line, rid, params[0..S.MaxParams], 8 * 1024, 8 * 1024);
 
     try std.testing.expectEqual(Action.@"continue", action);
     try std.testing.expect(!server.called);

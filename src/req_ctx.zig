@@ -64,6 +64,8 @@ pub const ReqCtx = struct {
 
     /// Stores internal `_base_req_type` state.
     _base_req_type: type,
+    /// Stores internal `_server_type` state.
+    _server_type: type = void,
 
     fn payloadType(comptime ReturnT: type) type {
         return switch (@typeInfo(ReturnT)) {
@@ -73,13 +75,25 @@ pub const ReqCtx = struct {
     }
 
     fn assertHandlerType(comptime Handler: type) void {
-        if (!@hasDecl(Handler, "function")) {
-            @compileError("ReqCtx.handler must be a type exposing `pub const function = <handler>`");
+        const has_function = @hasDecl(Handler, "function");
+        const has_call = @hasDecl(Handler, "call");
+        if (!has_function and !has_call) {
+            @compileError("ReqCtx.handler must expose `pub const function = <handler>` or `pub fn call(comptime rctx: ReqCtx, req: rctx.T()) ...`");
         }
-        const fn_t = @TypeOf(@field(Handler, "function"));
+        const fn_t = @TypeOf(if (has_function) @field(Handler, "function") else @field(Handler, "call"));
         if (@typeInfo(fn_t) != .@"fn") {
-            @compileError("ReqCtx.handler.function must be a function");
+            @compileError("ReqCtx handler entrypoint must be a function");
         }
+    }
+
+    fn handlerFn(comptime Handler: type) type {
+        if (@hasDecl(Handler, "function")) return @TypeOf(@field(Handler, "function"));
+        return @TypeOf(@field(Handler, "call"));
+    }
+
+    fn handlerEntry(comptime Handler: type) handlerFn(Handler) {
+        if (@hasDecl(Handler, "function")) return @field(Handler, "function");
+        return @field(Handler, "call");
     }
 
     /// Implements with idx.
@@ -93,7 +107,13 @@ pub const ReqCtx = struct {
             .middleware_contexts = self.middleware_contexts,
             .idx = next_idx,
             ._base_req_type = self._base_req_type,
+            ._server_type = self._server_type,
         };
+    }
+
+    /// Returns the concrete server type associated with this request context.
+    pub fn Server(comptime self: Self) type {
+        return self._server_type;
     }
 
     /// Returns a concrete response type for a selected body representation.
@@ -106,7 +126,8 @@ pub const ReqCtx = struct {
     fn InferredResponse(comptime self: Self) type {
         assertHandlerType(self.handler);
         const HandlerReq = self.T();
-        const handler_ret = @TypeOf(@call(.auto, self.handler.function, .{ self, @as(HandlerReq, undefined) }));
+        const entry = handlerEntry(self.handler);
+        const handler_ret = @TypeOf(@call(.auto, entry, .{ self, @as(HandlerReq, undefined) }));
         return payloadType(handler_ret);
     }
 
@@ -116,7 +137,8 @@ pub const ReqCtx = struct {
             const Mw = self.middlewares[self.idx];
             return @call(.auto, Mw.call, .{ self, req });
         }
-        return @call(.auto, self.handler.function, .{ self, req });
+        const entry = handlerEntry(self.handler);
+        return @call(.auto, entry, .{ self, req });
     }
 
     /// Returns the request wrapper type for this request context.
@@ -198,11 +220,6 @@ pub const ReqCtx = struct {
                 return Ctx.call(bool, "keepAlive", .{self2});
             }
 
-            /// Implements raw path.
-            pub fn rawPath(self2: ReqSelf) []const u8 {
-                return Ctx.call([]const u8, "rawPath", .{self2});
-            }
-
             /// Implements header.
             pub fn header(self2: ReqSelf, comptime field: @EnumLiteral()) @TypeOf(self2._base.header(field)) {
                 return Ctx.call(@TypeOf(self2._base.header(field)), "header", .{ self2, field });
@@ -236,6 +253,18 @@ pub const ReqCtx = struct {
             /// Implements middleware static const.
             pub fn middlewareStaticConst(self2: ReqSelf, comptime name: anytype) @TypeOf(self2._base.middlewareStaticConst(name)) {
                 return Ctx.call(@TypeOf(self2._base.middlewareStaticConst(name)), "middlewareStaticConst", .{ self2, name });
+            }
+
+            /// Returns the owning server pointer for the active request.
+            pub fn server(self2: ReqSelf) *Ctx.Server() {
+                const ServerT = Ctx.Server();
+                if (ServerT == void) @compileError("ReqCtx.Server() is void for this request context");
+                return Ctx.call(*ServerT, "server", .{self2});
+            }
+
+            /// Returns the owning server pointer for the active request.
+            pub fn serverConst(self2: ReqSelf) *const Ctx.Server() {
+                return @as(*const Ctx.Server(), self2.server());
             }
 
             /// Implements body all.

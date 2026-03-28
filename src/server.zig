@@ -33,6 +33,8 @@ pub const Config = struct {
     tcp_nodelay: bool = false,
     /// Maximum request line length (bytes, including `\r\n`).
     max_request_line: usize = 8 * 1024,
+    /// Maximum bytes allowed for a single header line (including line ending).
+    max_single_header_size: usize = 8 * 1024,
     /// Maximum total header bytes (bytes, including line endings).
     max_header_bytes: usize = 32 * 1024,
 };
@@ -62,8 +64,20 @@ pub fn Server(comptime def: anytype) type {
         .write_buffer = configField(cfg, "write_buffer"),
         .tcp_nodelay = configField(cfg, "tcp_nodelay"),
         .max_request_line = configField(cfg, "max_request_line"),
+        .max_single_header_size = configField(cfg, "max_single_header_size"),
         .max_header_bytes = configField(cfg, "max_header_bytes"),
     };
+    comptime {
+        if (Conf.read_buffer < Conf.max_request_line) {
+            @compileError("server config invalid: read_buffer must be >= max_request_line");
+        }
+        if (Conf.read_buffer < Conf.max_single_header_size) {
+            @compileError("server config invalid: read_buffer must be >= max_single_header_size");
+        }
+        if (Conf.max_header_bytes < Conf.max_single_header_size) {
+            @compileError("server config invalid: max_header_bytes must be >= max_single_header_size");
+        }
+    }
 
     const DefT = @TypeOf(def);
     const Middlewares = if (@hasField(DefT, "middlewares")) def.middlewares else .{};
@@ -83,7 +97,7 @@ pub fn Server(comptime def: anytype) type {
     const Compiled = router.Compiled(Context, Routes, Middlewares);
     const DefaultNotFound = struct {
         pub const Info: router.EndpointInfo = .{};
-        pub fn call(comptime _: ReqCtx, req: anytype) !response.Res {
+        pub fn call(comptime rctx: ReqCtx, req: rctx.T()) !response.Res {
             _ = req;
             return response.Res.text(404, "not found");
         }
@@ -136,13 +150,82 @@ pub fn Server(comptime def: anytype) type {
             }
         };
         const ErrorHandler = if (@hasField(DefT, "error_handler")) def.error_handler else DefaultErrorHandler.call;
+        pub const RouteCount: usize = route_fields.len;
+        pub const RouteDeclList: [route_fields.len]router.RouteDecl = blk: {
+            var out: [route_fields.len]router.RouteDecl = undefined;
+            for (route_fields, 0..) |f, i| {
+                out[i] = @field(Routes, f.name);
+            }
+            break :blk out;
+        };
+
+        fn routeFieldName(comptime route_index: usize) []const u8 {
+            if (route_index >= route_fields.len) {
+                @compileError("route index " ++ std.fmt.comptimePrint("{d}", .{route_index}) ++ " is out of bounds");
+            }
+            return std.fmt.comptimePrint("{d}", .{route_index});
+        }
+
+        /// Returns all declared route metadata.
+        pub fn routeDecls(_: *const Self) []const router.RouteDecl {
+            return RouteDeclList[0..];
+        }
+
+        /// Returns declared route metadata by compile-time index.
+        pub fn routeDecl(comptime route_index: usize) router.RouteDecl {
+            return RouteDeclList[route_index];
+        }
+
+        /// Returns compile-time route index for a method/pattern pair.
+        pub fn routeIndex(comptime method: []const u8, comptime pattern: []const u8) usize {
+            inline for (route_fields, 0..) |f, i| {
+                const rd = @field(Routes, f.name);
+                if (std.mem.eql(u8, rd.method, method) and std.mem.eql(u8, rd.pattern, pattern)) return i;
+            }
+            @compileError("route not found for method='" ++ method ++ "' pattern='" ++ pattern ++ "'");
+        }
+
+        /// Returns the static-context type for a compile-time route index.
+        pub fn RouteStaticType(comptime route_index: usize) type {
+            return @TypeOf(@field(@as(RouteStaticCtxTuple, undefined), routeFieldName(route_index)));
+        }
+
+        /// Returns pointer to all route static contexts.
+        pub fn routeStaticTuple(self: *Self) *RouteStaticCtxTuple {
+            return &self.route_static_ctx;
+        }
+
+        /// Returns const pointer to all route static contexts.
+        pub fn routeStaticTupleConst(self: *const Self) *const RouteStaticCtxTuple {
+            return &self.route_static_ctx;
+        }
+
+        /// Returns pointer to a route static context by compile-time index.
+        pub fn routeStatic(self: *Self, comptime route_index: usize) *RouteStaticType(route_index) {
+            return &@field(self.route_static_ctx, routeFieldName(route_index));
+        }
+
+        /// Returns const pointer to a route static context by compile-time index.
+        pub fn routeStaticConst(self: *const Self, comptime route_index: usize) *const RouteStaticType(route_index) {
+            return &@field(self.route_static_ctx, routeFieldName(route_index));
+        }
+
+        fn staticContextRouteDecl(rd: router.RouteDecl) middleware.StaticContextRouteDecl {
+            return .{
+                .headers = rd.headers,
+                .query = rd.query,
+                .params = rd.params,
+                .pattern = rd.pattern,
+                .method = rd.method,
+            };
+        }
 
         fn initRouteStaticContexts(io: Io, gpa: Allocator) !RouteStaticCtxTuple {
             var out: RouteStaticCtxTuple = undefined;
             inline for (route_fields, 0..) |f, i| {
                 const rd = @field(Routes, f.name);
                 const StaticCtx = comptime @TypeOf(@field(out, std.fmt.comptimePrint("{d}", .{i})));
-                @field(out, std.fmt.comptimePrint("{d}", .{i})) = try middleware.initStaticContext(StaticCtx, io, gpa, rd);
+                @field(out, std.fmt.comptimePrint("{d}", .{i})) = try middleware.initStaticContext(StaticCtx, io, gpa, staticContextRouteDecl(rd));
             }
             return out;
         }
@@ -157,7 +240,7 @@ pub fn Server(comptime def: anytype) type {
             var listener = try std.Io.net.IpAddress.listen(&address, io, .{ .reuse_address = true });
             errdefer listener.deinit(io);
             const route_static_ctx = try initRouteStaticContexts(io, gpa);
-            const not_found_static_ctx = try middleware.initStaticContext(NotFoundStaticCtx, io, gpa, NotFoundRoute);
+            const not_found_static_ctx = try middleware.initStaticContext(NotFoundStaticCtx, io, gpa, staticContextRouteDecl(NotFoundRoute));
             return .{
                 .io = io,
                 .gpa = gpa,
@@ -309,6 +392,7 @@ pub fn Server(comptime def: anytype) type {
                         route_index,
                         params_buf[0..Compiled.RouteParamCounts[route_index]],
                         Conf.max_header_bytes,
+                        Conf.max_single_header_size,
                     );
                 }
             }.call;
@@ -337,6 +421,7 @@ pub fn Server(comptime def: anytype) type {
                         0,
                         params_buf[0..NotFoundCompiled.RouteParamCounts[0]],
                         Conf.max_header_bytes,
+                        Conf.max_single_header_size,
                     );
                 }
             }.call;
@@ -378,7 +463,7 @@ test "Connection: close header closes socket" {
         .routes = .{
             router.get("/plaintext", struct {
                 pub const Info: router.EndpointInfo = .{};
-                pub fn call(comptime _: ReqCtx, req: anytype) !response.Res {
+                pub fn call(comptime rctx: ReqCtx, req: rctx.T()) !response.Res {
                     return Bench.plaintext(req);
                 }
             }),
@@ -453,7 +538,7 @@ test "unknown path returns 404 and keeps connection" {
         .routes = .{
             router.get("/ok", struct {
                 pub const Info: router.EndpointInfo = .{};
-                pub fn call(comptime _: ReqCtx, req: anytype) !response.Res {
+                pub fn call(comptime rctx: ReqCtx, req: rctx.T()) !response.Res {
                     return Handlers.ok(req);
                 }
             }),
@@ -532,7 +617,7 @@ test "not_found_handler can parse query headers and body" {
         .routes = .{
             router.get("/ok", struct {
                 pub const Info: router.EndpointInfo = .{};
-                pub fn call(comptime _: ReqCtx, req: anytype) !response.Res {
+                pub fn call(comptime rctx: ReqCtx, req: rctx.T()) !response.Res {
                     return Handlers.ok(req);
                 }
             }),
@@ -546,7 +631,7 @@ test "not_found_handler can parse query headers and body" {
                     host: parse.Optional(parse.String),
                 },
             };
-            pub fn call(comptime _: ReqCtx, req: anytype) !response.Res {
+            pub fn call(comptime rctx: ReqCtx, req: rctx.T()) !response.Res {
                 return Handlers.missing(req);
             }
         },
@@ -622,7 +707,7 @@ test "HEAD response omits body" {
         .routes = .{
             router.get("/ok", struct {
                 pub const Info: router.EndpointInfo = .{};
-                pub fn call(comptime _: ReqCtx, req: anytype) !response.Res {
+                pub fn call(comptime rctx: ReqCtx, req: rctx.T()) !response.Res {
                     return Handlers.ok(req);
                 }
             }),
@@ -681,7 +766,7 @@ test "bad request line returns 400" {
         .routes = .{
             router.get("/ok", struct {
                 pub const Info: router.EndpointInfo = .{};
-                pub fn call(comptime _: ReqCtx, req: anytype) !response.Res {
+                pub fn call(comptime rctx: ReqCtx, req: rctx.T()) !response.Res {
                     return Handlers.ok(req);
                 }
             }),
@@ -748,7 +833,7 @@ test "custom error_handler handles handler errors only" {
         .routes = .{
             router.get("/boom", struct {
                 pub const Info: router.EndpointInfo = .{};
-                pub fn call(comptime _: ReqCtx, req: anytype) !response.Res {
+                pub fn call(comptime rctx: ReqCtx, req: rctx.T()) !response.Res {
                     return Handlers.boom(req);
                 }
             }),
@@ -835,7 +920,7 @@ test "handler res.close closes socket" {
         .routes = .{
             router.get("/x", struct {
                 pub const Info: router.EndpointInfo = .{};
-                pub fn call(comptime _: ReqCtx, req: anytype) !response.Res {
+                pub fn call(comptime rctx: ReqCtx, req: rctx.T()) !response.Res {
                     return Handlers.close_me(req);
                 }
             }),
@@ -895,7 +980,7 @@ test "HTTP/1.0 request does not keep-alive" {
         .routes = .{
             router.get("/x", struct {
                 pub const Info: router.EndpointInfo = .{};
-                pub fn call(comptime _: ReqCtx, req: anytype) !response.Res {
+                pub fn call(comptime rctx: ReqCtx, req: rctx.T()) !response.Res {
                     _ = req;
                     return Handlers.ok();
                 }
@@ -974,7 +1059,7 @@ test "endpoint upgrade: 101 triggers upgrade callback and stream ownership" {
         .routes = .{
             router.get("/ws", struct {
                 pub const Info: router.EndpointInfo = .{};
-                pub fn call(comptime _: ReqCtx, req: anytype) !response.Res {
+                pub fn call(comptime rctx: ReqCtx, req: rctx.T()) !response.Res {
                     return Handlers.ws(req);
                 }
 
@@ -1032,7 +1117,7 @@ test "middleware static_context: per-route init and request access" {
         pattern: []const u8,
         method: []const u8,
 
-        pub fn init(_: Io, _: Allocator, route_decl: anytype) @This() {
+        pub fn init(_: Io, _: Allocator, route_decl: request.RequestRouteDecl) @This() {
             return .{
                 .pattern = route_decl.pattern,
                 .method = route_decl.method,
@@ -1073,7 +1158,7 @@ test "middleware static_context: per-route init and request access" {
                 pub const Info: router.EndpointInfo = .{
                     .middlewares = &.{StaticMw},
                 };
-                pub fn call(comptime _: ReqCtx, req: anytype) !response.Res {
+                pub fn call(comptime rctx: ReqCtx, req: rctx.T()) !response.Res {
                     return Handlers.a(req);
                 }
             }),
@@ -1081,7 +1166,7 @@ test "middleware static_context: per-route init and request access" {
                 pub const Info: router.EndpointInfo = .{
                     .middlewares = &.{StaticMw},
                 };
-                pub fn call(comptime _: ReqCtx, req: anytype) !response.Res {
+                pub fn call(comptime rctx: ReqCtx, req: rctx.T()) !response.Res {
                     return Handlers.b(req);
                 }
             }),
@@ -1140,7 +1225,7 @@ test "middleware static_context: per-route init and request access" {
 
 test "middleware static_context: init errors propagate from Server.init" {
     const FailingStaticCtx = struct {
-        pub fn init(_: Io, _: Allocator, _: anytype) !@This() {
+        pub fn init(_: Io, _: Allocator, _: request.RequestRouteDecl) !@This() {
             return error.StaticContextInitFailed;
         }
     };
@@ -1171,7 +1256,7 @@ test "middleware static_context: init errors propagate from Server.init" {
                 pub const Info: router.EndpointInfo = .{
                     .middlewares = &.{FailingMw},
                 };
-                pub fn call(comptime _: ReqCtx, req: anytype) !response.Res {
+                pub fn call(comptime rctx: ReqCtx, req: rctx.T()) !response.Res {
                     return Handlers.ok(req);
                 }
             }),
@@ -1180,4 +1265,133 @@ test "middleware static_context: init errors propagate from Server.init" {
 
     const addr0: Io.net.IpAddress = .{ .ip4 = Io.net.Ip4Address.loopback(0) };
     try std.testing.expectError(error.StaticContextInitFailed, SrvT.init(std.testing.allocator, io, addr0, {}));
+}
+
+test "ReqCtx.Server allows cross-route static context access" {
+    const RouteStaticCtx = struct {
+        pattern: []const u8,
+        touched: usize = 0,
+
+        pub fn init(_: Io, _: Allocator, route_decl: request.RequestRouteDecl) @This() {
+            return .{
+                .pattern = route_decl.pattern,
+            };
+        }
+    };
+
+    const StaticMw = struct {
+        pub const Info: middleware.MiddlewareInfo = .{
+            .name = "route_static",
+            .static_context = RouteStaticCtx,
+        };
+
+        pub fn call(comptime rctx: ReqCtx, req: rctx.T()) !response.Res {
+            return rctx.next(req);
+        }
+    };
+
+    const Touch = struct {
+        pub const Info: router.EndpointInfo = .{
+            .middlewares = &.{StaticMw},
+        };
+
+        pub fn call(comptime rctx: ReqCtx, req: rctx.T()) !response.Res {
+            const ServerT = rctx.Server();
+            comptime {
+                _ = ServerT.RouteCount;
+                _ = ServerT.RouteDeclList;
+                _ = ServerT.RouteStaticType(ServerT.routeIndex("GET", "/state"));
+            }
+            const decls = req.server().routeDecls();
+            if (decls.len != 2) return response.Res.text(500, "bad route list");
+            const state_idx = comptime ServerT.routeIndex("GET", "/state");
+            const state_static = req.server().routeStatic(state_idx);
+            state_static.route_static.touched += 1;
+            _ = req.server().routeStaticTuple();
+            return response.Res.text(200, "touched");
+        }
+    };
+
+    const State = struct {
+        pub const Info: router.EndpointInfo = .{
+            .middlewares = &.{StaticMw},
+        };
+
+        pub fn call(comptime rctx: ReqCtx, req: rctx.T()) !response.Res {
+            const me = req.middlewareStaticConst(.route_static);
+            const ServerT = @TypeOf(req.server().*);
+            const me2 = req.server().routeStaticConst(comptime ServerT.routeIndex("GET", "/state"));
+            const body = try std.fmt.allocPrint(req.allocator(), "{s}:{d}", .{ me.pattern, me2.route_static.touched });
+            return response.Res.text(200, body);
+        }
+    };
+
+    const io = std.testing.io;
+    primeSocketBackend();
+
+    const SrvT = Server(.{
+        .routes = .{
+            router.get("/touch", Touch),
+            router.get("/state", State),
+        },
+    });
+
+    const addr0: Io.net.IpAddress = .{ .ip4 = Io.net.Ip4Address.loopback(0) };
+    var server = try SrvT.init(std.testing.allocator, io, addr0, {});
+    defer server.deinit();
+    const port: u16 = server.listener.socket.address.getPort();
+
+    var group: Io.Group = .init;
+    defer group.cancel(io);
+    try group.concurrent(io, SrvT.run, .{&server});
+
+    var stream = try Io.net.IpAddress.connect(&.{ .ip4 = Io.net.Ip4Address.loopback(port) }, io, .{ .mode = .stream });
+    defer stream.close(io);
+
+    var rb: [4 * 1024]u8 = undefined;
+    var wb: [256]u8 = undefined;
+    var sr = stream.reader(io, &rb);
+    var sw = stream.writer(io, &wb);
+
+    try sw.interface.writeAll("GET /state HTTP/1.1\r\nHost: x\r\n\r\n");
+    try sw.interface.flush();
+    const state0 =
+        "HTTP/1.1 200 OK\r\n" ++
+        "connection: keep-alive\r\n" ++
+        "content-type: text/plain; charset=utf-8\r\n" ++
+        "content-length: 8\r\n" ++
+        "\r\n" ++
+        "/state:0";
+    var got0: [state0.len]u8 = undefined;
+    try sr.interface.readSliceAll(got0[0..]);
+    try std.testing.expectEqualStrings(state0, got0[0..]);
+
+    try sw.interface.writeAll("GET /touch HTTP/1.1\r\nHost: x\r\n\r\n");
+    try sw.interface.flush();
+    const touched =
+        "HTTP/1.1 200 OK\r\n" ++
+        "connection: keep-alive\r\n" ++
+        "content-type: text/plain; charset=utf-8\r\n" ++
+        "content-length: 7\r\n" ++
+        "\r\n" ++
+        "touched";
+    var got1: [touched.len]u8 = undefined;
+    try sr.interface.readSliceAll(got1[0..]);
+    try std.testing.expectEqualStrings(touched, got1[0..]);
+
+    try sw.interface.writeAll("GET /state HTTP/1.1\r\nHost: x\r\n\r\n");
+    try sw.interface.flush();
+    const state1 =
+        "HTTP/1.1 200 OK\r\n" ++
+        "connection: keep-alive\r\n" ++
+        "content-type: text/plain; charset=utf-8\r\n" ++
+        "content-length: 8\r\n" ++
+        "\r\n" ++
+        "/state:1";
+    var got2: [state1.len]u8 = undefined;
+    try sr.interface.readSliceAll(got2[0..]);
+    try std.testing.expectEqualStrings(state1, got2[0..]);
+
+    group.cancel(io);
+    group.await(io) catch {};
 }

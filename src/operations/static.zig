@@ -51,7 +51,7 @@ test "static operation adds GET/HEAD mount routes" {
             pub const Info: router.EndpointInfo = .{
                 .operations = &.{Static},
             };
-            pub fn call(comptime _: @import("../req_ctx.zig").ReqCtx, req: anytype) !Res {
+            pub fn call(comptime rctx: @import("../req_ctx.zig").ReqCtx, req: rctx.T()) !Res {
                 _ = req;
                 return Res.text(200, "ok");
             }

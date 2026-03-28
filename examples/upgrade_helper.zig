@@ -68,7 +68,7 @@ const UpgradeHandshake = struct {
     }
 
     pub fn upgrade(
-        server: anytype,
+        server: *SrvT,
         stream: *const std.Io.net.Stream,
         r: *Io.Reader,
         w: *Io.Writer,
@@ -80,7 +80,7 @@ const UpgradeHandshake = struct {
 };
 
 fn onUpgrade(
-    server: anytype,
+    server: *SrvT,
     stream: *const std.Io.net.Stream,
     _: *Io.Reader,
     w: *Io.Writer,

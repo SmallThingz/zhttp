@@ -12,8 +12,6 @@ pub const Version = enum { http10, http11 };
 pub const BodyKind = enum { none, content_length, chunked };
 
 pub const Base = struct {
-    /// Stores `io`.
-    io: Io,
     /// Stores `arena`.
     arena: Allocator,
     /// Stores `reader`.
@@ -30,10 +28,6 @@ pub const Base = struct {
     /// Stores `body_kind`.
     body_kind: BodyKind = .none,
     body_remaining: usize = 0, // for content-length bodies
-    /// Stores `expect_continue_approved`.
-    expect_continue_approved: bool = false,
-    /// Stores `expect_continue_sent`.
-    expect_continue_sent: bool = false,
 };
 
 pub const ParseLineError = error{
@@ -46,6 +40,15 @@ pub const ParseHeadersError = error{
     BadRequest,
     HeadersTooLarge,
 } || Io.Reader.Error || parse.CaptureError || urldecode.DecodeError || Allocator.Error;
+
+/// Concrete route declaration shape used by request type generation.
+pub const RequestRouteDecl = struct {
+    headers: type,
+    query: type,
+    params: type,
+    pattern: []const u8,
+    method: []const u8,
+};
 
 fn trimCR(line: []u8) []u8 {
     if (line.len != 0 and line[line.len - 1] == '\r') return line[0 .. line.len - 1];
@@ -108,25 +111,14 @@ pub const RequestLine = struct {
 
 /// Implements parse request line borrowed.
 pub fn parseRequestLineBorrowed(r: *Io.Reader, max_line_len: usize) ParseLineError!RequestLine {
-    var line0_incl: []u8 = undefined;
-    const available = r.peekGreedy(1) catch |err| switch (err) {
+    const line0_incl = r.takeDelimiterInclusive('\n') catch |err| switch (err) {
         error.EndOfStream => return error.EndOfStream,
+        error.StreamTooLong => return error.UriTooLong,
         error.ReadFailed => return error.ReadFailed,
     };
-    if (available.len == 0) return error.EndOfStream;
-    if (std.mem.indexOfScalar(u8, available, '\n')) |nl| {
-        line0_incl = available[0 .. nl + 1];
-        r.toss(nl + 1);
-    } else {
-        line0_incl = r.takeDelimiterInclusive('\n') catch |err| switch (err) {
-            error.EndOfStream => return error.EndOfStream,
-            error.StreamTooLong => return error.UriTooLong,
-            error.ReadFailed => return error.ReadFailed,
-        };
-    }
     if (line0_incl.len == 0) return error.BadRequest;
+    if (line0_incl.len > max_line_len) return error.UriTooLong;
     var end: usize = line0_incl.len - 1; // strip '\n'
-    if (end > max_line_len) return error.UriTooLong;
     if (end != 0 and line0_incl[end - 1] == '\r') end -= 1;
     const line = line0_incl[0..end];
 
@@ -191,21 +183,6 @@ pub fn parseRequestLineBorrowed(r: *Io.Reader, max_line_len: usize) ParseLineErr
     };
 }
 
-/// Implements parse request line.
-pub fn parseRequestLine(r: *Io.Reader, allocator: Allocator, max_line_len: usize) ParseLineError!RequestLine {
-    const borrowed = try parseRequestLineBorrowed(r, max_line_len);
-    const method_copy = try allocator.dupe(u8, borrowed.method);
-    const path = try allocator.dupe(u8, borrowed.path);
-    const query = try allocator.dupe(u8, borrowed.query);
-
-    return .{
-        .method = method_copy,
-        .version = borrowed.version,
-        .path = path,
-        .query = query,
-    };
-}
-
 fn headerIs(name: []const u8, comptime wanted: []const u8) bool {
     return std.ascii.eqlIgnoreCase(name, wanted);
 }
@@ -229,8 +206,20 @@ fn RequestPWithPatternExt(
     comptime MwStaticCtx: type,
     comptime route_pattern: []const u8,
     comptime method_name: []const u8,
-    comptime CtxPtr: type,
+    comptime ServerPtr: type,
 ) type {
+    comptime {
+        const ptr_info = @typeInfo(ServerPtr);
+        if (ptr_info != .pointer or ptr_info.pointer.size != .one) {
+            @compileError("ServerPtr must be a single-item pointer type");
+        }
+    }
+    const ServerT = @typeInfo(ServerPtr).pointer.child;
+    comptime {
+        if (!@hasField(ServerT, "io")) @compileError("ServerPtr pointee must have field `io`");
+        if (!@hasField(ServerT, "ctx")) @compileError("ServerPtr pointee must have field `ctx`");
+    }
+    const CtxPtr = @FieldType(ServerT, "ctx");
     const HeaderLookup = parse.Lookup(Headers, .header);
     const QueryLookup = parse.Lookup(Query, .query);
 
@@ -270,10 +259,8 @@ fn RequestPWithPatternExt(
         pub const method: []const u8 = method_name;
         /// Stores internal `_base` state.
         _base: Base,
-        /// Stores internal `_path` state.
-        _path: []u8,
-        /// Stores internal `_ctx` state.
-        _ctx: CtxPtr,
+        /// Stores internal `_server` state.
+        _server: ServerPtr,
         /// Stores internal `_mw_ctx` state.
         _mw_ctx: MwCtx,
         /// Stores internal `_mw_static_ctx` state.
@@ -287,8 +274,28 @@ fn RequestPWithPatternExt(
 
         const Self = @This();
         var default_mw_static_ctx: MwStaticCtx = std.mem.zeroes(MwStaticCtx);
+        var default_server: ServerT = undefined;
 
         pub const ParamNames: []const []const u8 = param_names;
+
+        /// Implements init with server.
+        pub fn initWithServer(
+            init_arena: Allocator,
+            line: RequestLine,
+            mw_ctx: MwCtx,
+            srv: ServerPtr,
+            mw_static_ctx: ?*MwStaticCtx,
+        ) Self {
+            return .{
+                ._base = .{
+                    .arena = init_arena,
+                    .version = line.version,
+                },
+                ._server = srv,
+                ._mw_ctx = mw_ctx,
+                ._mw_static_ctx = mw_static_ctx orelse &default_mw_static_ctx,
+            };
+        }
 
         /// Implements init with ctx.
         pub fn initWithCtx(
@@ -299,17 +306,10 @@ fn RequestPWithPatternExt(
             app_ctx: CtxPtr,
             mw_static_ctx: ?*MwStaticCtx,
         ) Self {
-            return .{
-                ._base = .{
-                    .io = init_io,
-                    .arena = init_arena,
-                    .version = line.version,
-                },
-                ._path = line.path,
-                ._ctx = app_ctx,
-                ._mw_ctx = mw_ctx,
-                ._mw_static_ctx = mw_static_ctx orelse &default_mw_static_ctx,
-            };
+            default_server = undefined;
+            default_server.io = init_io;
+            default_server.ctx = app_ctx;
+            return initWithServer(init_arena, line, mw_ctx, &default_server, mw_static_ctx);
         }
 
         /// Initializes this value.
@@ -320,17 +320,17 @@ fn RequestPWithPatternExt(
 
         /// Implements ctx.
         pub fn ctx(self: *Self) CtxPtr {
-            return self._ctx;
+            return self._server.ctx;
         }
 
         /// Implements ctx const.
         pub fn ctxConst(self: *const Self) CtxPtr {
-            return self._ctx;
+            return self._server.ctx;
         }
 
         /// Implements set ctx.
         pub fn setCtx(self: *Self, value: CtxPtr) void {
-            self._ctx = value;
+            self._server.ctx = value;
         }
 
         /// Implements allocator.
@@ -355,12 +355,12 @@ fn RequestPWithPatternExt(
 
         /// Implements io.
         pub fn io(self: *const Self) Io {
-            return self._base.io;
+            return self._server.io;
         }
 
         /// Implements set io.
         pub fn setIo(self: *Self, value: Io) void {
-            self._base.io = value;
+            self._server.io = value;
         }
 
         /// Implements arena.
@@ -393,9 +393,14 @@ fn RequestPWithPatternExt(
             self._base.writer = value;
         }
 
-        /// Marks the request as approved for `Expect: 100-continue`.
-        pub fn approveExpectContinue(self: *Self) void {
-            self._base.expect_continue_approved = true;
+        /// Returns the owning server pointer for this request.
+        pub fn server(self: *const Self) ServerPtr {
+            return self._server;
+        }
+
+        /// Sets the owning server pointer for this request.
+        pub fn setServer(self: *Self, value: ServerPtr) void {
+            self._server = value;
         }
 
         /// Implements mw ctx mut.
@@ -523,11 +528,6 @@ fn RequestPWithPatternExt(
             return self._base.version == .http11 and !self._base.connection_close;
         }
 
-        /// Implements raw path.
-        pub fn rawPath(self: *const Self) []const u8 {
-            return self._path;
-        }
-
         /// Implements parse params.
         pub fn parseParams(self: *Self, a: Allocator, params_in: []const []u8) !void {
             if (param_names.len == 0) return;
@@ -578,9 +578,18 @@ fn RequestPWithPatternExt(
 
         /// Implements parse headers.
         pub fn parseHeaders(self: *Self, a: Allocator, r: *Io.Reader, max_header_bytes: usize) ParseHeadersError!void {
+            return self.parseHeadersWithLimits(a, r, max_header_bytes, max_header_bytes);
+        }
+
+        /// Implements parse headers with separate total and per-line size limits.
+        pub fn parseHeadersWithLimits(
+            self: *Self,
+            a: Allocator,
+            r: *Io.Reader,
+            max_header_bytes: usize,
+            max_single_header_bytes: usize,
+        ) ParseHeadersError!void {
             self._base.reader = r;
-            self._base.expect_continue_approved = false;
-            self._base.expect_continue_sent = false;
             if (HeaderLookup.count != 0) {
                 // reset captures each request
                 parse.destroyStruct(&self._headers, a);
@@ -591,121 +600,50 @@ fn RequestPWithPatternExt(
             var total: usize = 0;
             var content_length: ?usize = null;
             var has_chunked: bool = false;
-
-            // Fast path: empty header section.
-            const peek = r.peekGreedy(2) catch |err| switch (err) {
-                error.EndOfStream => return error.EndOfStream,
-                error.ReadFailed => return error.ReadFailed,
-            };
-            if (peek.len >= 2 and peek[0] == '\r' and peek[1] == '\n') {
-                r.toss(2);
-                self._base.body_kind = .none;
-                self._base.body_remaining = 0;
-                if (HeaderLookup.count != 0) {
-                    try parse.doneParsingStruct(&self._headers, present[0..]);
-                }
-                return;
-            }
-
-            var line_buf: std.ArrayList(u8) = undefined;
-            var line_buf_inited: bool = false;
-            defer if (line_buf_inited) line_buf.deinit(a);
-            var in_accum: bool = false;
-            var done: bool = false;
-
-            while (!done) {
-                const available = r.peekGreedy(1) catch |err| switch (err) {
+            while (true) {
+                const line0_incl = r.takeDelimiterInclusive('\n') catch |err| switch (err) {
+                    error.StreamTooLong => return error.HeadersTooLarge,
                     error.EndOfStream => return error.EndOfStream,
                     error.ReadFailed => return error.ReadFailed,
                 };
-                if (available.len == 0) return error.EndOfStream;
+                total += line0_incl.len;
+                if (total > max_header_bytes) return error.HeadersTooLarge;
+                if (line0_incl.len > max_single_header_bytes) return error.HeadersTooLarge;
 
-                var line_start: usize = 0;
-                var search_pos: usize = 0;
-                while (true) {
-                    const nl = std.mem.indexOfScalarPos(u8, available, search_pos, '\n') orelse break;
-                    total += (nl - line_start + 1);
-                    if (total > max_header_bytes) return error.HeadersTooLarge;
+                const line0 = line0_incl[0 .. line0_incl.len - 1];
+                const line = trimCR(line0);
+                if (line.len == 0) break;
 
-                    const seg = available[line_start..nl];
-                    var line: []const u8 = undefined;
-                    if (in_accum) {
-                        try line_buf.appendSlice(a, seg);
-                        if (line_buf.items.len != 0 and line_buf.items[line_buf.items.len - 1] == '\r') {
-                            line_buf.items.len -= 1;
-                        }
-                        line = line_buf.items;
+                const col = std.mem.indexOfScalarPos(u8, line, 1, ':') orelse return error.BadRequest;
+                const name = line[0..col];
+                var value: []const u8 = line[col + 1 ..];
+                value = trimSpaces(value);
+
+                if (headerIs(name, "connection")) {
+                    if (containsTokenIgnoreCase(value, "close")) self._base.connection_close = true;
+                } else if (headerIs(name, "content-length")) {
+                    const parsed = std.fmt.parseInt(usize, value, 10) catch return error.BadRequest;
+                    if (content_length) |prev| {
+                        if (prev != parsed) return error.BadRequest;
                     } else {
-                        line = seg;
-                        if (line.len != 0 and line[line.len - 1] == '\r') {
-                            line = line[0 .. line.len - 1];
-                        }
+                        content_length = parsed;
                     }
-                    if (line.len == 0) {
-                        r.toss(nl + 1);
-                        done = true;
-                        break;
-                    }
+                } else if (headerIs(name, "transfer-encoding")) {
+                    if (containsTokenIgnoreCase(value, "chunked")) has_chunked = true;
+                }
 
-                    const col = std.mem.indexOfScalarPos(u8, line, 1, ':') orelse return error.BadRequest;
-                    const name = line[0..col];
-                    var value = line[col + 1 ..];
-                    value = trimSpaces(value);
-
-                    if (headerIs(name, "connection")) {
-                        if (containsTokenIgnoreCase(value, "close")) self._base.connection_close = true;
-                    } else if (headerIs(name, "content-length")) {
-                        const parsed = std.fmt.parseInt(usize, value, 10) catch return error.BadRequest;
-                        if (content_length) |prev| {
-                            if (prev != parsed) return error.BadRequest;
-                        } else {
-                            content_length = parsed;
-                        }
-                    } else if (headerIs(name, "transfer-encoding")) {
-                        if (containsTokenIgnoreCase(value, "chunked")) has_chunked = true;
-                    }
-
-                    if (HeaderLookup.count != 0) {
-                        if (HeaderLookup.find(name)) |idx| {
-                            present[idx] = true;
-                            const h_fields = comptime parse.structFields(Headers);
-                            inline for (h_fields, 0..) |f, fi| {
-                                if (idx == @as(u16, @intCast(fi))) {
-                                    try @field(self._headers, f.name).parse(a, value);
-                                    break;
-                                }
+                if (HeaderLookup.count != 0) {
+                    if (HeaderLookup.find(name)) |idx| {
+                        present[idx] = true;
+                        const h_fields = comptime parse.structFields(Headers);
+                        inline for (h_fields, 0..) |f, fi| {
+                            if (idx == @as(u16, @intCast(fi))) {
+                                try @field(self._headers, f.name).parse(a, value);
+                                break;
                             }
                         }
                     }
-
-                    if (in_accum) {
-                        line_buf.clearRetainingCapacity();
-                        in_accum = false;
-                    }
-                    line_start = nl + 1;
-                    search_pos = line_start;
                 }
-
-                if (done) {
-                    break;
-                }
-
-                if (line_start < available.len) {
-                    const rest = available[line_start..available.len];
-                    total += rest.len;
-                    if (total > max_header_bytes) return error.HeadersTooLarge;
-                    if (!in_accum) {
-                        if (!line_buf_inited) {
-                            line_buf = .empty;
-                            line_buf_inited = true;
-                        } else {
-                            line_buf.clearRetainingCapacity();
-                        }
-                        in_accum = true;
-                    }
-                    try line_buf.appendSlice(a, rest);
-                }
-                r.toss(available.len);
             }
 
             if (has_chunked and content_length != null) return error.BadRequest;
@@ -725,17 +663,6 @@ fn RequestPWithPatternExt(
 
         fn readExact(r: *Io.Reader, buf: []u8) Io.Reader.Error!void {
             try r.readSliceAll(buf);
-        }
-
-        fn sendContinueIfNeeded(self: *Self) Io.Writer.Error!void {
-            if (!self._base.expect_continue_approved or self._base.expect_continue_sent) return;
-            if (self._base.body_kind == .none) return;
-            const w = self._base.writer orelse return;
-            try w.writeAll("HTTP/1.1 100 Continue\r\n\r\n");
-            if (w.buffered().len != 0) {
-                try w.flush();
-            }
-            self._base.expect_continue_sent = true;
         }
 
         fn bodyAllFrom(self: *Self, a: Allocator, r: *Io.Reader, max_bytes: usize) ![]const u8 {
@@ -794,7 +721,6 @@ fn RequestPWithPatternExt(
         /// Requires headers to have been parsed for this request.
         pub fn bodyAll(self: *Self, max_bytes: usize) ![]const u8 {
             const r = self._base.reader orelse return error.BadRequest;
-            try self.sendContinueIfNeeded();
             return bodyAllFrom(self, self._base.arena, r, max_bytes);
         }
 
@@ -850,93 +776,45 @@ fn RequestPWithPatternExt(
         /// Requires headers to have been parsed for this request.
         pub fn discardUnreadBody(self: *Self) !void {
             const r = self._base.reader orelse return error.BadRequest;
-            try self.sendContinueIfNeeded();
             return discardUnreadBodyFrom(self, r);
         }
     };
 }
 
-/// Implements request pwith pattern.
-pub fn RequestPWithPattern(
-    comptime Headers: type,
-    comptime Query: type,
-    comptime Params: type,
-    comptime param_names: []const []const u8,
-    comptime MwCtx: type,
-    comptime route_pattern: []const u8,
-    comptime method_name: []const u8,
-) type {
-    return RequestPWithPatternExt(Headers, Query, Params, param_names, MwCtx, struct {}, route_pattern, method_name, void);
-}
-
-/// Implements request pwith pattern static.
-pub fn RequestPWithPatternStatic(
-    comptime Headers: type,
-    comptime Query: type,
-    comptime Params: type,
-    comptime param_names: []const []const u8,
-    comptime MwCtx: type,
-    comptime MwStaticCtx: type,
-    comptime route_pattern: []const u8,
-    comptime method_name: []const u8,
-) type {
-    return RequestPWithPatternExt(Headers, Query, Params, param_names, MwCtx, MwStaticCtx, route_pattern, method_name, void);
-}
-
-/// Implements request pwith pattern ctx.
-pub fn RequestPWithPatternCtx(
-    comptime Headers: type,
-    comptime Query: type,
-    comptime Params: type,
-    comptime param_names: []const []const u8,
-    comptime MwCtx: type,
-    comptime route_pattern: []const u8,
-    comptime method_name: []const u8,
-    comptime CtxPtr: type,
-) type {
-    return RequestPWithPatternExt(Headers, Query, Params, param_names, MwCtx, struct {}, route_pattern, method_name, CtxPtr);
-}
-
 /// Implements request pwith pattern ctx static.
 pub fn RequestPWithPatternCtxStatic(
-    comptime Headers: type,
-    comptime Query: type,
-    comptime Params: type,
+    comptime route_decl: RequestRouteDecl,
     comptime param_names: []const []const u8,
     comptime MwCtx: type,
     comptime MwStaticCtx: type,
-    comptime route_pattern: []const u8,
-    comptime method_name: []const u8,
-    comptime CtxPtr: type,
+    comptime ServerPtr: type,
 ) type {
-    return RequestPWithPatternExt(Headers, Query, Params, param_names, MwCtx, MwStaticCtx, route_pattern, method_name, CtxPtr);
+    return RequestPWithPatternExt(
+        route_decl.headers,
+        route_decl.query,
+        route_decl.params,
+        param_names,
+        MwCtx,
+        MwStaticCtx,
+        route_decl.pattern,
+        route_decl.method,
+        ServerPtr,
+    );
 }
 
 /// Implements request.
 pub fn Request(comptime Headers: type, comptime Query: type, comptime param_names: []const []const u8, comptime MwCtx: type) type {
-    return RequestPWithPattern(Headers, Query, struct {}, param_names, MwCtx, "", "GET");
-}
-
-/// Implements request with pattern.
-pub fn RequestWithPattern(
-    comptime Headers: type,
-    comptime Query: type,
-    comptime param_names: []const []const u8,
-    comptime MwCtx: type,
-    comptime route_pattern: []const u8,
-) type {
-    return RequestPWithPattern(Headers, Query, struct {}, param_names, MwCtx, route_pattern, "GET");
-}
-
-/// Implements request p.
-pub fn RequestP(
-    comptime Headers: type,
-    comptime Query: type,
-    comptime Params: type,
-    comptime param_names: []const []const u8,
-    comptime MwCtx: type,
-) type {
-    return RequestPWithPattern(Headers, Query, Params, param_names, MwCtx, "", "GET");
+    return RequestPWithPatternExt(
+        Headers,
+        Query,
+        struct {},
+        param_names,
+        MwCtx,
+        struct {},
+        "",
+        "GET",
+        *struct { io: Io, ctx: void },
+    );
 }
 
 const TestMwCtx = struct {};
@@ -1050,17 +928,6 @@ test "request line: borrowed parses path/query" {
     try std.testing.expectEqual(Version.http11, line.version);
     try std.testing.expectEqualStrings("/a/b", line.path);
     try std.testing.expectEqualStrings("x=1", line.query);
-}
-
-test "request line: owned duplicates path/query" {
-    var r = Io.Reader.fixed("GET /hello HTTP/1.1\r\n");
-    const gpa = std.testing.allocator;
-    const line = try parseRequestLine(&r, gpa, 8 * 1024);
-    defer gpa.free(line.method);
-    defer gpa.free(line.path);
-    defer gpa.free(line.query);
-    try std.testing.expectEqualStrings("/hello", line.path);
-    try std.testing.expectEqualStrings("", line.query);
 }
 
 test "request line: rejects non-absolute path target" {
@@ -1301,7 +1168,7 @@ test "bodyAll: content-length" {
     try std.testing.expectEqualStrings("hello", body);
 }
 
-test "bodyAll: approved expect emits interim 100-continue once" {
+test "bodyAll: does not emit interim 100-continue by itself" {
     const ReqT = Request(struct {}, struct {}, &.{}, TestMwCtx);
     const gpa = std.testing.allocator;
     const path = try gpa.dupe(u8, "/");
@@ -1315,8 +1182,6 @@ test "bodyAll: approved expect emits interim 100-continue once" {
 
     var r = Io.Reader.fixed("Content-Length: 5\r\n\r\nhello");
     try reqv.parseHeaders(gpa, &r, 8 * 1024);
-    reqv.approveExpectContinue();
-
     var out: [128]u8 = undefined;
     var w = Io.Writer.fixed(out[0..]);
     reqv.setWriter(&w);
@@ -1324,11 +1189,11 @@ test "bodyAll: approved expect emits interim 100-continue once" {
     const body = try reqv.bodyAll(16);
     defer gpa.free(body);
     try std.testing.expectEqualStrings("hello", body);
-    try std.testing.expectEqualStrings("HTTP/1.1 100 Continue\r\n\r\n", out[0..w.end]);
+    try std.testing.expectEqual(@as(usize, 0), w.end);
 
     const empty = try reqv.bodyAll(16);
     try std.testing.expectEqualStrings("", empty);
-    try std.testing.expectEqualStrings("HTTP/1.1 100 Continue\r\n\r\n", out[0..w.end]);
+    try std.testing.expectEqual(@as(usize, 0), w.end);
 }
 
 test "bodyAll: max_bytes enforced" {
@@ -1348,7 +1213,7 @@ test "bodyAll: max_bytes enforced" {
     try std.testing.expectError(error.PayloadTooLarge, reqv.bodyAll(4));
 }
 
-test "discardUnreadBody: approved expect emits interim 100-continue" {
+test "discardUnreadBody: does not emit interim 100-continue by itself" {
     const ReqT = Request(struct {}, struct {}, &.{}, TestMwCtx);
     const gpa = std.testing.allocator;
     const path = try gpa.dupe(u8, "/");
@@ -1362,14 +1227,12 @@ test "discardUnreadBody: approved expect emits interim 100-continue" {
     defer reqv.deinit(gpa);
     var r = Io.Reader.fixed("Content-Length: 5\r\n\r\nhello");
     try reqv.parseHeaders(gpa, &r, 8 * 1024);
-    reqv.approveExpectContinue();
-
     var out: [128]u8 = undefined;
     var w = Io.Writer.fixed(out[0..]);
     reqv.setWriter(&w);
 
     try reqv.discardUnreadBody();
-    try std.testing.expectEqualStrings("HTTP/1.1 100 Continue\r\n\r\n", out[0..w.end]);
+    try std.testing.expectEqual(@as(usize, 0), w.end);
 }
 
 test "query: required missing rejected" {
@@ -1585,31 +1448,6 @@ test "fuzz: parseRequestLineBorrowed" {
             buf[len - 1] = '\n';
             var r = Io.Reader.fixed(buf[0..len]);
             _ = parseRequestLineBorrowed(&r, 8 * 1024) catch {};
-        }
-    }.testOne, .{ .corpus = corpus });
-}
-
-test "fuzz: parseRequestLine owned alloc/free" {
-    const corpus = &.{
-        "GET / HTTP/1.1\r\n",
-        "PUT /hello HTTP/1.1\r\n",
-        "X / HTTP/1.1\r\n",
-    };
-    try std.testing.fuzz({}, struct {
-        fn testOne(_: void, smith: *std.testing.Smith) !void {
-            var buf: [256]u8 = undefined;
-            const max: u16 = @intCast(buf.len);
-            const len_u16 = smith.valueRangeAtMost(u16, 1, max);
-            const len: usize = @intCast(len_u16);
-            smith.bytes(buf[0..len]);
-            buf[len - 1] = '\n';
-            var r = Io.Reader.fixed(buf[0..len]);
-            const gpa = std.testing.allocator;
-            if (parseRequestLine(&r, gpa, 8 * 1024)) |line| {
-                defer gpa.free(line.method);
-                defer gpa.free(line.path);
-                defer gpa.free(line.query);
-            } else |_| {}
         }
     }.testOne, .{ .corpus = corpus });
 }

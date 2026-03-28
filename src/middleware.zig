@@ -1,6 +1,7 @@
 const std = @import("std");
 const parse = @import("parse.zig");
 const req_ctx = @import("req_ctx.zig");
+const request = @import("request.zig");
 
 comptime {
     @setEvalBranchQuota(200_000);
@@ -15,7 +16,7 @@ pub const MiddlewareInfo = struct {
     ///
     /// If set, initialization runs once at server startup per route.
     /// When this type exposes
-    /// `pub fn init(io: std.Io, allocator: std.mem.Allocator, route_decl: anytype) Self|!Self`,
+    /// `pub fn init(io: std.Io, allocator: std.mem.Allocator, route_decl: zhttp.request.RequestRouteDecl) Self|!Self`,
     /// that function is used to build the route-local context value and any init error
     /// is returned from `Server.init`.
     static_context: ?type = null,
@@ -26,6 +27,8 @@ pub const MiddlewareInfo = struct {
     /// Optional header capture type required by this middleware.
     header: ?type = null,
 };
+
+pub const StaticContextRouteDecl = request.RequestRouteDecl;
 
 /// Validates and returns middleware metadata.
 pub fn info(comptime Mw: type) MiddlewareInfo {
@@ -156,7 +159,7 @@ fn initData(comptime Mw: type) dataType(Mw) {
     return std.mem.zeroes(Data);
 }
 
-fn initStaticContextValue(comptime StaticContext: type, io: std.Io, allocator: std.mem.Allocator, route_decl: anytype) !StaticContext {
+fn initStaticContextValue(comptime StaticContext: type, io: std.Io, allocator: std.mem.Allocator, route_decl: StaticContextRouteDecl) !StaticContext {
     if (@hasDecl(StaticContext, "init")) {
         const init_fn = StaticContext.init;
         const ret = @call(.auto, init_fn, .{ io, allocator, route_decl });
@@ -322,7 +325,7 @@ pub fn initStaticContext(
     comptime Ctx: type,
     io: std.Io,
     allocator: std.mem.Allocator,
-    route_decl: anytype,
+    route_decl: StaticContextRouteDecl,
 ) !Ctx {
     var ctx: Ctx = std.mem.zeroes(Ctx);
     inline for (std.meta.fields(Ctx)) |f| {

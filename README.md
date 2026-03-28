@@ -152,6 +152,7 @@ See [`examples/builtin_middlewares.zig`](./examples/builtin_middlewares.zig) for
 - `examples/basic_server.zig`
 - `examples/middleware.zig`
 - `examples/builtin_middlewares.zig`
+- `examples/route_static_access.zig`
 - `examples/echo_body.zig`
 - `examples/fast_plaintext.zig`
 

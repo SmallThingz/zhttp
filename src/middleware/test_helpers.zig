@@ -48,7 +48,7 @@ pub fn runMiddlewareTest(
     const ReqW = rctx.T();
     const reqw: ReqW = .{
         ._base = reqv,
-        .path = reqv.rawPath(),
+        .path = ReqT.path,
         .method = method,
     };
     return rctx.run(reqw);

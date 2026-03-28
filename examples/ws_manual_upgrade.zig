@@ -88,7 +88,7 @@ const Handshake = struct {
     }
 
     pub fn upgrade(
-        server: anytype,
+        server: *Server,
         stream: *const std.Io.net.Stream,
         r: *Io.Reader,
         w: *Io.Writer,
@@ -114,7 +114,7 @@ fn closeForProtocolError(conn: *zws.ServerConn, w: *Io.Writer, err: anyerror) vo
 }
 
 fn onUpgrade(
-    server: anytype,
+    server: *Server,
     stream: *const std.Io.net.Stream,
     r: *Io.Reader,
     w: *Io.Writer,

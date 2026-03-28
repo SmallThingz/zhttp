@@ -100,6 +100,7 @@ pub fn build(b: *std.Build) void {
         .{ .name = "basic_server", .path = "examples/basic_server.zig", .uses_zws = false },
         .{ .name = "middleware", .path = "examples/middleware.zig", .uses_zws = false },
         .{ .name = "builtin_middlewares", .path = "examples/builtin_middlewares.zig", .uses_zws = false },
+        .{ .name = "route_static_access", .path = "examples/route_static_access.zig", .uses_zws = false },
         .{ .name = "upgrade_helper", .path = "examples/upgrade_helper.zig", .uses_zws = false },
         .{ .name = "echo_body", .path = "examples/echo_body.zig", .uses_zws = false },
         .{ .name = "fast_plaintext", .path = "examples/fast_plaintext.zig", .uses_zws = false },

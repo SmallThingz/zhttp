@@ -18,6 +18,13 @@ pub const ExpectOptions = struct {
     body: []const u8 = "expectation failed\n",
 };
 
+const ExpectState = struct {
+    /// True when `Expect: 100-continue` has been accepted for this request.
+    approved: bool = false,
+    /// True once interim `100 Continue` has already been emitted.
+    sent: bool = false,
+};
+
 fn is100Continue(value: []const u8) bool {
     return std.ascii.eqlIgnoreCase(std.mem.trim(u8, value, " \t"), "100-continue");
 }
@@ -35,6 +42,7 @@ pub fn Expect(comptime opts: ExpectOptions) type {
     return struct {
         pub const Info = MiddlewareInfo{
             .name = info_name,
+            .data = ExpectState,
             .header = struct {
                 /// Captured request `Expect` header value.
                 expect: parse.Optional(parse.String),
@@ -43,9 +51,12 @@ pub fn Expect(comptime opts: ExpectOptions) type {
 
         /// Executes Expect-header validation for the current request.
         pub fn call(comptime rctx: ReqCtx, req: rctx.T()) !Res {
+            const state = req.middlewareData(info_name);
+            state.approved = false;
+            state.sent = false;
             const expect_value = req.header(.expect) orelse return rctx.next(req);
             if (is100Continue(expect_value)) {
-                req.raw().approveExpectContinue();
+                state.approved = true;
                 return rctx.next(req);
             }
 
@@ -56,12 +67,44 @@ pub fn Expect(comptime opts: ExpectOptions) type {
             res.close = true;
             return res;
         }
+
+        /// Overrides request body readers to emit interim `100 Continue` once.
+        pub fn Override(comptime rctx: ReqCtx) type {
+            return struct {
+                fn sendContinueIfNeeded(req: *rctx.T()) void {
+                    const state = req.middlewareData(info_name);
+                    if (!state.approved or state.sent) return;
+
+                    const base = req.baseMut();
+                    if (base.body_kind == .none) return;
+
+                    const w = req.raw().writer() orelse return;
+                    w.writeAll("HTTP/1.1 100 Continue\r\n\r\n") catch return;
+                    if (w.buffered().len != 0) {
+                        w.flush() catch return;
+                    }
+                    state.sent = true;
+                }
+
+                pub fn bodyAll(req: *rctx.T(), max_bytes: usize) @TypeOf(req.bodyAll(max_bytes)) {
+                    sendContinueIfNeeded(req);
+                    return req.bodyAll(max_bytes);
+                }
+
+                pub fn discardUnreadBody(req: *rctx.T()) @TypeOf(req.discardUnreadBody()) {
+                    sendContinueIfNeeded(req);
+                    return req.discardUnreadBody();
+                }
+            };
+        }
     };
 }
 
 test "expect middleware: missing header passes through" {
     const Mw = Expect(.{});
-    const MwCtx = struct {};
+    const MwCtx = struct {
+        expect: Mw.Info.data.?,
+    };
     const ReqT = @import("../request.zig").Request(struct {
         /// Captured request `Expect` header value.
         expect: parse.Optional(parse.String),
@@ -84,18 +127,21 @@ test "expect middleware: missing header passes through" {
         .path = @constCast(path_buf[0..]),
         .query = @constCast(query_buf[0..]),
     };
-    const mw_ctx: MwCtx = .{};
+    const mw_ctx: MwCtx = .{ .expect = .{} };
     var reqv = ReqT.init(gpa, std.testing.io, line, mw_ctx);
     defer reqv.deinit(gpa);
 
     const res = try test_helpers.runMiddlewareTest(Mw, ReqT, Next, &reqv, line.method);
     try std.testing.expectEqual(@as(u16, 200), @intFromEnum(res.status));
-    try std.testing.expect(!reqv.baseConst().expect_continue_approved);
+    try std.testing.expect(!reqv.middlewareDataConst("expect").approved);
+    try std.testing.expect(!reqv.middlewareDataConst("expect").sent);
 }
 
 test "expect middleware: accepts 100-continue and marks request approved" {
     const Mw = Expect(.{});
-    const MwCtx = struct {};
+    const MwCtx = struct {
+        expect: Mw.Info.data.?,
+    };
     const ReqT = @import("../request.zig").Request(struct {
         /// Captured request `Expect` header value.
         expect: parse.Optional(parse.String),
@@ -118,7 +164,7 @@ test "expect middleware: accepts 100-continue and marks request approved" {
         .path = @constCast(path_buf[0..]),
         .query = @constCast(query_buf[0..]),
     };
-    const mw_ctx: MwCtx = .{};
+    const mw_ctx: MwCtx = .{ .expect = .{} };
     var reqv = ReqT.init(gpa, std.testing.io, line, mw_ctx);
     defer reqv.deinit(gpa);
     reqv.headersMut().expect = .{
@@ -128,12 +174,15 @@ test "expect middleware: accepts 100-continue and marks request approved" {
 
     const res = try test_helpers.runMiddlewareTest(Mw, ReqT, Next, &reqv, line.method);
     try std.testing.expectEqual(@as(u16, 200), @intFromEnum(res.status));
-    try std.testing.expect(reqv.baseConst().expect_continue_approved);
+    try std.testing.expect(reqv.middlewareDataConst("expect").approved);
+    try std.testing.expect(!reqv.middlewareDataConst("expect").sent);
 }
 
 test "expect middleware: rejects unsupported expectation with close" {
     const Mw = Expect(.{});
-    const MwCtx = struct {};
+    const MwCtx = struct {
+        expect: Mw.Info.data.?,
+    };
     const ReqT = @import("../request.zig").Request(struct {
         /// Captured request `Expect` header value.
         expect: parse.Optional(parse.String),
@@ -156,7 +205,7 @@ test "expect middleware: rejects unsupported expectation with close" {
         .path = @constCast(path_buf[0..]),
         .query = @constCast(query_buf[0..]),
     };
-    const mw_ctx: MwCtx = .{};
+    const mw_ctx: MwCtx = .{ .expect = .{} };
     var reqv = ReqT.init(gpa, std.testing.io, line, mw_ctx);
     defer reqv.deinit(gpa);
     reqv.headersMut().expect = .{

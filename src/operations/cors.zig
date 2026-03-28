@@ -18,7 +18,7 @@ pub const Cors = struct {
 
     const DefaultOptionsEndpoint = struct {
         pub const Info: router.EndpointInfo = .{};
-        pub fn call(comptime _: @import("../req_ctx.zig").ReqCtx, req: anytype) !response.Res {
+        pub fn call(comptime rctx: @import("../req_ctx.zig").ReqCtx, req: rctx.T()) !response.Res {
             _ = req;
             return response.Res.text(404, "not found");
         }
@@ -68,7 +68,7 @@ test "cors operation adds one OPTIONS route per matched path" {
                 .middlewares = &.{Mw},
                 .operations = &.{Cors},
             };
-            pub fn call(comptime _: @import("../req_ctx.zig").ReqCtx, req: anytype) !Res {
+            pub fn call(comptime rctx: @import("../req_ctx.zig").ReqCtx, req: rctx.T()) !Res {
                 _ = req;
                 return Res.text(200, "ok");
             }
@@ -78,14 +78,14 @@ test "cors operation adds one OPTIONS route per matched path" {
                 .middlewares = &.{Mw},
                 .operations = &.{Cors},
             };
-            pub fn call(comptime _: @import("../req_ctx.zig").ReqCtx, req: anytype) !Res {
+            pub fn call(comptime rctx: @import("../req_ctx.zig").ReqCtx, req: rctx.T()) !Res {
                 _ = req;
                 return Res.text(200, "ok");
             }
         }),
         router.get("/b", struct {
             pub const Info: router.EndpointInfo = .{};
-            pub fn call(comptime _: @import("../req_ctx.zig").ReqCtx, req: anytype) !Res {
+            pub fn call(comptime rctx: @import("../req_ctx.zig").ReqCtx, req: rctx.T()) !Res {
                 _ = req;
                 return Res.text(200, "ok");
             }

@@ -82,10 +82,10 @@ pub fn Logger(comptime opts: LoggerOptions) type {
             }
 
             if (log_fn) |f| {
-                @call(.auto, f, .{ req.method, req.rawPath(), @intFromEnum(res.status), elapsed });
+                @call(.auto, f, .{ req.method, req.path, @intFromEnum(res.status), elapsed });
             } else {
                 const ms = elapsed.toMilliseconds();
-                std.debug.print("{s} {s} {d} {d}ms\n", .{ req.method, req.rawPath(), res.status, ms });
+                std.debug.print("{s} {s} {d} {d}ms\n", .{ req.method, req.path, res.status, ms });
             }
             return res;
         }
@@ -104,7 +104,15 @@ test "logger: invokes log function" {
     log_state = .{};
     const Mw = Logger(.{ .log = testLog });
     const MwCtx = struct {};
-    const ReqT = @import("../request.zig").Request(struct {}, struct {}, &.{}, MwCtx);
+    const req = @import("../request.zig");
+    const ReqDecl: req.RequestRouteDecl = .{
+        .headers = struct {},
+        .query = struct {},
+        .params = struct {},
+        .pattern = "/x",
+        .method = "GET",
+    };
+    const ReqT = req.RequestPWithPatternCtxStatic(ReqDecl, &.{}, MwCtx, struct {}, *struct { io: Io, ctx: void });
 
     const Next = struct {
         /// Test helper next-handler implementation.

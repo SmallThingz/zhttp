@@ -46,8 +46,8 @@ pub fn Etag(comptime opts: anytype) type {
             };
         };
 
-        pub fn call(comptime Next: type, next: Next, ctx: anytype, req: anytype) !Res {
-            var res = try next.call(ctx, req);
+        pub fn call(comptime Next: type, next: Next, req: anytype) !Res {
+            var res = try next.call(req);
             if (res.body.len == 0) return res;
             if (util.hasHeader(res.headers, "etag")) return res;
 

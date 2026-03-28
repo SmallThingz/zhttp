@@ -16,8 +16,8 @@ pub fn SecurityHeaders(comptime opts: anytype) type {
     const corp: ?[]const u8 = if (@hasField(@TypeOf(opts), "cross_origin_resource_policy")) opts.cross_origin_resource_policy else null;
 
     return struct {
-        pub fn call(comptime Next: type, next: Next, ctx: anytype, req: anytype) !Res {
-            var res = try next.call(ctx, req);
+        pub fn call(comptime Next: type, next: Next, req: anytype) !Res {
+            var res = try next.call(req);
             const a = req.allocator();
 
             var hdrs: [9]Header = undefined;
@@ -80,7 +80,7 @@ test "security_headers: default headers present" {
     const ReqT = @import("../request.zig").Request(struct {}, struct {}, &.{}, MwCtx);
 
     const Next = struct {
-        pub fn call(_: @This(), _: void, _: anytype) !Res {
+        pub fn call(_: @This(), _: anytype) !Res {
             return Res.text(200, "ok");
         }
     };
@@ -98,7 +98,7 @@ test "security_headers: default headers present" {
     var reqv = ReqT.init(gpa, std.testing.io, line, mw_ctx);
     defer reqv.deinit(gpa);
 
-    const res = try Mw.call(Next, Next{}, {}, &reqv);
+    const res = try Mw.call(Next, Next{}, &reqv);
     try std.testing.expect(hasHeader(res.headers, "x-content-type-options"));
     try std.testing.expect(hasHeader(res.headers, "x-frame-options"));
     try std.testing.expect(hasHeader(res.headers, "referrer-policy"));

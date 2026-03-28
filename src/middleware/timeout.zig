@@ -26,7 +26,7 @@ pub fn Timeout(comptime opts: anytype) type {
     const Common = struct {
         pub const Data = DataT;
 
-        fn handle(comptime Next: type, next: Next, ctx: anytype, req: anytype, data_opt: ?*DataT) !Res {
+        fn handle(comptime Next: type, next: Next, req: anytype, data_opt: ?*DataT) !Res {
             const start = Io.Timestamp.now(req.io(), clock);
             if (store) {
                 if (data_opt) |d| {
@@ -35,7 +35,7 @@ pub fn Timeout(comptime opts: anytype) type {
                 }
             }
 
-            const res = try next.call(ctx, req);
+            const res = try next.call(req);
             const elapsed = start.untilNow(req.io(), clock);
 
             if (store) {
@@ -55,13 +55,13 @@ pub fn Timeout(comptime opts: anytype) type {
     return if (store) struct {
         pub const Data = Common.Data;
         pub const name = opts.name;
-        pub fn call(comptime Next: type, next: Next, ctx: anytype, req: anytype, data: *DataT) !Res {
-            return Common.handle(Next, next, ctx, req, data);
+        pub fn call(comptime Next: type, next: Next, req: anytype, data: *DataT) !Res {
+            return Common.handle(Next, next, req, data);
         }
     } else struct {
         pub const Data = Common.Data;
-        pub fn call(comptime Next: type, next: Next, ctx: anytype, req: anytype) !Res {
-            return Common.handle(Next, next, ctx, req, null);
+        pub fn call(comptime Next: type, next: Next, req: anytype) !Res {
+            return Common.handle(Next, next, req, null);
         }
     };
 }
@@ -72,7 +72,7 @@ test "timeout: immediate timeout" {
     const ReqT = @import("../request.zig").Request(struct {}, struct {}, &.{}, MwCtx);
 
     const Next = struct {
-        pub fn call(_: @This(), _: void, _: anytype) !Res {
+        pub fn call(_: @This(), _: anytype) !Res {
             return Res.text(200, "ok");
         }
     };
@@ -90,6 +90,6 @@ test "timeout: immediate timeout" {
     var reqv = ReqT.init(gpa, std.testing.io, line, mw_ctx);
     defer reqv.deinit(gpa);
 
-    const res = try Mw.call(Next, Next{}, {}, &reqv);
+    const res = try Mw.call(Next, Next{}, &reqv);
     try std.testing.expectEqual(@as(u16, 504), @intFromEnum(res.status));
 }

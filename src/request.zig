@@ -189,6 +189,7 @@ fn RequestPWithPatternExt(
     comptime MwCtx: type,
     comptime route_pattern: []const u8,
     comptime method_name: []const u8,
+    comptime CtxPtr: type,
 ) type {
     const HeaderLookup = parse.Lookup(Headers, .header);
     const QueryLookup = parse.Lookup(Query, .query);
@@ -228,6 +229,7 @@ fn RequestPWithPatternExt(
         comptime path: []const u8 = route_pattern,
         comptime method: []const u8 = method_name,
         _base: Base,
+        _ctx: CtxPtr,
         _mw_ctx: MwCtx,
         _headers: Headers = parse.emptyStruct(Headers),
         _query: Query = parse.emptyStruct(Query),
@@ -237,7 +239,7 @@ fn RequestPWithPatternExt(
 
         pub const ParamNames: []const []const u8 = param_names;
 
-        pub fn init(init_arena: Allocator, init_io: Io, line: RequestLine, mw_ctx: MwCtx) Self {
+        pub fn initWithCtx(init_arena: Allocator, init_io: Io, line: RequestLine, mw_ctx: MwCtx, app_ctx: CtxPtr) Self {
             return .{
                 ._base = .{
                     .io = init_io,
@@ -246,8 +248,26 @@ fn RequestPWithPatternExt(
                     .path_raw = line.path,
                     .query_raw = line.query,
                 },
+                ._ctx = app_ctx,
                 ._mw_ctx = mw_ctx,
             };
+        }
+
+        pub fn init(init_arena: Allocator, init_io: Io, line: RequestLine, mw_ctx: MwCtx) Self {
+            if (CtxPtr != void) @compileError("Request.init requires void app context; use initWithCtx for non-void context");
+            return initWithCtx(init_arena, init_io, line, mw_ctx, {});
+        }
+
+        pub fn ctx(self: *Self) CtxPtr {
+            return self._ctx;
+        }
+
+        pub fn ctxConst(self: *const Self) CtxPtr {
+            return self._ctx;
+        }
+
+        pub fn setCtx(self: *Self, value: CtxPtr) void {
+            self._ctx = value;
         }
 
         pub fn allocator(self: *const Self) Allocator {
@@ -690,7 +710,20 @@ pub fn RequestPWithPattern(
     comptime route_pattern: []const u8,
     comptime method_name: []const u8,
 ) type {
-    return RequestPWithPatternExt(Headers, Query, Params, param_names, MwCtx, route_pattern, method_name);
+    return RequestPWithPatternExt(Headers, Query, Params, param_names, MwCtx, route_pattern, method_name, void);
+}
+
+pub fn RequestPWithPatternCtx(
+    comptime Headers: type,
+    comptime Query: type,
+    comptime Params: type,
+    comptime param_names: []const []const u8,
+    comptime MwCtx: type,
+    comptime route_pattern: []const u8,
+    comptime method_name: []const u8,
+    comptime CtxPtr: type,
+) type {
+    return RequestPWithPatternExt(Headers, Query, Params, param_names, MwCtx, route_pattern, method_name, CtxPtr);
 }
 
 pub fn Request(comptime Headers: type, comptime Query: type, comptime param_names: []const []const u8, comptime MwCtx: type) type {

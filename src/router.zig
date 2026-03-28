@@ -909,22 +909,14 @@ pub fn Compiled(
     };
 
     const Dispatch = struct {
-        fn handlerCall(comptime handler: anytype, ctx: anytype, reqp: anytype) !Res {
+        fn handlerCall(comptime handler: anytype, reqp: anytype) !Res {
             const Ht = @TypeOf(handler);
             const info = @typeInfo(Ht);
             if (info != .@"fn") @compileError("handler must be a function");
             const params = info.@"fn".params;
             if (params.len == 0) return @call(.auto, handler, .{});
-            if (params.len == 1) {
-                if (@TypeOf(ctx) != void) {
-                    if (params[0].type) |pt| {
-                        if (pt == @TypeOf(ctx)) return @call(.auto, handler, .{ctx});
-                    }
-                }
-                return @call(.auto, handler, .{reqp});
-            }
-            if (params.len == 2) return @call(.auto, handler, .{ ctx, reqp });
-            @compileError("handler must be fn(), fn(req), fn(ctx), or fn(ctx, req)");
+            if (params.len == 1) return @call(.auto, handler, .{reqp});
+            @compileError("handler must be fn() or fn(req). Access app context via req.ctx()");
         }
 
         fn middlewareCallUsesData(comptime Mw: type) bool {
@@ -932,20 +924,20 @@ pub fn Compiled(
             const info = @typeInfo(@TypeOf(Mw.call));
             if (info != .@"fn") @compileError(@typeName(Mw) ++ ".call must be a function");
             const params = info.@"fn".params;
-            if (params.len == 5) {
+            if (params.len == 4) {
                 if (!middlewareHasStoredData(Mw)) {
                     @compileError(@typeName(Mw) ++ ".call takes a data param but middleware has no stored data");
                 }
                 const Data = middlewareDataType(Mw);
-                if (params[4].type) |pt| {
+                if (params[3].type) |pt| {
                     if (pt == *Data or pt == *const Data) return true;
                     @compileError(@typeName(Mw) ++ ".call data param must be *Data or *const Data");
                 }
                 @compileError(@typeName(Mw) ++ ".call data param must be *Data or *const Data");
             }
-            if (params.len == 4) return false;
+            if (params.len == 3) return false;
             if (params.len == 2) return false;
-            @compileError(@typeName(Mw) ++ ".call must take (rctx, req) or (Next, next, ctx, req[, data])");
+            @compileError(@typeName(Mw) ++ ".call must take (rctx, req) or (Next, next, req[, data])");
         }
 
         fn middlewareDataPtr(comptime Mw: type, mw_ctx: anytype) ?*middlewareDataType(Mw) {
@@ -954,7 +946,7 @@ pub fn Compiled(
             return &@field(mw_ctx.*, name);
         }
 
-        fn Chain(comptime MwTuple: anytype, comptime handler: anytype, comptime CtxPtr: type, comptime ReqT: type, comptime MwCtx: type) type {
+        fn Chain(comptime MwTuple: anytype, comptime handler: anytype, comptime ReqT: type, comptime MwCtx: type) type {
             comptime {
                 @setEvalBranchQuota(50000);
             }
@@ -963,8 +955,8 @@ pub fn Compiled(
                 return struct {
                     mw_ctx: *MwCtx,
 
-                    pub fn call(_: @This(), ctx: CtxPtr, reqp: *ReqT) !Res {
-                        return handlerCall(handler, ctx, reqp);
+                    pub fn call(_: @This(), reqp: *ReqT) !Res {
+                        return handlerCall(handler, reqp);
                     }
                 };
             }
@@ -978,12 +970,12 @@ pub fn Compiled(
                 }
                 break :blk rest;
             };
-            const NextT = Chain(RestTypes, handler, CtxPtr, ReqT, MwCtx);
+            const NextT = Chain(RestTypes, handler, ReqT, MwCtx);
 
             return struct {
                 mw_ctx: *MwCtx,
 
-                pub fn call(self: @This(), ctx: CtxPtr, reqp: *ReqT) !Res {
+                pub fn call(self: @This(), reqp: *ReqT) !Res {
                     if (!@hasDecl(First, "call")) @compileError(@typeName(First) ++ " missing call");
                     const fn_info = @typeInfo(@TypeOf(First.call));
                     if (fn_info == .@"fn" and fn_info.@"fn".params.len == 2) {
@@ -991,12 +983,12 @@ pub fn Compiled(
                     }
                     if (comptime middlewareCallUsesData(First)) {
                         if (middlewareDataPtr(First, self.mw_ctx)) |stored| {
-                            return First.call(NextT, NextT{ .mw_ctx = self.mw_ctx }, ctx, reqp, stored);
+                            return First.call(NextT, NextT{ .mw_ctx = self.mw_ctx }, reqp, stored);
                         }
                         var empty = initMiddlewareData(First);
-                        return First.call(NextT, NextT{ .mw_ctx = self.mw_ctx }, ctx, reqp, &empty);
+                        return First.call(NextT, NextT{ .mw_ctx = self.mw_ctx }, reqp, &empty);
                     }
-                    return First.call(NextT, NextT{ .mw_ctx = self.mw_ctx }, ctx, reqp);
+                    return First.call(NextT, NextT{ .mw_ctx = self.mw_ctx }, reqp);
                 }
             };
         }
@@ -1222,10 +1214,10 @@ pub fn Compiled(
                     const P = parse.mergeStructs(NeedP, optionsField(rd.options, "params", struct {}));
                     const MwCtx = middlewareContextType(MwTuple);
                     const mw_ctx = initMiddlewareContext(MwTuple, MwCtx);
-                    const ReqT = request.RequestPWithPattern(H, Q, P, p.param_names, MwCtx, rd.pattern, rd.method);
+                    const ReqT = request.RequestPWithPatternCtx(H, Q, P, p.param_names, MwCtx, rd.pattern, rd.method, @TypeOf(server.ctx));
 
                     var params_local: [p.param_names.len][]u8 = undefined;
-                    var reqv = ReqT.init(allocator, server.io, line, mw_ctx);
+                    var reqv = ReqT.initWithCtx(allocator, server.io, line, mw_ctx, server.ctx);
                     reqv.setReader(r);
                     defer reqv.deinit(allocator);
                     errdefer reqv.discardUnreadBody() catch {};
@@ -1254,10 +1246,9 @@ pub fn Compiled(
 
                     try reqv.parseHeaders(allocator, r, max_header_bytes);
 
-                    const CtxPtr = if (@TypeOf(server.ctx) == void) void else @TypeOf(server.ctx);
-                    const ChainT = Dispatch.Chain(MwTuple, rd.handler, CtxPtr, ReqT, MwCtx);
+                    const ChainT = Dispatch.Chain(MwTuple, rd.handler, ReqT, MwCtx);
                     const chain = ChainT{ .mw_ctx = reqv.mwCtxMut() };
-                    const res = chain.call(server.ctx, &reqv) catch |err| {
+                    const res = chain.call(&reqv) catch |err| {
                         reqv.discardUnreadBody() catch return .close;
                         const ServerT = @TypeOf(server.*);
                         return ServerT.handleHandlerError(server, w, @TypeOf(err), err);
@@ -1332,17 +1323,17 @@ test "router: exact + param + glob" {
     const App = struct {};
     const S = Compiled(App, .{
         get("/a", struct {
-            fn h(_: *App, _: anytype) !Res {
+            fn h() !Res {
                 return Res.text(200, "a");
             }
         }.h, .{}),
         get("/u/{id}", struct {
-            fn h(_: *App, _: anytype) !Res {
+            fn h() !Res {
                 return Res.text(200, "u");
             }
         }.h, .{}),
         get("/g/*", struct {
-            fn h(_: *App, _: anytype) !Res {
+            fn h() !Res {
                 return Res.text(200, "g");
             }
         }.h, .{}),
@@ -1361,7 +1352,7 @@ test "router: exact + param + glob" {
 test "router: trailing slash does not match exact literal" {
     const S = Compiled(void, .{
         get("/a", struct {
-            fn h(_: void, _: anytype) !Res {
+            fn h(_: anytype) !Res {
                 return Res.text(200, "a");
             }
         }.h, .{}),
@@ -1374,7 +1365,7 @@ test "router: trailing slash does not match exact literal" {
 test "router: HEAD falls back to GET handler" {
     const S = Compiled(void, .{
         get("/x", struct {
-            fn h(_: void, _: anytype) !Res {
+            fn h(_: anytype) !Res {
                 return Res.text(200, "ok");
             }
         }.h, .{}),
@@ -1393,14 +1384,14 @@ test "middleware Needs: supports 'headers: type = ...' form" {
             query: type = struct {},
         };
 
-        pub fn call(comptime Next: type, next: Next, _: void, req: anytype) !Res {
-            return next.call({}, req);
+        pub fn call(comptime Next: type, next: Next, req: anytype) !Res {
+            return next.call(req);
         }
     };
 
     _ = Compiled(void, .{
         get("/x", struct {
-            fn h(_: void, _: anytype) !Res {
+            fn h(_: anytype) !Res {
                 return Res.text(200, "x");
             }
         }.h, .{}),
@@ -1426,18 +1417,18 @@ test "middleware Info: supports header/query/path/data captures" {
             },
         };
 
-        pub fn call(comptime Next: type, next: Next, _: void, req: anytype, data: *Data) !Res {
+        pub fn call(comptime Next: type, next: Next, req: anytype, data: *Data) !Res {
             if (req.paramValue(.id) != 7) return Res.text(500, "bad-id");
             if (!std.mem.eql(u8, req.queryParam(.q), "ok")) return Res.text(500, "bad-q");
             if (!std.mem.eql(u8, req.header(.x_token), "token")) return Res.text(500, "bad-header");
             data.seen = true;
-            return next.call({}, req);
+            return next.call(req);
         }
     };
 
     const S = Compiled(void, .{
         get("/u/{id}", struct {
-            fn h(_: void, req: anytype) !Res {
+            fn h(req: anytype) !Res {
                 const auth = req.middlewareDataConst(.auth);
                 return Res.text(200, if (auth.seen) "ok" else "bad-data");
             }
@@ -1459,12 +1450,12 @@ test "middleware Info: supports header/query/path/data captures" {
 test "dispatch: pipelined request discards unread content-length body" {
     const S = Compiled(void, .{
         post("/x", struct {
-            fn h(_: void, _: anytype) !Res {
+            fn h(_: anytype) !Res {
                 return Res.text(200, "p");
             }
         }.h, .{}),
         get("/x", struct {
-            fn h(_: void, _: anytype) !Res {
+            fn h(_: anytype) !Res {
                 return Res.text(200, "g");
             }
         }.h, .{}),
@@ -1499,12 +1490,12 @@ test "dispatch: pipelined request discards unread content-length body" {
 test "dispatch: pipelined request discards unread chunked body" {
     const S = Compiled(void, .{
         post("/x", struct {
-            fn h(_: void, _: anytype) !Res {
+            fn h(_: anytype) !Res {
                 return Res.text(200, "p");
             }
         }.h, .{}),
         get("/x", struct {
-            fn h(_: void, _: anytype) !Res {
+            fn h(_: anytype) !Res {
                 return Res.text(200, "g");
             }
         }.h, .{}),
@@ -1542,7 +1533,7 @@ test "dispatch: pipelined request discards unread chunked body" {
 test "dispatch: path param percent-decodes" {
     const S = Compiled(void, .{
         get("/u/{id}", struct {
-            fn h(_: void, req: anytype) !Res {
+            fn h(req: anytype) !Res {
                 return Res.text(200, req.paramValue(.id));
             }
         }.h, .{}),
@@ -1566,7 +1557,7 @@ test "dispatch: path param percent-decodes" {
 test "dispatch: typed path params via opts.params" {
     const S = Compiled(void, .{
         get("/u/{id}", struct {
-            fn h(_: void, req: anytype) !Res {
+            fn h(req: anytype) !Res {
                 const body = try std.fmt.allocPrint(req.allocator(), "{d}", .{req.paramValue(.id)});
                 return Res.text(200, body);
             }
@@ -1591,7 +1582,7 @@ test "dispatch: typed path params via opts.params" {
 test "dispatch: typed path params bad value errors" {
     const S = Compiled(void, .{
         get("/u/{id}", struct {
-            fn h(_: void, _: anytype) !Res {
+            fn h(_: anytype) !Res {
                 return Res.text(200, "ok");
             }
         }.h, .{
@@ -1674,7 +1665,7 @@ test "dispatch: path params allocate once" {
 
     const S = Compiled(void, .{
         get("/u/{a}/{b}/{c}/{d}", struct {
-            fn h(_: void, req: anytype) !Res {
+            fn h(req: anytype) !Res {
                 const sum: u32 = req.paramValue(.a) + req.paramValue(.b) + req.paramValue(.c) + req.paramValue(.d);
                 return Res.text(200, if (sum == 10) "ok" else "bad");
             }
@@ -1710,15 +1701,15 @@ test "dispatch: middleware Needs.params works" {
             },
         };
 
-        pub fn call(comptime Next: type, next: Next, _: void, req: anytype) !Res {
+        pub fn call(comptime Next: type, next: Next, req: anytype) !Res {
             if (req.paramValue(.id) == 0) return Res.text(400, "bad");
-            return try next.call({}, req);
+            return try next.call(req);
         }
     };
 
     const S = Compiled(void, .{
         get("/u/{id}", struct {
-            fn h(_: void, req: anytype) !Res {
+            fn h(req: anytype) !Res {
                 const body = try std.fmt.allocPrint(req.allocator(), "{d}", .{req.paramValue(.id)});
                 return Res.text(200, body);
             }
@@ -1741,15 +1732,15 @@ test "middleware data: set in middleware and handler access" {
         pub const Data = struct { user_id: u32 = 0 };
         pub const name = .auth;
 
-        pub fn call(comptime Next: type, next: Next, _: void, req: anytype, data: *Data) !Res {
+        pub fn call(comptime Next: type, next: Next, req: anytype, data: *Data) !Res {
             data.user_id = 7;
-            return next.call({}, req);
+            return next.call(req);
         }
     };
 
     const S = Compiled(void, .{
         get("/x", struct {
-            fn h(_: void, req: anytype) !Res {
+            fn h(req: anytype) !Res {
                 const data = req.middlewareData(.auth);
                 data.user_id += 1;
                 return Res.text(200, if (data.user_id == 8) "ok" else "bad");
@@ -1771,7 +1762,7 @@ test "middleware data: set in middleware and handler access" {
 test "dispatch: handler error uses callback" {
     const S = Compiled(void, .{
         get("/x", struct {
-            fn h(_: void, _: anytype) !Res {
+            fn h(_: anytype) !Res {
                 return error.Boom;
             }
         }.h, .{}),
@@ -1813,17 +1804,17 @@ test "dispatch: handler error uses callback" {
 test "fuzz: router match does not crash" {
     const S = Compiled(void, .{
         get("/a", struct {
-            fn h(_: void, _: anytype) !Res {
+            fn h(_: anytype) !Res {
                 return Res.text(200, "a");
             }
         }.h, .{}),
         post("/b/{id}", struct {
-            fn h(_: void, _: anytype) !Res {
+            fn h(_: anytype) !Res {
                 return Res.text(200, "b");
             }
         }.h, .{}),
         put("/c/*", struct {
-            fn h(_: void, _: anytype) !Res {
+            fn h(_: anytype) !Res {
                 return Res.text(200, "c");
             }
         }.h, .{}),
@@ -1873,11 +1864,12 @@ test "handler: zero-arg handler supported" {
     try std.testing.expect(std.mem.endsWith(u8, out[0..res.len], "\r\n\r\nx"));
 }
 
-test "handler: ctx-only handler supported" {
+test "handler: app ctx accessible through req" {
     const Ctx = struct { v: u8 };
     const S = Compiled(Ctx, .{
         get("/a", struct {
-            fn h(ctx: *Ctx) !Res {
+            fn h(req: anytype) !Res {
+                const ctx = req.ctx();
                 return Res.text(200, if (ctx.v == 1) "ok" else "bad");
             }
         }.h, .{}),
@@ -1898,7 +1890,7 @@ test "handler: ctx-only handler supported" {
 test "dispatch: invalid path percent-encoding rejected" {
     const S = Compiled(void, .{
         get("/u/{id}", struct {
-            fn h(_: void, _: anytype) !Res {
+            fn h(_: anytype) !Res {
                 return Res.text(200, "x");
             }
         }.h, .{}),
@@ -1939,7 +1931,7 @@ test "dispatch: route upgrade_handler handles 101 and returns upgraded action" {
     };
 
     const Routes = struct {
-        fn h(_: void, _: anytype) !Res {
+        fn h(_: anytype) !Res {
             return .{
                 .status = .switching_protocols,
                 .headers = &.{
@@ -1989,7 +1981,7 @@ test "dispatch: route upgrade_handler handles 101 and returns upgraded action" {
 test "dispatch: null upgrade_handler does not check status" {
     const S = Compiled(void, .{
         get("/ws", struct {
-            fn h(_: void, _: anytype) !Res {
+            fn h(_: anytype) !Res {
                 return .{
                     .status = .switching_protocols,
                     .headers = &.{

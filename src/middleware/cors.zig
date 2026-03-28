@@ -127,8 +127,8 @@ pub fn Cors(comptime opts: anytype) type {
             return util.appendHeaders(allocator, base, extra);
         }
 
-        fn handle(comptime Next: type, next: Next, ctx: anytype, req: anytype, data_opt: ?*DataT) !Res {
-            const origin_opt = req.header(.origin) orelse return next.call(ctx, req);
+        fn handle(comptime Next: type, next: Next, req: anytype, data_opt: ?*DataT) !Res {
+            const origin_opt = req.header(.origin) orelse return next.call(req);
             const origin = origin_opt;
             const needs_origin_copy = store or !(allow_any_origin and !allow_credentials);
             const origin_copy = if (needs_origin_copy) try req.allocator().dupe(u8, origin) else origin;
@@ -203,10 +203,10 @@ pub fn Cors(comptime opts: anytype) type {
 
             if (!allowed) {
                 if (enforce) return Res.text(403, "cors forbidden");
-                return next.call(ctx, req);
+                return next.call(req);
             }
 
-            var res = try next.call(ctx, req);
+            var res = try next.call(req);
 
             const origin_value = if (allow_any_origin and !allow_credentials) "*" else origin_copy;
             var hdrs: [4]Header = undefined;
@@ -240,16 +240,16 @@ pub fn Cors(comptime opts: anytype) type {
         pub const Routes = Common.Routes;
         pub const Data = Common.Data;
         pub const name = opts.name;
-        pub fn call(comptime Next: type, next: Next, ctx: anytype, req: anytype, data: *DataT) !Res {
-            return Common.handle(Next, next, ctx, req, data);
+        pub fn call(comptime Next: type, next: Next, req: anytype, data: *DataT) !Res {
+            return Common.handle(Next, next, req, data);
         }
     } else struct {
         pub const Needs = Common.Needs;
         pub const register_routes = Common.register_routes;
         pub const Routes = Common.Routes;
         pub const Data = Common.Data;
-        pub fn call(comptime Next: type, next: Next, ctx: anytype, req: anytype) !Res {
-            return Common.handle(Next, next, ctx, req, null);
+        pub fn call(comptime Next: type, next: Next, req: anytype) !Res {
+            return Common.handle(Next, next, req, null);
         }
     };
 }
@@ -276,7 +276,7 @@ test "cors: preflight and simple request" {
     );
 
     const Next = struct {
-        pub fn call(_: @This(), _: void, _: anytype) !Res {
+        pub fn call(_: @This(), _: anytype) !Res {
             return Res.text(200, "ok");
         }
     };
@@ -298,7 +298,7 @@ test "cors: preflight and simple request" {
         var r = std.Io.Reader.fixed("Origin: https://example.com\r\nAccess-Control-Request-Method: POST\r\n\r\n");
         try reqv.parseHeaders(gpa, &r, 1024);
 
-        const res = try Mw.call(Next, Next{}, {}, &reqv);
+        const res = try Mw.call(Next, Next{}, &reqv);
         try std.testing.expectEqual(@as(u16, 204), @intFromEnum(res.status));
         try std.testing.expectEqualStrings("https://example.com", headerValue(res.headers, "access-control-allow-origin").?);
     }
@@ -318,7 +318,7 @@ test "cors: preflight and simple request" {
         var r = std.Io.Reader.fixed("Origin: https://example.com\r\n\r\n");
         try reqv.parseHeaders(gpa, &r, 1024);
 
-        const res = try Mw.call(Next, Next{}, {}, &reqv);
+        const res = try Mw.call(Next, Next{}, &reqv);
         try std.testing.expectEqual(@as(u16, 200), @intFromEnum(res.status));
         try std.testing.expectEqualStrings("https://example.com", headerValue(res.headers, "access-control-allow-origin").?);
     }

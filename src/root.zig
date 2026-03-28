@@ -18,7 +18,7 @@
 //!   calls this function, and returns `.upgraded` (the upgrade handler owns connection lifecycle).
 //!
 //! Server definition fields (for `Server(.{ ... })`):
-//! - `.Context: type` (optional) user context passed to handlers/middlewares
+//! - `.Context: type` (optional) user context exposed through `req.ctx()`
 //! - `.middlewares: tuple` (optional) global middleware types
 //! - `.routes: struct` (required) route registrations
 //! - `.config: struct` (optional) server config overrides
@@ -32,8 +32,8 @@
 //! Handlers can be any of:
 //! - `fn() !zhttp.Res`
 //! - `fn(req: anytype) !zhttp.Res`
-//! - `fn(ctx: *Context) !zhttp.Res`
-//! - `fn(ctx: *Context, req: anytype) !zhttp.Res`
+//!
+//! When `.Context` is configured, it is available only via `req.ctx()`.
 //!
 const std = @import("std");
 const builtin = @import("builtin");

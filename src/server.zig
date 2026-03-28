@@ -309,7 +309,7 @@ fn primeSocketBackend() void {
 
 test "Connection: close header closes socket" {
     const Bench = struct {
-        fn plaintext(_: void, _: anytype) !response.Res {
+        fn plaintext(_: anytype) !response.Res {
             return .{
                 .status = .ok,
                 .headers = &.{
@@ -387,7 +387,7 @@ test "Connection: close header closes socket" {
 
 test "unknown path returns 404 and keeps connection" {
     const Handlers = struct {
-        fn ok(_: void, _: anytype) !response.Res {
+        fn ok(_: anytype) !response.Res {
             return response.Res.text(200, "ok");
         }
     };
@@ -453,7 +453,7 @@ test "unknown path returns 404 and keeps connection" {
 
 test "not_found_handler can parse query headers and body" {
     const Handlers = struct {
-        fn ok(_: void, _: anytype) !response.Res {
+        fn ok(_: anytype) !response.Res {
             return response.Res.text(200, "ok");
         }
 
@@ -542,7 +542,7 @@ test "not_found_handler can parse query headers and body" {
 
 test "HEAD response omits body" {
     const Handlers = struct {
-        fn ok(_: void, _: anytype) !response.Res {
+        fn ok(_: anytype) !response.Res {
             return response.Res.text(200, "hello");
         }
     };
@@ -596,7 +596,7 @@ test "HEAD response omits body" {
 
 test "bad request line returns 400" {
     const Handlers = struct {
-        fn ok(_: void, _: anytype) !response.Res {
+        fn ok(_: anytype) !response.Res {
             return response.Res.text(200, "ok");
         }
     };
@@ -651,7 +651,7 @@ test "bad request line returns 400" {
 
 test "custom error_handler handles handler errors only" {
     const Handlers = struct {
-        fn boom(_: void, _: anytype) !response.Res {
+        fn boom(_: anytype) !response.Res {
             return error.Boom;
         }
 
@@ -738,7 +738,7 @@ test "custom error_handler handles handler errors only" {
 
 test "handler res.close closes socket" {
     const Handlers = struct {
-        fn close_me(_: void, _: anytype) !response.Res {
+        fn close_me(_: anytype) !response.Res {
             var r = response.Res.text(200, "bye");
             r.close = true;
             return r;
@@ -854,7 +854,7 @@ test "upgrade_handler: 101 triggers upgrade callback and stream ownership" {
     };
 
     const Handlers = struct {
-        fn ws(_: *State, _: anytype) !response.Res {
+        fn ws(_: anytype) !response.Res {
             return .{
                 .status = .switching_protocols,
                 .headers = &.{

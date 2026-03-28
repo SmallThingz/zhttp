@@ -29,10 +29,10 @@ const Auth = struct {
         },
     };
 
-    pub fn call(comptime Next: type, next: Next, _: void, req: anytype) !zhttp.Res {
+    pub fn call(comptime Next: type, next: Next, req: anytype) !zhttp.Res {
         const auth = req.header(.authorization) orelse return zhttp.Res.text(401, "missing auth\n");
         if (!std.mem.eql(u8, auth, "bearer ok")) return zhttp.Res.text(403, "bad auth\n");
-        return try next.call({}, req);
+        return try next.call(req);
     }
 };
 

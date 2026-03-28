@@ -99,8 +99,8 @@ pub fn Static(comptime opts: anytype) type {
             router.head(pattern, handler, .{ .headers = StaticHeaders }),
         };
 
-        pub fn call(comptime Next: type, next: Next, ctx: anytype, req: anytype) !Res {
-            return next.call(ctx, req);
+        pub fn call(comptime Next: type, next: Next, req: anytype) !Res {
+            return next.call(req);
         }
 
         fn handler(req: anytype) !Res {

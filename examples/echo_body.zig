@@ -21,7 +21,7 @@ fn usage() void {
     , .{});
 }
 
-fn echo(_: void, req: anytype) !zhttp.Res {
+fn echo(req: anytype) !zhttp.Res {
     const body = try req.bodyAll(1024 * 1024);
     return zhttp.Res.text(200, body);
 }

@@ -240,7 +240,7 @@ pub fn Origin(comptime opts: anytype) type {
 
         pub const Data = DataT;
 
-        fn handle(comptime Next: type, next: Next, ctx: anytype, req: anytype, data_opt: ?*DataT) !Res {
+        fn handle(comptime Next: type, next: Next, req: anytype, data_opt: ?*DataT) !Res {
             const origin = req.header(.origin);
             const allowed = if (origin) |value| Matcher.contains(value) else allow_missing;
 
@@ -252,7 +252,7 @@ pub fn Origin(comptime opts: anytype) type {
             }
 
             if (!allowed) return Res.text(reject_status, reject_body);
-            return next.call(ctx, req);
+            return next.call(req);
         }
     };
 
@@ -261,15 +261,15 @@ pub fn Origin(comptime opts: anytype) type {
         pub const Data = Common.Data;
         pub const name = opts.name;
 
-        pub fn call(comptime Next: type, next: Next, ctx: anytype, req: anytype, data: *DataT) !Res {
-            return Common.handle(Next, next, ctx, req, data);
+        pub fn call(comptime Next: type, next: Next, req: anytype, data: *DataT) !Res {
+            return Common.handle(Next, next, req, data);
         }
     } else struct {
         pub const Needs = Common.Needs;
         pub const Data = Common.Data;
 
-        pub fn call(comptime Next: type, next: Next, ctx: anytype, req: anytype) !Res {
-            return Common.handle(Next, next, ctx, req, null);
+        pub fn call(comptime Next: type, next: Next, req: anytype) !Res {
+            return Common.handle(Next, next, req, null);
         }
     };
 }
@@ -312,7 +312,7 @@ test "origin middleware allows configured origin" {
     }, struct {}, &.{}, MwCtx);
 
     const Next = struct {
-        pub fn call(_: @This(), _: void, _: anytype) !Res {
+        pub fn call(_: @This(), _: anytype) !Res {
             return Res.text(200, "ok");
         }
     };
@@ -334,19 +334,19 @@ test "origin middleware allows configured origin" {
         .inner = .{ .value = "https://app.example.com" },
     };
 
-    const res = try Mw.call(Next, Next{}, {}, &reqv);
+    const res = try Mw.call(Next, Next{}, &reqv);
     try std.testing.expectEqual(@as(u16, 200), @intFromEnum(res.status));
 }
 
 test "origin middleware rejects missing origin by default" {
-    const Mw = Origin(.{ .origins = .{ "https://app.example.com" } });
+    const Mw = Origin(.{ .origins = .{"https://app.example.com"} });
     const MwCtx = struct {};
     const ReqT = @import("../request.zig").Request(struct {
         origin: parse.Optional(parse.String),
     }, struct {}, &.{}, MwCtx);
 
     const Next = struct {
-        pub fn call(_: @This(), _: void, _: anytype) !Res {
+        pub fn call(_: @This(), _: anytype) !Res {
             return Res.text(200, "ok");
         }
     };
@@ -364,14 +364,14 @@ test "origin middleware rejects missing origin by default" {
     var reqv = ReqT.init(gpa, std.testing.io, line, mw_ctx);
     defer reqv.deinit(gpa);
 
-    const res = try Mw.call(Next, Next{}, {}, &reqv);
+    const res = try Mw.call(Next, Next{}, &reqv);
     try std.testing.expectEqual(@as(u16, 403), @intFromEnum(res.status));
     try std.testing.expectEqualStrings("forbidden origin\n", res.body);
 }
 
 test "origin middleware can allow missing origin and store decision" {
     const Mw = Origin(.{
-        .origins = .{ "https://app.example.com" },
+        .origins = .{"https://app.example.com"},
         .allow_missing = true,
         .name = .origin,
     });
@@ -381,7 +381,7 @@ test "origin middleware can allow missing origin and store decision" {
     }, struct {}, &.{}, MwCtx);
 
     const Next = struct {
-        pub fn call(_: @This(), _: void, _: anytype) !Res {
+        pub fn call(_: @This(), _: anytype) !Res {
             return Res.text(200, "ok");
         }
     };
@@ -400,7 +400,7 @@ test "origin middleware can allow missing origin and store decision" {
     defer reqv.deinit(gpa);
 
     var data: Mw.Data = .{};
-    const res = try Mw.call(Next, Next{}, {}, &reqv, &data);
+    const res = try Mw.call(Next, Next{}, &reqv, &data);
     try std.testing.expectEqual(@as(u16, 200), @intFromEnum(res.status));
     try std.testing.expect(data.allowed);
     try std.testing.expect(data.missing);

@@ -1,3 +1,5 @@
+const OperationCtx = @import("context.zig").OperationCtx;
+
 /// Built-in operation that auto-registers static middleware routes.
 ///
 /// For each route carrying a middleware exposing `operationRoutes()`, this
@@ -26,7 +28,8 @@ pub const Static = struct {
     }
 
     /// Applies the operation to the mutable compile-time route table.
-    pub fn operation(comptime r: anytype, op_indices: []const usize) void {
+    pub fn operation(comptime opctx: OperationCtx, r: opctx.T()) void {
+        const op_indices = opctx.filter(r);
         for (op_indices) |idx| {
             if (!r.hasMiddlewareDecl(idx, "operationRoutes")) continue;
             const selected_mw = r.firstMiddlewareWithDecl(idx, "operationRoutes") orelse

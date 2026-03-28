@@ -1,5 +1,9 @@
 const std = @import("std");
 
+comptime {
+    @setEvalBranchQuota(200_000);
+}
+
 pub const ST = struct {
     /// Stores `name`.
     name: []const u8,

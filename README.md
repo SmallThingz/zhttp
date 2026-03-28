@@ -112,6 +112,9 @@ Both built-ins are route-tagged operations. Add operation types to endpoint
 `Info.operations` and also register operation order in `Server(.{ .operations = .{...} })`.
 `zhttp.operations.Cors` discovers matching middlewares by `zhttp.CorsSignature`,
 and `zhttp.operations.Static` discovers middlewares that expose `operationRoutes()`.
+Custom operation shape:
+`pub fn operation(comptime opctx: zhttp.operations.OperationCtx, router: opctx.T()) void`.
+Operations self-filter tagged routes via `opctx.filter(router)`.
 
 See [`examples/builtin_middlewares.zig`](./examples/builtin_middlewares.zig) for the full built-in stack in one server.
 

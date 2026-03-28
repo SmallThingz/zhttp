@@ -2,6 +2,7 @@ const std = @import("std");
 const router = @import("../router.zig");
 const response = @import("../response.zig");
 const CorsSignature = @import("../middleware/cors.zig").CorsSignature;
+const OperationCtx = @import("context.zig").OperationCtx;
 
 /// Built-in operation that auto-registers CORS preflight `OPTIONS` routes.
 ///
@@ -42,7 +43,8 @@ pub const Cors = struct {
     }
 
     /// Applies the operation to the mutable compile-time route table.
-    pub fn operation(comptime r: anytype, op_indices: []const usize) void {
+    pub fn operation(comptime opctx: OperationCtx, r: opctx.T()) void {
+        const op_indices = opctx.filter(r);
         comptime var n: usize = 0;
         var filtered: [op_indices.len]usize = undefined;
         for (op_indices) |idx| {

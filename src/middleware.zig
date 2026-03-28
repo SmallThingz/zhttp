@@ -3,7 +3,7 @@ const parse = @import("parse.zig");
 const req_ctx = @import("req_ctx.zig");
 
 comptime {
-    @setEvalBranchQuota(50000);
+    @setEvalBranchQuota(200_000);
 }
 
 pub const MiddlewareInfo = struct {
@@ -72,7 +72,7 @@ pub fn info(comptime Mw: type) MiddlewareInfo {
 /// Merges all middleware header capture requirements.
 pub fn needsHeaders(comptime mws: anytype) type {
     comptime {
-        @setEvalBranchQuota(100000);
+        @setEvalBranchQuota(200_000);
     }
     const list = typeList(mws);
     comptime var acc: type = struct {};
@@ -88,7 +88,7 @@ pub fn needsHeaders(comptime mws: anytype) type {
 /// Merges all middleware query capture requirements.
 pub fn needsQuery(comptime mws: anytype) type {
     comptime {
-        @setEvalBranchQuota(100000);
+        @setEvalBranchQuota(200_000);
     }
     const list = typeList(mws);
     comptime var acc: type = struct {};
@@ -104,7 +104,7 @@ pub fn needsQuery(comptime mws: anytype) type {
 /// Merges all middleware path capture requirements.
 pub fn needsParams(comptime mws: anytype) type {
     comptime {
-        @setEvalBranchQuota(100000);
+        @setEvalBranchQuota(200_000);
     }
     const list = typeList(mws);
     comptime var acc: type = struct {};

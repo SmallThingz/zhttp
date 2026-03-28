@@ -14,7 +14,7 @@ const req_ctx = @import("req_ctx.zig");
 const ReqCtx = req_ctx.ReqCtx;
 
 comptime {
-    @setEvalBranchQuota(30000);
+    @setEvalBranchQuota(200_000);
 }
 
 pub const Action = enum {

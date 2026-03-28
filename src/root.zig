@@ -32,6 +32,8 @@
 //! - `.routes: struct` (required) route registrations
 //! - `.operations: tuple` (optional) route operation types run at comptime in tuple order
 //!   Built-ins are `zhttp.operations.Cors` and `zhttp.operations.Static`.
+//!   Operation shape: `pub fn operation(comptime opctx: zhttp.operations.OperationCtx, router: opctx.T()) void`.
+//!   Operations filter tagged routes themselves via `opctx.filter(router)`.
 //! - `.config: struct` (optional) server config overrides
 //! - `.error_handler: fn(*Server, *std.Io.Writer, comptime ErrorSet: type, err: ErrorSet) router.Action` (optional)
 //!   fallback error handler for user handler/middleware errors; server parse/validation errors stay on the built-in `400`/`414`/`431` path
@@ -59,6 +61,7 @@ pub const Res = response.Res;
 pub const Server = @import("server.zig").Server;
 pub const middleware = @import("middleware.zig");
 pub const operations = @import("operations.zig");
+pub const OperationCtx = operations.OperationCtx;
 pub const CorsSignature = middleware.CorsSignature;
 
 pub const route = router.route;

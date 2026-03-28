@@ -3,9 +3,17 @@ const std = @import("std");
 const middleware = @import("middleware.zig");
 const router_mod = @import("router.zig");
 const util = @import("util.zig");
+const OperationCtxType = @import("operations/context.zig").OperationCtx;
+
+comptime {
+    @setEvalBranchQuota(200_000);
+}
 
 /// Canonical route declaration type used by operation routers.
 pub const RouteDecl = router_mod.RouteDecl;
+
+/// Compile-time operation context passed into `operation(...)`.
+pub const OperationCtx = OperationCtxType;
 
 fn routeTupleType(comptime n: usize) type {
     const Fields = [_]type{RouteDecl} ** n;
@@ -21,7 +29,7 @@ fn validateRouteTuple(comptime routes: anytype) void {
 
 fn validateOperationType(comptime Op: type) void {
     if (!@hasDecl(Op, "operation")) {
-        @compileError("operation type " ++ @typeName(Op) ++ " must expose `pub fn operation(comptime router: anytype, op_indices: []const usize) void`");
+        @compileError("operation type " ++ @typeName(Op) ++ " must expose `pub fn operation(comptime opctx: zhttp.operations.OperationCtx, router: opctx.T()) void`");
     }
     const fn_t = @TypeOf(Op.operation);
     const info = @typeInfo(fn_t);
@@ -30,12 +38,12 @@ fn validateOperationType(comptime Op: type) void {
     }
     const fn_info = info.@"fn";
     if (fn_info.params.len != 2) {
-        @compileError("operation type " ++ @typeName(Op) ++ " operation must take exactly two parameters (router, op_indices)");
+        @compileError("operation type " ++ @typeName(Op) ++ " operation must take exactly two parameters (opctx, router)");
     }
-    const p1 = fn_info.params[1].type orelse
-        @compileError("operation type " ++ @typeName(Op) ++ " operation second parameter must have an explicit type");
-    if (p1 != []const usize) {
-        @compileError("operation type " ++ @typeName(Op) ++ " operation second parameter must be []const usize");
+    const p0 = fn_info.params[0].type orelse
+        @compileError("operation type " ++ @typeName(Op) ++ " operation first parameter must have an explicit type");
+    if (p0 != OperationCtx) {
+        @compileError("operation type " ++ @typeName(Op) ++ " operation first parameter must be zhttp.operations.OperationCtx");
     }
     if (fn_info.return_type != void) {
         @compileError("operation type " ++ @typeName(Op) ++ " operation must return void");
@@ -391,14 +399,13 @@ fn finalLen(
     const RouterT = Router(capacity, global_mws);
 
     var router = RouterT.init(routes_tuple);
-    var op_index_buf: [capacity]usize = undefined;
     inline for (ops) |Op| {
         validateOperationType(Op);
-        const op_indices0 = router.filterByOperation(Op);
-        if (op_indices0.len == 0) continue;
-        for (op_indices0, 0..) |idx, i| op_index_buf[i] = idx;
-        const op_indices = op_index_buf[0..op_indices0.len];
-        @call(.auto, Op.operation, .{ &router, op_indices });
+        const opctx: OperationCtx = .{
+            .operation = Op,
+            .router_type = RouterT,
+        };
+        @call(.auto, Op.operation, .{ opctx, &router });
     }
     return router.count();
 }
@@ -416,14 +423,13 @@ fn applyWithLen(
     const RouterT = Router(capacity, global_mws);
 
     var router = RouterT.init(routes_tuple);
-    var op_index_buf: [capacity]usize = undefined;
     inline for (ops) |Op| {
         validateOperationType(Op);
-        const op_indices0 = router.filterByOperation(Op);
-        if (op_indices0.len == 0) continue;
-        for (op_indices0, 0..) |idx, i| op_index_buf[i] = idx;
-        const op_indices = op_index_buf[0..op_indices0.len];
-        @call(.auto, Op.operation, .{ &router, op_indices });
+        const opctx: OperationCtx = .{
+            .operation = Op,
+            .router_type = RouterT,
+        };
+        @call(.auto, Op.operation, .{ opctx, &router });
     }
     return router.toTuple(out_len);
 }
@@ -446,7 +452,7 @@ pub const Static = @import("operations/static.zig").Static;
 test "operations: add and remove routes" {
     const Ops = struct {
         pub const MaxAddedRoutes: usize = 1;
-        pub fn operation(comptime r: anytype, _: []const usize) void {
+        pub fn operation(comptime opctx: OperationCtx, r: opctx.T()) void {
             r.add(router_mod.get("/b", struct {
                 pub const Info: router_mod.EndpointInfo = .{};
                 pub fn call(comptime _: @import("req_ctx.zig").ReqCtx, req: anytype) !@import("response.zig").Res {
@@ -479,7 +485,7 @@ test "operations: order is tuple order and later ops see latest table" {
     const Res = @import("response.zig").Res;
     const OpA = struct {
         pub const MaxAddedRoutes: usize = 1;
-        pub fn operation(comptime r: anytype, _: []const usize) void {
+        pub fn operation(comptime opctx: OperationCtx, r: opctx.T()) void {
             r.add(router_mod.get("/later", struct {
                 pub const Info: router_mod.EndpointInfo = .{};
                 pub fn call(comptime _: @import("req_ctx.zig").ReqCtx, req: anytype) !Res {
@@ -490,7 +496,7 @@ test "operations: order is tuple order and later ops see latest table" {
         }
     };
     const OpB = struct {
-        pub fn operation(comptime r: anytype, _: []const usize) void {
+        pub fn operation(comptime opctx: OperationCtx, r: opctx.T()) void {
             if (r.hasMethodPath("GET", "/later")) {
                 _ = r.replace(0, router_mod.get("/first-replaced", struct {
                     pub const Info: router_mod.EndpointInfo = .{};
@@ -522,7 +528,8 @@ test "operations: order is tuple order and later ops see latest table" {
 test "operations: operation receives only routes tagged in endpoint Info.operations" {
     const Res = @import("response.zig").Res;
     const TaggedOp = struct {
-        pub fn operation(comptime r: anytype, op_indices: []const usize) void {
+        pub fn operation(comptime opctx: OperationCtx, r: opctx.T()) void {
+            const op_indices = opctx.filter(r);
             if (op_indices.len != 1) {
                 @compileError("expected exactly one tagged route");
             }

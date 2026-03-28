@@ -88,13 +88,29 @@ pub const RouteDecl = struct {
     query: type,
     /// Stores `params`.
     params: type,
-    // Bridge type carrying `pub const value = tuple`.
     /// Stores `middlewares`.
-    middlewares: type,
+    middlewares: []const type,
     // Bridge type carrying `pub const value = null|fn|?fn`.
     /// Stores `upgrade_handler`.
     upgrade_handler: type,
 };
+
+fn tupleToTypeList(comptime t: anytype) []const type {
+    const info = @typeInfo(@TypeOf(t));
+    if (info != .@"struct" or !info.@"struct".is_tuple) {
+        @compileError("route option 'middlewares' must be a tuple (e.g. .{ .middlewares = .{Mw1, Mw2} })");
+    }
+    const fields = info.@"struct".fields;
+    if (fields.len == 0) return &.{};
+    const out: [fields.len]type = comptime blk: {
+        var tmp: [fields.len]type = undefined;
+        for (fields, 0..) |f, i| {
+            tmp[i] = @field(t, f.name);
+        }
+        break :blk tmp;
+    };
+    return out[0..];
+}
 
 /// Implements route.
 pub fn route(
@@ -111,9 +127,6 @@ pub fn route(
     const HandlerBridge = struct {
         pub const function = handler;
     };
-    const MiddlewaresBridge = struct {
-        pub const value = if (@hasField(OptT, "middlewares")) opts.middlewares else .{};
-    };
     const UpgradeHandlerBridge = struct {
         pub const value = if (@hasField(OptT, "upgrade_handler")) opts.upgrade_handler else null;
     };
@@ -124,7 +137,7 @@ pub fn route(
         .headers = if (@hasField(OptT, "headers")) opts.headers else struct {},
         .query = if (@hasField(OptT, "query")) opts.query else struct {},
         .params = if (@hasField(OptT, "params")) opts.params else struct {},
-        .middlewares = MiddlewaresBridge,
+        .middlewares = if (@hasField(OptT, "middlewares")) tupleToTypeList(opts.middlewares) else &.{},
         .upgrade_handler = UpgradeHandlerBridge,
     };
 }
@@ -156,26 +169,6 @@ pub fn head(comptime pattern: []const u8, comptime handler: anytype, comptime op
 /// Implements options.
 pub fn options(comptime pattern: []const u8, comptime handler: anytype, comptime opts: anytype) RouteDecl {
     return route(.OPTIONS, pattern, handler, opts);
-}
-
-fn tupleConcat(
-    comptime a: anytype,
-    comptime b: anytype,
-) std.meta.Tuple(&([_]type{type} ** (util.tupleLen(a) + util.tupleLen(b)))) {
-    const la: usize = comptime util.tupleLen(a);
-    const lb: usize = comptime util.tupleLen(b);
-    const OutFieldTypes = [_]type{type} ** (la + lb);
-    const OutT = std.meta.Tuple(&OutFieldTypes);
-    return comptime blk: {
-        var out: OutT = undefined;
-        for (@typeInfo(@TypeOf(a)).@"struct".fields, 0..) |f, i| {
-            @field(out, std.fmt.comptimePrint("{d}", .{i})) = @field(a, f.name);
-        }
-        for (@typeInfo(@TypeOf(b)).@"struct".fields, 0..) |f, i| {
-            @field(out, std.fmt.comptimePrint("{d}", .{la + i})) = @field(b, f.name);
-        }
-        break :blk out;
-    };
 }
 
 fn tupleConcatValuesType(comptime a: anytype, comptime b: anytype) type {
@@ -534,6 +527,7 @@ pub fn Compiled(
     if (routes_info != .@"struct" or !routes_info.@"struct".is_tuple) @compileError("routes must be a tuple");
     const route_fields = routes_info.@"struct".fields;
     const route_count = route_fields.len;
+    const global_mw_list = comptime middleware.typeList(global_middlewares);
 
     const compiled = comptime blk: {
         var patterns: [route_count]Pattern = undefined;
@@ -939,15 +933,15 @@ pub fn Compiled(
                 if (route_index == i) {
                     const rd = @field(routes, f.name);
                     const p = compiled.patterns[i];
-                    const MwTuple = tupleConcat(global_middlewares, rd.middlewares.value);
-                    const NeedH = middleware.needsHeaders(MwTuple);
-                    const NeedQ = middleware.needsQuery(MwTuple);
-                    const NeedP = middleware.needsParams(MwTuple);
+                    const MwList = comptime middleware.concatTypeLists(global_mw_list, rd.middlewares);
+                    const NeedH = comptime middleware.needsHeaders(MwList);
+                    const NeedQ = comptime middleware.needsQuery(MwList);
+                    const NeedP = comptime middleware.needsParams(MwList);
                     const H = parse.mergeHeaderStructs(NeedH, rd.headers);
                     const Q = parse.mergeStructs(NeedQ, rd.query);
                     const P = parse.mergeStructs(NeedP, rd.params);
-                    const MwCtx = middleware.contextType(MwTuple);
-                    const mw_ctx = middleware.initContext(MwTuple, MwCtx);
+                    const MwCtx = comptime middleware.contextType(MwList);
+                    const mw_ctx = comptime middleware.initContext(MwList, MwCtx);
                     const ReqT = request.RequestPWithPatternCtx(H, Q, P, p.param_names, MwCtx, rd.pattern, rd.method, @TypeOf(server.ctx));
                     const ReqCtxT = req_ctx.ReqCtx;
                     const HandlerBridge = struct {
@@ -959,11 +953,11 @@ pub fn Compiled(
                     };
                     const rctx: ReqCtxT = comptime .{
                         .handler = HandlerBridge,
-                        .middlewares = middleware.typeList(MwTuple),
+                        .middlewares = MwList,
                         .path = structFieldsToST(P),
                         .query = structFieldsToST(Q),
                         .headers = structFieldsToST(H),
-                        .middleware_contexts = middleware.contextST(MwTuple),
+                        .middleware_contexts = middleware.contextST(MwList),
                         .idx = 0,
                         ._base_req_type = ReqT,
                     };

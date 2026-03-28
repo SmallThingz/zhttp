@@ -293,7 +293,7 @@ fn runBenchmark(init: std.process.Init, address: std.Io.net.IpAddress, request_b
 fn plaintext() !zhttp.Res {
     const body = "Hello, World!";
     return .{
-        .status = 200,
+        .status = .ok,
         .headers = &.{
             .{ .name = "Server", .value = "F" },
             .{ .name = "Content-Type", .value = "text/plain" },

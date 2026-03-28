@@ -170,10 +170,9 @@ pub fn needsHeaders(comptime mws: anytype) type {
     comptime {
         @setEvalBranchQuota(100000);
     }
-    const fields = @typeInfo(@TypeOf(mws)).@"struct".fields;
+    const list = typeList(mws);
     comptime var acc: type = struct {};
-    inline for (fields) |f| {
-        const Mw = @field(mws, f.name);
+    inline for (list) |Mw| {
         const mw_info = info(Mw);
         if (mw_info.header) |Header| {
             acc = parse.mergeHeaderStructs(acc, Header);
@@ -187,10 +186,9 @@ pub fn needsQuery(comptime mws: anytype) type {
     comptime {
         @setEvalBranchQuota(100000);
     }
-    const fields = @typeInfo(@TypeOf(mws)).@"struct".fields;
+    const list = typeList(mws);
     comptime var acc: type = struct {};
-    inline for (fields) |f| {
-        const Mw = @field(mws, f.name);
+    inline for (list) |Mw| {
         const mw_info = info(Mw);
         if (mw_info.query) |Query| {
             acc = parse.mergeStructs(acc, Query);
@@ -204,10 +202,9 @@ pub fn needsParams(comptime mws: anytype) type {
     comptime {
         @setEvalBranchQuota(100000);
     }
-    const fields = @typeInfo(@TypeOf(mws)).@"struct".fields;
+    const list = typeList(mws);
     comptime var acc: type = struct {};
-    inline for (fields) |f| {
-        const Mw = @field(mws, f.name);
+    inline for (list) |Mw| {
         const mw_info = info(Mw);
         if (mw_info.path) |Path| {
             acc = parse.mergeStructs(acc, Path);
@@ -243,19 +240,16 @@ fn initData(comptime Mw: type) dataType(Mw) {
 }
 
 /// Builds the middleware context struct type used by requests.
-pub fn contextType(comptime MwTuple: anytype) type {
-    const fields = @typeInfo(@TypeOf(MwTuple)).@"struct".fields;
+pub fn contextType(comptime mws: anytype) type {
+    const list = typeList(mws);
     comptime var field_count: usize = 0;
-    inline for (fields) |f| {
-        const Mw = @field(MwTuple, f.name);
+    inline for (list, 0..) |Mw, i| {
         if (!hasStoredData(Mw)) continue;
         const mw_name = comptime name(Mw);
         const Data = dataType(Mw);
 
         comptime var seen = false;
-        inline for (fields) |pf| {
-            if (std.mem.eql(u8, pf.name, f.name)) break;
-            const Prev = @field(MwTuple, pf.name);
+        inline for (list[0..i]) |Prev| {
             if (!hasStoredData(Prev)) continue;
             const prev_name = comptime name(Prev);
             if (comptime std.mem.eql(u8, prev_name, mw_name)) {
@@ -277,16 +271,13 @@ pub fn contextType(comptime MwTuple: anytype) type {
     comptime var out_attrs: [field_count]std.builtin.Type.StructField.Attributes = undefined;
     comptime var out_index: usize = 0;
 
-    inline for (fields) |f| {
-        const Mw = @field(MwTuple, f.name);
+    inline for (list, 0..) |Mw, i| {
         if (!hasStoredData(Mw)) continue;
         const mw_name = comptime name(Mw);
         const Data = dataType(Mw);
 
         comptime var seen = false;
-        inline for (fields) |pf| {
-            if (std.mem.eql(u8, pf.name, f.name)) break;
-            const Prev = @field(MwTuple, pf.name);
+        inline for (list[0..i]) |Prev| {
             if (!hasStoredData(Prev)) continue;
             const prev_name = comptime name(Prev);
             if (comptime std.mem.eql(u8, prev_name, mw_name)) {
@@ -310,18 +301,15 @@ pub fn contextType(comptime MwTuple: anytype) type {
 }
 
 /// Initializes middleware context values for one request.
-pub fn initContext(comptime MwTuple: anytype, comptime Ctx: type) Ctx {
+pub fn initContext(comptime mws: anytype, comptime Ctx: type) Ctx {
+    const list = typeList(mws);
     var ctx: Ctx = std.mem.zeroes(Ctx);
-    const fields = @typeInfo(@TypeOf(MwTuple)).@"struct".fields;
-    inline for (fields) |f| {
-        const Mw = @field(MwTuple, f.name);
+    inline for (list, 0..) |Mw, i| {
         if (comptime !hasStoredData(Mw)) continue;
         const mw_name = comptime name(Mw);
 
         comptime var seen = false;
-        inline for (fields) |pf| {
-            if (std.mem.eql(u8, pf.name, f.name)) break;
-            const Prev = @field(MwTuple, pf.name);
+        inline for (list[0..i]) |Prev| {
             if (comptime !hasStoredData(Prev)) continue;
             const prev_name = comptime name(Prev);
             if (comptime std.mem.eql(u8, prev_name, mw_name)) {
@@ -337,19 +325,16 @@ pub fn initContext(comptime MwTuple: anytype, comptime Ctx: type) Ctx {
 }
 
 /// Returns middleware context schema entries used by `ReqCtx`.
-pub fn contextST(comptime MwTuple: anytype) []const req_ctx.ST {
-    const fields = @typeInfo(@TypeOf(MwTuple)).@"struct".fields;
+pub fn contextST(comptime mws: anytype) []const req_ctx.ST {
+    const list = typeList(mws);
     comptime var count: usize = 0;
-    inline for (fields) |f| {
-        const Mw = @field(MwTuple, f.name);
+    inline for (list, 0..) |Mw, i| {
         const mw_info = info(Mw);
         if (mw_info.data == null) continue;
         const Data = mw_info.data.?;
         if (@sizeOf(Data) == 0) continue;
         comptime var seen = false;
-        inline for (fields) |pf| {
-            if (comptime std.mem.eql(u8, pf.name, f.name)) break;
-            const Prev = @field(MwTuple, pf.name);
+        inline for (list[0..i]) |Prev| {
             const prev_info = info(Prev);
             if (prev_info.data == null) continue;
             if (comptime std.mem.eql(u8, prev_info.name, mw_info.name)) {
@@ -364,16 +349,13 @@ pub fn contextST(comptime MwTuple: anytype) []const req_ctx.ST {
     const out: [count]req_ctx.ST = comptime blk: {
         var tmp: [count]req_ctx.ST = undefined;
         var i: usize = 0;
-        for (fields) |f| {
-            const Mw = @field(MwTuple, f.name);
+        for (list, 0..) |Mw, idx| {
             const mw_info = info(Mw);
             if (mw_info.data == null) continue;
             const Data = mw_info.data.?;
             if (@sizeOf(Data) == 0) continue;
             var seen = false;
-            for (fields) |pf| {
-                if (std.mem.eql(u8, pf.name, f.name)) break;
-                const Prev = @field(MwTuple, pf.name);
+            for (list[0..idx]) |Prev| {
                 const prev_info = info(Prev);
                 if (prev_info.data == null) continue;
                 if (std.mem.eql(u8, prev_info.name, mw_info.name)) {
@@ -391,12 +373,47 @@ pub fn contextST(comptime MwTuple: anytype) []const req_ctx.ST {
 }
 
 /// Returns middleware tuple elements as a flat `[]const type`.
-pub fn typeList(comptime t: anytype) []const type {
-    const fields = @typeInfo(@TypeOf(t)).@"struct".fields;
-    if (fields.len == 0) return &.{};
-    const out: [fields.len]type = comptime blk: {
-        var tmp: [fields.len]type = undefined;
-        for (fields, 0..) |f, i| tmp[i] = @field(t, f.name);
+pub fn typeList(comptime mws: anytype) []const type {
+    const T = @TypeOf(mws);
+    return switch (@typeInfo(T)) {
+        .@"struct" => |s| blk: {
+            if (!s.is_tuple) @compileError("middlewares must be a tuple, []const type, [N]type, or *const [N]type");
+            if (s.fields.len == 0) break :blk &.{};
+            const out: [s.fields.len]type = comptime blk2: {
+                var tmp: [s.fields.len]type = undefined;
+                for (s.fields, 0..) |f, i| tmp[i] = @field(mws, f.name);
+                break :blk2 tmp;
+            };
+            break :blk out[0..];
+        },
+        .array => |a| blk: {
+            if (a.child != type) @compileError("middleware array must be [N]type");
+            break :blk mws[0..];
+        },
+        .pointer => |p| blk: {
+            if (p.size == .slice) {
+                if (p.child != type) @compileError("middleware slice must be []const type");
+                break :blk mws;
+            }
+            if (p.size == .one) {
+                const child_info = @typeInfo(p.child);
+                if (child_info == .array and child_info.array.child == type) {
+                    break :blk mws[0..];
+                }
+            }
+            @compileError("middlewares must be a tuple, []const type, [N]type, or *const [N]type");
+        },
+        else => @compileError("middlewares must be a tuple, []const type, [N]type, or *const [N]type"),
+    };
+}
+
+pub fn concatTypeLists(comptime a: []const type, comptime b: []const type) []const type {
+    if (a.len == 0) return b;
+    if (b.len == 0) return a;
+    const out: [a.len + b.len]type = comptime blk: {
+        var tmp: [a.len + b.len]type = undefined;
+        for (a, 0..) |Mw, i| tmp[i] = Mw;
+        for (b, 0..) |Mw, i| tmp[a.len + i] = Mw;
         break :blk tmp;
     };
     return out[0..];

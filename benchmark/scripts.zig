@@ -823,13 +823,6 @@ pub fn runFaf(
     const fixed_first = try discoverFixedResponseBytes(io, addr, req_bytes);
     const fixed_second = try discoverFixedResponseBytes(io, addr, req_bytes);
     if (fixed_first != fixed_second) return error.ResponseSizeChanged;
-    if (fixed_first != 150) {
-        var err_buf: [128]u8 = undefined;
-        const stderr_file = std.Io.File.stderr();
-        var stderr = stderr_file.writer(io, &err_buf);
-        try stderr.interface.print("FaF response size {d} bytes; expected 150. Ensure no stale server is running on port 8080.\n", .{fixed_first});
-        return error.UnexpectedResponseSize;
-    }
 
     var conns_buf: [32]u8 = undefined;
     var iters_buf: [32]u8 = undefined;

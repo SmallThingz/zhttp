@@ -5,4 +5,3 @@ pub fn tupleLen(comptime t: anytype) usize {
     if (info != .@"struct" or !info.@"struct".is_tuple) @compileError("expected tuple");
     return info.@"struct".fields.len;
 }
-

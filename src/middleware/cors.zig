@@ -238,15 +238,7 @@ pub fn Cors(comptime opts: anytype) type {
         }
     };
 
-    return if (store) struct {
-        pub const Info = Common.Info;
-        pub const register_routes = Common.register_routes;
-        pub const Routes = Common.Routes;
-        pub const Data = Common.Data;
-        pub fn call(comptime rctx: ReqCtx, req: rctx.T()) !Res {
-            return Common.handle(rctx, req);
-        }
-    } else struct {
+    return struct {
         pub const Info = Common.Info;
         pub const register_routes = Common.register_routes;
         pub const Routes = Common.Routes;

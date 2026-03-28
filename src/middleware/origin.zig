@@ -260,14 +260,7 @@ pub fn Origin(comptime opts: anytype) type {
         }
     };
 
-    return if (store) struct {
-        pub const Info = Common.Info;
-        pub const Data = Common.Data;
-
-        pub fn call(comptime rctx: ReqCtx, req: rctx.T()) !Res {
-            return Common.handle(rctx, req);
-        }
-    } else struct {
+    return struct {
         pub const Info = Common.Info;
         pub const Data = Common.Data;
 

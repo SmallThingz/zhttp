@@ -22,11 +22,17 @@ fn testLog(method: []const u8, path: []const u8, status: u16, _: Io.Duration) vo
     log_state.status = status;
 }
 
-pub fn Logger(comptime opts: anytype) type {
-    const store: bool = @hasField(@TypeOf(opts), "name");
+pub const LoggerOptions = struct {
+    name: ?[]const u8 = null,
+    log: ?*const fn ([]const u8, []const u8, u16, Io.Duration) void = null,
+    clock: Io.Clock = .awake,
+};
+
+pub fn Logger(comptime opts: LoggerOptions) type {
+    const store: bool = opts.name != null;
     const LogFn = *const fn ([]const u8, []const u8, u16, Io.Duration) void;
-    const log_fn: ?LogFn = if (@hasField(@TypeOf(opts), "log")) opts.log else null;
-    const clock: Io.Clock = if (@hasField(@TypeOf(opts), "clock")) opts.clock else .awake;
+    const log_fn: ?LogFn = opts.log;
+    const clock: Io.Clock = opts.clock;
 
     const DataT = if (store) struct {
         start: Io.Timestamp = .zero,
@@ -36,7 +42,7 @@ pub fn Logger(comptime opts: anytype) type {
 
     const Common = struct {
         pub const Data = DataT;
-        pub const info_name: []const u8 = if (store) opts.name else "logger";
+        pub const info_name: []const u8 = if (store) opts.name.? else "logger";
         pub const Info = MiddlewareInfo{
             .name = info_name,
             .data = if (store) DataT else null,
@@ -64,13 +70,7 @@ pub fn Logger(comptime opts: anytype) type {
         }
     };
 
-    return if (store) struct {
-        pub const Info = Common.Info;
-        pub const Data = Common.Data;
-        pub fn call(comptime rctx: ReqCtx, req: rctx.T()) !Res {
-            return Common.handle(rctx, req);
-        }
-    } else struct {
+    return struct {
         pub const Info = Common.Info;
         pub const Data = Common.Data;
         pub fn call(comptime rctx: ReqCtx, req: rctx.T()) !Res {

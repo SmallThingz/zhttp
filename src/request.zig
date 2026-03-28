@@ -614,7 +614,14 @@ pub fn RequestPWithPatternExt(
             return self.parseHeadersWithLimits(a, r, max_header_bytes, max_header_bytes);
         }
 
-        /// Implements parse headers with separate total and per-line size limits.
+        /// Parse request headers with separate total and per-line size limits.
+        ///
+        /// This initializes both:
+        /// - immutable framing metadata (`body_framing*`) derived from headers
+        /// - mutable body-consumption state (`body_kind`, `body_remaining`)
+        ///
+        /// Later body readers mutate only the runtime state so middleware can
+        /// still inspect the original framing decision made here.
         pub fn parseHeadersWithLimits(
             self: *Self,
             a: Allocator,
@@ -705,10 +712,15 @@ pub fn RequestPWithPatternExt(
             self._base.headers_parsed = true;
         }
 
+        /// Read an exact number of bytes or propagate the reader failure.
         fn readExact(r: *Io.Reader, buf: []u8) Io.Reader.Error!void {
             try r.readSliceAll(buf);
         }
 
+        /// Consume the remaining request body using the current runtime body state.
+        ///
+        /// Content-length bodies read exactly the remaining byte count.
+        /// Chunked bodies decode each chunk and own the flattened payload.
         fn bodyAllFrom(self: *Self, a: Allocator, r: *Io.Reader, max_bytes: usize) ![]const u8 {
             return switch (self._base.body_kind) {
                 .none => "",
@@ -768,6 +780,10 @@ pub fn RequestPWithPatternExt(
             return bodyAllFrom(self, self._base.arena, self._base.reader, max_bytes);
         }
 
+        /// Drain any unread request body bytes using the current runtime body state.
+        ///
+        /// This is the path used to safely reuse keep-alive connections when the
+        /// handler chose not to consume the body itself.
         fn discardUnreadBodyFrom(self: *Self, r: *Io.Reader) !void {
             switch (self._base.body_kind) {
                 .none => return,
@@ -825,6 +841,8 @@ pub fn RequestPWithPatternExt(
     };
 }
 
+/// Build a synthetic route pattern for standalone request test types that only
+/// know their param names and not a full `RouteDecl`.
 fn syntheticPatternFromParamNames(comptime param_names: []const []const u8) []const u8 {
     if (param_names.len == 0) return "/";
     comptime var out: []const u8 = "";

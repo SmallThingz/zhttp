@@ -108,6 +108,8 @@ pub fn options(comptime pattern: []const u8, comptime endpoint: type) RouteDecl 
     return route(.OPTIONS, pattern, endpoint);
 }
 
+/// Convert a capture struct into the `ReqCtx.ST` name/type format consumed by
+/// generated request contexts.
 fn structFieldsToST(comptime T: type) []const req_ctx.ST {
     const fields = @typeInfo(T).@"struct".fields;
     if (fields.len == 0) return &.{};
@@ -140,6 +142,8 @@ const Pattern = struct {
     glob: bool,
 };
 
+/// Compile a route pattern into fixed segment metadata so runtime matching can
+/// stay allocation-free.
 fn compilePattern(comptime pattern: []const u8) Pattern {
     if (pattern.len == 0 or pattern[0] != '/') @compileError("route pattern must start with '/'");
 
@@ -246,6 +250,7 @@ fn compilePattern(comptime pattern: []const u8) Pattern {
     return .{ .segments = seg_arr[0..], .param_names = names_arr[0..], .glob = glob };
 }
 
+/// Match a path and capture parameter slices directly from the request path.
 fn matchPattern(p: Pattern, path: []u8, params_out: [][]u8) bool {
     if (p.segments.len == 0) return path.len == 1 and path[0] == '/';
     var path_i: usize = 0;
@@ -286,6 +291,7 @@ fn matchPattern(p: Pattern, path: []u8, params_out: [][]u8) bool {
     return path_i >= path.len + 1;
 }
 
+/// Boolean-only variant of `matchPattern` for paths that do not need captures.
 fn matchPatternNoCapture(p: Pattern, path: []u8) bool {
     if (p.segments.len == 0) return path.len == 1 and path[0] == '/';
     var path_i: usize = 0;
@@ -349,6 +355,7 @@ const ExactEntry = struct {
     route_index: u16,
 };
 
+/// Build a comptime open-addressing table for exact path matches.
 fn ExactMap(comptime entries: anytype, comptime n: usize) type {
     const EntriesT = @TypeOf(entries);
     comptime {
@@ -376,7 +383,7 @@ fn ExactMap(comptime entries: anytype, comptime n: usize) type {
     };
 
     return struct {
-        /// Implements find.
+        /// Find the route index for an exact path match.
         pub fn find(path: []const u8) ?u16 {
             if (n == 0) return null;
             const h = fnv1a64(path);
@@ -666,6 +673,8 @@ pub fn Compiled(
             method_token: []const u8,
             path: []u8,
         ) ?u16 {
+            // Build a decision tree over 4-byte chunks of method names so the
+            // multi-method case avoids a purely linear string-compare chain.
             if (ids.len == 0) return null;
             if (ids.len == 1) {
                 const mid: u8 = ids[0];
@@ -722,6 +731,8 @@ pub fn Compiled(
             return dispatchByMethod(all_method_ids[0..], 0, method_token, path);
         }
 
+        /// Re-run the compiled matcher for a known route index and fill the
+        /// per-route params buffer.
         fn captureParams(route_index: u16, path: []u8, params_out: [][]u8) bool {
             inline for (route_fields, 0..) |_, i| {
                 if (route_index == i) {

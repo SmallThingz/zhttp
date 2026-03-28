@@ -15,6 +15,8 @@ pub const RouteDecl = router_mod.RouteDecl;
 /// Compile-time operation context passed into `operation(...)`.
 pub const OperationCtx = OperationCtxType;
 
+/// Construct the tuple type used when exporting a comptime router back into the
+/// final route table.
 fn routeTupleType(comptime n: usize) type {
     const Fields = [_]type{RouteDecl} ** n;
     return std.meta.Tuple(&Fields);
@@ -50,6 +52,8 @@ fn validateOperationType(comptime Op: type) void {
     }
 }
 
+/// Ask an operation how many routes it may inject so the temporary router can
+/// reserve enough comptime storage up front.
 fn opAddedBudget(comptime Op: type, comptime base_route_count: usize) usize {
     if (@hasDecl(Op, "maxAddedRoutes")) {
         const fn_t = @TypeOf(Op.maxAddedRoutes);
@@ -323,6 +327,10 @@ pub fn Router(comptime capacity: usize, comptime global_middlewares: []const typ
             return self._index_buf[0..n];
         }
 
+        /// Visit matched route indices grouped by identical path pattern.
+        ///
+        /// Operations use this to add sibling routes like `OPTIONS`/`HEAD` once
+        /// per path rather than once per method.
         pub fn forEachPathGroup(comptime self: *Self, indices: []const usize, comptime callback: anytype) void {
             comptime var path_count: usize = 0;
 

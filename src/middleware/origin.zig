@@ -42,6 +42,8 @@ pub fn DecisionTree(comptime origins: []const []const u8) type {
     };
 
     return struct {
+        /// Pack up to 4 bytes into a single word so the decision tree can branch
+        /// on short fixed-width chunks instead of byte-by-byte comparisons.
         fn pack4(s: []const u8, offset: usize) u32 {
             comptime {
                 @setEvalBranchQuota(200_000);
@@ -111,6 +113,8 @@ pub fn DecisionTree(comptime origins: []const []const u8) type {
             return .{ .ids = out, .len = n };
         }
 
+        /// Recursively specialize the allow-list by 4-byte chunks until the set
+        /// is small enough to finish with direct literal comparison.
         fn containsImpl(comptime ids: []const usize, comptime offset: usize, origin: []const u8) bool {
             comptime {
                 @setEvalBranchQuota(200_000);

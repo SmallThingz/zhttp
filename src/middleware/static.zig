@@ -251,18 +251,29 @@ pub fn Static(comptime opts: StaticOptions) type {
         };
         const CacheMap = std.StringHashMapUnmanaged(CacheEntry);
         const CacheState = struct {
-            mutex: Io.Mutex = Io.Mutex.init,
+            ref_count: std.atomic.Value(usize) = std.atomic.Value(usize).init(1),
             map: CacheMap = .empty,
         };
-        var cache_state: CacheState = .{};
+        const StaticContext = struct {
+            cache: ?*CacheState = null,
+
+            pub fn init(_: Io, _: std.mem.Allocator, _: anytype) !@This() {
+                const cache_a = std.heap.page_allocator;
+                const cache = try cache_a.create(CacheState);
+                cache.* = .{};
+                return .{ .cache = cache };
+            }
+        };
 
         pub const Info = MiddlewareInfo{
             .name = info_name,
+            .static_context = StaticContext,
             .header = if (etag_enabled) StaticHeaders else null,
         };
         const Endpoint = struct {
             pub const Info: router.EndpointInfo = .{
                 .headers = StaticHeaders,
+                .middlewares = &.{Self},
             };
             pub fn call(comptime _: ReqCtx, req: anytype) !Res {
                 return serve(req);
@@ -394,8 +405,32 @@ pub fn Static(comptime opts: StaticOptions) type {
             if (kv.value.etag) |tag| cache_a.free(tag);
         }
 
+        fn freeCacheState(cache: *CacheState) void {
+            const cache_a = std.heap.page_allocator;
+            var it = cache.map.iterator();
+            while (it.next()) |entry| {
+                freeRemoved(.{
+                    .key = entry.key_ptr.*,
+                    .value = entry.value_ptr.*,
+                });
+            }
+            cache.map.deinit(cache_a);
+            cache_a.destroy(cache);
+        }
+
+        fn retainCache(cache: *CacheState) *CacheState {
+            _ = cache.ref_count.fetchAdd(1, .acq_rel);
+            return cache;
+        }
+
+        fn releaseCache(cache: *CacheState) void {
+            const old = cache.ref_count.fetchSub(1, .acq_rel);
+            if (old == 1) freeCacheState(cache);
+        }
+
         fn cacheInsert(
             io: Io,
+            static_ctx: *StaticContext,
             file_rel: []const u8,
             body: []const u8,
             etag: ?[]const u8,
@@ -415,14 +450,14 @@ pub fn Static(comptime opts: StaticOptions) type {
             const tag_copy = if (etag) |tag| cache_a.dupe(u8, tag) catch return else null;
             errdefer if (tag_copy) |tag| cache_a.free(tag);
 
-            cache_state.mutex.lockUncancelable(io);
-            defer cache_state.mutex.unlock(io);
+            const cache = retainCache(static_ctx.cache orelse return);
+            defer releaseCache(cache);
 
-            if (cache_state.map.fetchRemove(file_rel)) |old| {
+            if (cache.map.fetchRemove(file_rel)) |old| {
                 freeRemoved(old);
             }
 
-            cache_state.map.put(cache_a, key_copy, .{
+            cache.map.put(cache_a, key_copy, .{
                 .body = body_copy,
                 .etag = tag_copy,
                 .content_type = content_type,
@@ -449,20 +484,20 @@ pub fn Static(comptime opts: StaticOptions) type {
             return st.mtime.nanoseconds == entry.mtime_ns;
         }
 
-        fn serveFromCache(req: anytype, file_rel: []const u8) !?Res {
+        fn serveFromCache(req: anytype, static_ctx: *StaticContext, file_rel: []const u8) !?Res {
             if (!cache_enabled) return null;
 
-            cache_state.mutex.lockUncancelable(req.io());
-            defer cache_state.mutex.unlock(req.io());
+            const cache = retainCache(static_ctx.cache orelse return null);
+            defer releaseCache(cache);
 
-            const entry = cache_state.map.getPtr(file_rel) orelse return null;
+            const entry = cache.map.getPtr(file_rel) orelse return null;
 
             if (watch_enabled) {
                 const now = nowNs(req.io());
                 if (watch_interval_ns == 0 or now >= entry.next_watch_check_ns) {
                     entry.next_watch_check_ns = now + watch_interval_ns;
                     if (!cacheEntryFresh(req.io(), file_rel, entry.*)) {
-                        if (cache_state.map.fetchRemove(file_rel)) |old| {
+                        if (cache.map.fetchRemove(file_rel)) |old| {
                             freeRemoved(old);
                         }
                         return null;
@@ -505,6 +540,7 @@ pub fn Static(comptime opts: StaticOptions) type {
 
         fn serve(req: anytype) !Res {
             const a = req.allocator();
+            const static_ctx = req.middlewareStatic(info_name);
             var file_rel = subPathFromRequest(req);
 
             if (file_rel.len == 0 or file_rel[file_rel.len - 1] == '/') {
@@ -519,7 +555,7 @@ pub fn Static(comptime opts: StaticOptions) type {
 
             if (!isSafeRelative(file_rel)) return Res.text(404, "not found");
 
-            if (try serveFromCache(req, file_rel)) |res| return res;
+            if (try serveFromCache(req, static_ctx, file_rel)) |res| return res;
 
             var base_dir = try openBaseDir(req.io());
             defer base_dir.close(req.io());
@@ -548,7 +584,7 @@ pub fn Static(comptime opts: StaticOptions) type {
             const content_type = contentTypeFor(file_rel);
             const tag = if (etag_enabled) try etagFor(a, body) else null;
 
-            cacheInsert(req.io(), file_rel, body, tag, content_type, size, st.mtime.nanoseconds);
+            cacheInsert(req.io(), static_ctx, file_rel, body, tag, content_type, size, st.mtime.nanoseconds);
             return buildResponse(req, body, content_type, tag);
         }
     };
@@ -587,6 +623,20 @@ fn writeTestFile(path: []const u8, content: []const u8) !void {
     });
 }
 
+fn initStaticRouteCtx(comptime S: type, allocator: std.mem.Allocator, comptime pattern: []const u8) !@import("../middleware.zig").staticContextType(.{S}) {
+    const mw = @import("../middleware.zig");
+    const RouteStaticCtx = mw.staticContextType(.{S});
+    const Ep = struct {
+        pub const Info: router.EndpointInfo = .{};
+        pub fn call(comptime _: ReqCtx, req: anytype) !Res {
+            _ = req;
+            return Res.text(200, "ok");
+        }
+    };
+    const rd = router.get(pattern, Ep);
+    return mw.initStaticContext(RouteStaticCtx, std.testing.io, allocator, rd);
+}
+
 test "static: contentTypeFor covers common web/media types" {
     try std.testing.expectEqualStrings("text/html; charset=utf-8", contentTypeFor("index.html").?);
     try std.testing.expectEqualStrings("text/html; charset=utf-8", contentTypeFor("index.htm").?);
@@ -600,13 +650,17 @@ test "static: contentTypeFor covers common web/media types" {
 
 test "static: serves file and index, blocks traversal" {
     const S = Static(.{ .dir = "testdata/static", .mount = "/static" });
+    const RouteStaticCtx = @import("../middleware.zig").staticContextType(.{S});
     const MwCtx = struct {};
-    const ReqT = @import("../request.zig").RequestWithPattern(
+    const ReqT = @import("../request.zig").RequestPWithPatternStatic(
         struct { if_none_match: parse.Optional(parse.String) },
+        struct {},
         struct {},
         &.{"path"},
         MwCtx,
+        RouteStaticCtx,
         "/static/{*path}",
+        "GET",
     );
 
     {
@@ -622,7 +676,8 @@ test "static: serves file and index, blocks traversal" {
             .query = @constCast(query_buf[0..]),
         };
         const mw_ctx: MwCtx = .{};
-        var reqv = ReqT.init(a, std.testing.io, line, mw_ctx);
+        var mw_static = try initStaticRouteCtx(S, a, "/static/{*path}");
+        var reqv = ReqT.initWithCtx(a, std.testing.io, line, mw_ctx, {}, &mw_static);
         defer reqv.deinit(a);
         var rel0 = "hello.txt".*;
         try reqv.parseParams(a, &.{rel0[0..]});
@@ -645,7 +700,8 @@ test "static: serves file and index, blocks traversal" {
             .query = @constCast(query_buf[0..]),
         };
         const mw_ctx: MwCtx = .{};
-        var reqv = ReqT.init(a, std.testing.io, line, mw_ctx);
+        var mw_static = try initStaticRouteCtx(S, a, "/static/{*path}");
+        var reqv = ReqT.initWithCtx(a, std.testing.io, line, mw_ctx, {}, &mw_static);
         defer reqv.deinit(a);
         try reqv.parseParams(a, &.{""});
         const res = try S.serve(&reqv);
@@ -666,7 +722,8 @@ test "static: serves file and index, blocks traversal" {
             .query = @constCast(query_buf[0..]),
         };
         const mw_ctx: MwCtx = .{};
-        var reqv = ReqT.init(a, std.testing.io, line, mw_ctx);
+        var mw_static = try initStaticRouteCtx(S, a, "/static/{*path}");
+        var reqv = ReqT.initWithCtx(a, std.testing.io, line, mw_ctx, {}, &mw_static);
         defer reqv.deinit(a);
         var rel_bad = "../secret.txt".*;
         try reqv.parseParams(a, &.{rel_bad[0..]});
@@ -681,13 +738,17 @@ test "static: explicit glob_param_name works with multiple path params" {
         .mount = "/static",
         .glob_param_name = "rest",
     });
+    const RouteStaticCtx = @import("../middleware.zig").staticContextType(.{S});
     const MwCtx = struct {};
-    const ReqT = @import("../request.zig").RequestWithPattern(
+    const ReqT = @import("../request.zig").RequestPWithPatternStatic(
         struct { if_none_match: parse.Optional(parse.String) },
+        struct {},
         struct {},
         &.{ "prefix", "rest" },
         MwCtx,
+        RouteStaticCtx,
         "/x/{prefix}/{*rest}",
+        "GET",
     );
 
     var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
@@ -702,7 +763,8 @@ test "static: explicit glob_param_name works with multiple path params" {
         .query = @constCast(query_buf[0..]),
     };
     const mw_ctx: MwCtx = .{};
-    var reqv = ReqT.init(a, std.testing.io, line, mw_ctx);
+    var mw_static = try initStaticRouteCtx(S, a, "/x/{prefix}/{*rest}");
+    var reqv = ReqT.initWithCtx(a, std.testing.io, line, mw_ctx, {}, &mw_static);
     defer reqv.deinit(a);
     var p0 = "prefix".*;
     var p1 = "hello.txt".*;
@@ -714,13 +776,17 @@ test "static: explicit glob_param_name works with multiple path params" {
 
 test "static: etag returns 304 on match" {
     const S = Static(.{ .dir = "testdata/static", .mount = "/static" });
+    const RouteStaticCtx = @import("../middleware.zig").staticContextType(.{S});
     const MwCtx = struct {};
-    const ReqT = @import("../request.zig").RequestWithPattern(
+    const ReqT = @import("../request.zig").RequestPWithPatternStatic(
         struct { if_none_match: parse.Optional(parse.String) },
+        struct {},
         struct {},
         &.{"path"},
         MwCtx,
+        RouteStaticCtx,
         "/static/{*path}",
+        "GET",
     );
 
     const path_buf = "/static/hello.txt".*;
@@ -737,7 +803,8 @@ test "static: etag returns 304 on match" {
             .query = @constCast(query_buf[0..]),
         };
         const mw_ctx: MwCtx = .{};
-        var reqv = ReqT.init(a, std.testing.io, line, mw_ctx);
+        var mw_static = try initStaticRouteCtx(S, a, "/static/{*path}");
+        var reqv = ReqT.initWithCtx(a, std.testing.io, line, mw_ctx, {}, &mw_static);
         defer reqv.deinit(a);
         var rel1 = "hello.txt".*;
         try reqv.parseParams(a, &.{rel1[0..]});
@@ -752,7 +819,7 @@ test "static: etag returns 304 on match" {
             .query = @constCast(query_buf[0..]),
         };
         const mw_ctx2: MwCtx = .{};
-        var reqv2 = ReqT.init(a, std.testing.io, line2, mw_ctx2);
+        var reqv2 = ReqT.initWithCtx(a, std.testing.io, line2, mw_ctx2, {}, &mw_static);
         defer reqv2.deinit(a);
         var rel6 = "hello.txt".*;
         try reqv2.parseParams(a, &.{rel6[0..]});
@@ -773,14 +840,22 @@ test "static: in-memory cache serves stale bytes when fs watch is disabled" {
         .mount = "/static",
         .fs_watch = .{ .enabled = false },
     });
+    const RouteStaticCtx = @import("../middleware.zig").staticContextType(.{S});
     const MwCtx = struct {};
-    const ReqT = @import("../request.zig").RequestWithPattern(
+    const ReqT = @import("../request.zig").RequestPWithPatternStatic(
         struct { if_none_match: parse.Optional(parse.String) },
+        struct {},
         struct {},
         &.{"path"},
         MwCtx,
+        RouteStaticCtx,
         "/static/{*path}",
+        "GET",
     );
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    var mw_static = try initStaticRouteCtx(S, a, "/static/{*path}");
 
     var cwd = Io.Dir.cwd();
     try cwd.createDirPath(std.testing.io, static_dir);
@@ -791,9 +866,6 @@ test "static: in-memory cache serves stale bytes when fs watch is disabled" {
     const query_buf: [0]u8 = .{};
 
     {
-        var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
-        defer arena_state.deinit();
-        const a = arena_state.allocator();
         const line: @import("../request.zig").RequestLine = .{
             .method = "GET",
             .version = .http11,
@@ -801,7 +873,7 @@ test "static: in-memory cache serves stale bytes when fs watch is disabled" {
             .query = @constCast(query_buf[0..]),
         };
         const mw_ctx: MwCtx = .{};
-        var reqv = ReqT.init(a, std.testing.io, line, mw_ctx);
+        var reqv = ReqT.initWithCtx(a, std.testing.io, line, mw_ctx, {}, &mw_static);
         defer reqv.deinit(a);
         var rel2 = "watch.txt".*;
         try reqv.parseParams(a, &.{rel2[0..]});
@@ -813,9 +885,6 @@ test "static: in-memory cache serves stale bytes when fs watch is disabled" {
     try writeTestFile(file_path, "v2\n");
 
     {
-        var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
-        defer arena_state.deinit();
-        const a = arena_state.allocator();
         const line: @import("../request.zig").RequestLine = .{
             .method = "GET",
             .version = .http11,
@@ -823,7 +892,7 @@ test "static: in-memory cache serves stale bytes when fs watch is disabled" {
             .query = @constCast(query_buf[0..]),
         };
         const mw_ctx: MwCtx = .{};
-        var reqv = ReqT.init(a, std.testing.io, line, mw_ctx);
+        var reqv = ReqT.initWithCtx(a, std.testing.io, line, mw_ctx, {}, &mw_static);
         defer reqv.deinit(a);
         var rel3 = "watch.txt".*;
         try reqv.parseParams(a, &.{rel3[0..]});
@@ -845,14 +914,22 @@ test "static: in-memory cache refreshes when fs watch is enabled" {
             .poll_interval_ms = 0,
         },
     });
+    const RouteStaticCtx = @import("../middleware.zig").staticContextType(.{S});
     const MwCtx = struct {};
-    const ReqT = @import("../request.zig").RequestWithPattern(
+    const ReqT = @import("../request.zig").RequestPWithPatternStatic(
         struct { if_none_match: parse.Optional(parse.String) },
+        struct {},
         struct {},
         &.{"path"},
         MwCtx,
+        RouteStaticCtx,
         "/static/{*path}",
+        "GET",
     );
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    var mw_static = try initStaticRouteCtx(S, a, "/static/{*path}");
 
     var cwd = Io.Dir.cwd();
     try cwd.createDirPath(std.testing.io, static_dir);
@@ -863,9 +940,6 @@ test "static: in-memory cache refreshes when fs watch is enabled" {
     const query_buf: [0]u8 = .{};
 
     {
-        var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
-        defer arena_state.deinit();
-        const a = arena_state.allocator();
         const line: @import("../request.zig").RequestLine = .{
             .method = "GET",
             .version = .http11,
@@ -873,7 +947,7 @@ test "static: in-memory cache refreshes when fs watch is enabled" {
             .query = @constCast(query_buf[0..]),
         };
         const mw_ctx: MwCtx = .{};
-        var reqv = ReqT.init(a, std.testing.io, line, mw_ctx);
+        var reqv = ReqT.initWithCtx(a, std.testing.io, line, mw_ctx, {}, &mw_static);
         defer reqv.deinit(a);
         var rel4 = "watch.txt".*;
         try reqv.parseParams(a, &.{rel4[0..]});
@@ -885,9 +959,6 @@ test "static: in-memory cache refreshes when fs watch is enabled" {
     try writeTestFile(file_path, "v2\n");
 
     {
-        var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
-        defer arena_state.deinit();
-        const a = arena_state.allocator();
         const line: @import("../request.zig").RequestLine = .{
             .method = "GET",
             .version = .http11,
@@ -895,7 +966,7 @@ test "static: in-memory cache refreshes when fs watch is enabled" {
             .query = @constCast(query_buf[0..]),
         };
         const mw_ctx: MwCtx = .{};
-        var reqv = ReqT.init(a, std.testing.io, line, mw_ctx);
+        var reqv = ReqT.initWithCtx(a, std.testing.io, line, mw_ctx, {}, &mw_static);
         defer reqv.deinit(a);
         var rel5 = "watch.txt".*;
         try reqv.parseParams(a, &.{rel5[0..]});

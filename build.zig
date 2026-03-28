@@ -1,5 +1,59 @@
 const std = @import("std");
 
+const Example = struct {
+    name: []const u8,
+    path: []const u8,
+    uses_zws: bool,
+};
+
+fn discoverExamples(b: *std.Build, allocator: std.mem.Allocator) ![]Example {
+    const io = b.graph.io;
+    var dir = try b.build_root.handle.openDir(io, "examples", .{ .iterate = true });
+    defer dir.close(io);
+
+    var it = dir.iterate();
+    var out: std.ArrayList(Example) = .empty;
+    errdefer {
+        for (out.items) |ex| {
+            allocator.free(ex.name);
+            allocator.free(ex.path);
+        }
+        out.deinit(allocator);
+    }
+
+    while (try it.next(io)) |entry| {
+        if (entry.kind != .file) continue;
+        if (!std.mem.endsWith(u8, entry.name, ".zig")) continue;
+
+        const path = try std.fmt.allocPrint(allocator, "examples/{s}", .{entry.name});
+        errdefer allocator.free(path);
+
+        const src = try b.build_root.handle.readFileAlloc(io, path, allocator, .limited(1024 * 1024));
+        defer allocator.free(src);
+
+        const has_main = std.mem.indexOf(u8, src, "pub fn main(") != null or std.mem.indexOf(u8, src, "fn main(") != null;
+        if (!has_main) continue;
+
+        const name = try allocator.dupe(u8, entry.name[0 .. entry.name.len - ".zig".len]);
+        errdefer allocator.free(name);
+
+        const uses_zws = std.mem.indexOf(u8, src, "@import(\"zwebsocket\")") != null;
+        try out.append(allocator, .{
+            .name = name,
+            .path = path,
+            .uses_zws = uses_zws,
+        });
+    }
+
+    std.sort.heap(Example, out.items, {}, struct {
+        fn lessThan(_: void, a: Example, ex: Example) bool {
+            return std.mem.lessThan(u8, a.path, ex.path);
+        }
+    }.lessThan);
+
+    return out.toOwnedSlice(allocator);
+}
+
 /// Configures build steps for this package.
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
@@ -96,18 +150,18 @@ pub fn build(b: *std.Build) void {
     const examples_step = b.step("examples", "Build all examples");
     const examples_check_step = b.step("examples-check", "Run all examples with --smoke");
 
-    const examples = [_]struct { name: []const u8, path: []const u8, uses_zws: bool }{
-        .{ .name = "basic_server", .path = "examples/basic_server.zig", .uses_zws = false },
-        .{ .name = "middleware", .path = "examples/middleware.zig", .uses_zws = false },
-        .{ .name = "builtin_middlewares", .path = "examples/builtin_middlewares.zig", .uses_zws = false },
-        .{ .name = "route_static_access", .path = "examples/route_static_access.zig", .uses_zws = false },
-        .{ .name = "upgrade_helper", .path = "examples/upgrade_helper.zig", .uses_zws = false },
-        .{ .name = "echo_body", .path = "examples/echo_body.zig", .uses_zws = false },
-        .{ .name = "fast_plaintext", .path = "examples/fast_plaintext.zig", .uses_zws = false },
-        .{ .name = "ws_manual_upgrade", .path = "examples/ws_manual_upgrade.zig", .uses_zws = true },
+    const examples = discoverExamples(b, b.allocator) catch |err| {
+        std.debug.panic("failed to enumerate examples directory: {s}", .{@errorName(err)});
     };
+    defer {
+        for (examples) |ex| {
+            b.allocator.free(ex.name);
+            b.allocator.free(ex.path);
+        }
+        b.allocator.free(examples);
+    }
 
-    inline for (examples) |ex| {
+    for (examples) |ex| {
         const exe = b.addExecutable(.{
             .name = b.fmt("zhttp-example-{s}", .{ex.name}),
             .root_module = b.createModule(.{

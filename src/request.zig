@@ -11,6 +11,7 @@ const util = @import("util.zig");
 pub const Version = enum { http10, http11 };
 
 pub const BodyKind = enum { none, content_length, chunked };
+pub const BodyFraming = enum { none, content_length, chunked };
 
 pub const Base = struct {
     /// Stores `arena`.
@@ -29,6 +30,9 @@ pub const Base = struct {
     /// Stores `body_kind`.
     body_kind: BodyKind = .none,
     body_remaining: usize = 0, // for content-length bodies
+    /// Stores immutable framing parsed from headers.
+    body_framing: BodyFraming = .none,
+    body_framing_content_length: ?usize = null,
     headers_parsed: bool = false,
 };
 
@@ -623,6 +627,8 @@ pub fn RequestPWithPatternExt(
             self._base.connection_close = false;
             self._base.body_kind = .none;
             self._base.body_remaining = 0;
+            self._base.body_framing = .none;
+            self._base.body_framing_content_length = null;
             if (HeaderLookup.count != 0) {
                 // reset captures each request
                 parse.destroyStruct(&self._headers, a);
@@ -681,11 +687,15 @@ pub fn RequestPWithPatternExt(
 
             if (has_chunked and content_length != null) return error.BadRequest;
             if (has_chunked) {
+                self._base.body_framing = .chunked;
                 self._base.body_kind = .chunked;
             } else if (content_length) |cl| {
+                self._base.body_framing = .content_length;
+                self._base.body_framing_content_length = cl;
                 self._base.body_kind = if (cl == 0) .none else .content_length;
                 self._base.body_remaining = cl;
             } else {
+                self._base.body_framing = .none;
                 self._base.body_kind = .none;
             }
 

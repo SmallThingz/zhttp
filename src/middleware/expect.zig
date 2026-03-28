@@ -67,6 +67,14 @@ pub fn Expect(comptime opts: ExpectOptions) type {
             return res;
         }
 
+        fn hasFramedBody(base: anytype) bool {
+            return switch (base.body_framing) {
+                .none => false,
+                .chunked => true,
+                .content_length => (base.body_framing_content_length orelse 0) != 0,
+            };
+        }
+
         /// Executes Expect-header validation for the current request.
         pub fn call(comptime rctx: ReqCtx, req: rctx.T()) !Res {
             const state = req.middlewareData(info_name);
@@ -75,7 +83,7 @@ pub fn Expect(comptime opts: ExpectOptions) type {
             const expect_value = req.header(.expect) orelse return rctx.next(req);
             const base = req.baseMut();
             if (is100Continue(expect_value)) {
-                if (!allow_without_body and base.body_kind == .none) {
+                if (!allow_without_body and !hasFramedBody(base)) {
                     return reject(@TypeOf(req), req);
                 }
                 state.approved = true;
@@ -93,7 +101,11 @@ pub fn Expect(comptime opts: ExpectOptions) type {
                     if (!state.approved or state.sent) return;
 
                     const base = req.baseMut();
-                    if (base.body_kind == .none) return;
+                    switch (base.body_kind) {
+                        .none => return,
+                        .content_length => if (base.body_remaining == 0) return,
+                        .chunked => {},
+                    }
 
                     const w = req.raw().writer();
                     w.writeAll("HTTP/1.1 100 Continue\r\n\r\n") catch return;
@@ -184,6 +196,8 @@ test "expect middleware: accepts 100-continue and marks request approved" {
     const mw_ctx: MwCtx = .{ .expect = .{} };
     var reqv = ReqT.init(gpa, std.testing.io, line, mw_ctx);
     defer reqv.deinit(gpa);
+    reqv.base().body_framing = .content_length;
+    reqv.base().body_framing_content_length = 1;
     reqv.base().body_kind = .content_length;
     reqv.base().body_remaining = 1;
     reqv.headersMut().expect = .{

@@ -1325,6 +1325,48 @@ test "dispatch: expect middleware emits interim 100-continue on post-handler dra
     try std.testing.expect(std.mem.endsWith(u8, got, "\r\n\r\nok"));
 }
 
+test "dispatch: expect middleware uses original framing after earlier middleware drains chunked body" {
+    const DrainMw = struct {
+        pub const Info: middleware.MiddlewareInfo = .{ .name = "drain" };
+
+        pub fn call(comptime rctx: ReqCtx, req: rctx.T()) !Res {
+            try req.discardUnreadBody();
+            return rctx.next(req);
+        }
+    };
+    const ExpectMw = @import("middleware/expect.zig").Expect(.{});
+    const S = Compiled(void, .{
+        post("/x", struct {
+            pub const Info: EndpointInfo = .{};
+            pub fn call(comptime rctx: ReqCtx, req: rctx.T()) !Res {
+                _ = req;
+                return Res.text(200, "ok");
+            }
+        }),
+    }, .{ DrainMw, ExpectMw });
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    var r = Io.Reader.fixed(
+        "POST /x HTTP/1.1\r\n" ++
+            "Expect: 100-continue\r\n" ++
+            "Transfer-Encoding: chunked\r\n" ++
+            "\r\n" ++
+            "5\r\nhello\r\n0\r\n\r\n",
+    );
+
+    const line = try request.parseRequestLineBorrowed(&r, 8 * 1024);
+    var out: [512]u8 = undefined;
+    const res = try dispatchForTest(S, {}, a, &r, line, out[0..]);
+    try std.testing.expectEqual(.@"continue", res.action);
+    const got = out[0..res.len];
+    try std.testing.expect(std.mem.startsWith(u8, got, "HTTP/1.1 200 OK\r\n"));
+    try std.testing.expect(std.mem.indexOf(u8, got, "100 Continue") == null);
+    try std.testing.expect(std.mem.endsWith(u8, got, "\r\n\r\nok"));
+}
+
 test "dispatch: pipelined request discards unread chunked body" {
     const S = Compiled(void, .{
         post("/x", struct {

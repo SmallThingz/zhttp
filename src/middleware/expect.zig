@@ -16,6 +16,12 @@ pub const ExpectOptions = struct {
     status: u16 = 417,
     /// Body returned when `Expect` contains an unsupported value.
     body: []const u8 = "expectation failed\n",
+    /// When false (default), `Expect: 100-continue` is rejected for requests
+    /// that have no body framing (for example `GET` without body or
+    /// `Content-Length: 0`).
+    ///
+    /// Set true to accept `Expect: 100-continue` even when no body is present.
+    allow_without_body: bool = false,
 };
 
 const ExpectState = struct {
@@ -32,12 +38,14 @@ fn is100Continue(value: []const u8) bool {
 /// Validates request `Expect` header and enables `100 Continue` body-read handling.
 ///
 /// - Missing `Expect` header: pass-through.
-/// - `Expect: 100-continue`: marks the request as approved; first body read/discard emits interim `100 Continue`.
+/// - `Expect: 100-continue`: by default requires request body framing; when accepted,
+///   first body read/discard emits interim `100 Continue`.
 /// - Any other value: returns `417` and closes the connection.
 pub fn Expect(comptime opts: ExpectOptions) type {
     const reject_status: u16 = opts.status;
     const reject_body: []const u8 = opts.body;
     const info_name: []const u8 = opts.name orelse "expect";
+    const allow_without_body: bool = opts.allow_without_body;
 
     return struct {
         pub const Info = MiddlewareInfo{
@@ -55,12 +63,19 @@ pub fn Expect(comptime opts: ExpectOptions) type {
             state.approved = false;
             state.sent = false;
             const expect_value = req.header(.expect) orelse return rctx.next(req);
+            const base = req.baseMut();
             if (is100Continue(expect_value)) {
+                if (!allow_without_body and base.body_kind == .none) {
+                    base.body_kind = .none;
+                    base.body_remaining = 0;
+                    var res = Res.text(reject_status, reject_body);
+                    res.close = true;
+                    return res;
+                }
                 state.approved = true;
                 return rctx.next(req);
             }
 
-            const base = req.baseMut();
             base.body_kind = .none;
             base.body_remaining = 0;
             var res = Res.text(reject_status, reject_body);
@@ -167,6 +182,8 @@ test "expect middleware: accepts 100-continue and marks request approved" {
     const mw_ctx: MwCtx = .{ .expect = .{} };
     var reqv = ReqT.init(gpa, std.testing.io, line, mw_ctx);
     defer reqv.deinit(gpa);
+    reqv.base().body_kind = .content_length;
+    reqv.base().body_remaining = 1;
     reqv.headersMut().expect = .{
         .present = true,
         .inner = .{ .value = "100-CONTINUE" },
@@ -176,6 +193,87 @@ test "expect middleware: accepts 100-continue and marks request approved" {
     try std.testing.expectEqual(@as(u16, 200), @intFromEnum(res.status));
     try std.testing.expect(reqv.middlewareDataConst("expect").approved);
     try std.testing.expect(!reqv.middlewareDataConst("expect").sent);
+}
+
+test "expect middleware: rejects 100-continue when body is absent by default" {
+    const Mw = Expect(.{});
+    const MwCtx = struct {
+        expect: Mw.Info.data.?,
+    };
+    const ReqT = @import("../request.zig").Request(struct {
+        /// Captured request `Expect` header value.
+        expect: parse.Optional(parse.String),
+    }, struct {}, &.{}, MwCtx);
+
+    const Next = struct {
+        /// Test helper next-handler implementation.
+        pub const function = call;
+        pub fn call(comptime rctx: ReqCtx, _: rctx.T()) !Res {
+            return Res.text(200, "ok");
+        }
+    };
+
+    const gpa = std.testing.allocator;
+    const path_buf = "/".*;
+    const query_buf: [0]u8 = .{};
+    const line: @import("../request.zig").RequestLine = .{
+        .method = "GET",
+        .version = .http11,
+        .path = @constCast(path_buf[0..]),
+        .query = @constCast(query_buf[0..]),
+    };
+    const mw_ctx: MwCtx = .{ .expect = .{} };
+    var reqv = ReqT.init(gpa, std.testing.io, line, mw_ctx);
+    defer reqv.deinit(gpa);
+    reqv.headersMut().expect = .{
+        .present = true,
+        .inner = .{ .value = "100-continue" },
+    };
+
+    const res = try test_helpers.runMiddlewareTest(Mw, ReqT, Next, &reqv, line.method);
+    try std.testing.expectEqual(@as(u16, 417), @intFromEnum(res.status));
+    try std.testing.expect(res.close);
+    try std.testing.expect(!reqv.middlewareDataConst("expect").approved);
+}
+
+test "expect middleware: permissive mode allows 100-continue without body" {
+    const Mw = Expect(.{ .allow_without_body = true });
+    const MwCtx = struct {
+        expect: Mw.Info.data.?,
+    };
+    const ReqT = @import("../request.zig").Request(struct {
+        /// Captured request `Expect` header value.
+        expect: parse.Optional(parse.String),
+    }, struct {}, &.{}, MwCtx);
+
+    const Next = struct {
+        /// Test helper next-handler implementation.
+        pub const function = call;
+        pub fn call(comptime rctx: ReqCtx, _: rctx.T()) !Res {
+            return Res.text(200, "ok");
+        }
+    };
+
+    const gpa = std.testing.allocator;
+    const path_buf = "/".*;
+    const query_buf: [0]u8 = .{};
+    const line: @import("../request.zig").RequestLine = .{
+        .method = "GET",
+        .version = .http11,
+        .path = @constCast(path_buf[0..]),
+        .query = @constCast(query_buf[0..]),
+    };
+    const mw_ctx: MwCtx = .{ .expect = .{} };
+    var reqv = ReqT.init(gpa, std.testing.io, line, mw_ctx);
+    defer reqv.deinit(gpa);
+    reqv.headersMut().expect = .{
+        .present = true,
+        .inner = .{ .value = "100-continue" },
+    };
+
+    const res = try test_helpers.runMiddlewareTest(Mw, ReqT, Next, &reqv, line.method);
+    try std.testing.expectEqual(@as(u16, 200), @intFromEnum(res.status));
+    try std.testing.expect(reqv.middlewareDataConst("expect").approved);
 }
 
 test "expect middleware: rejects unsupported expectation with close" {

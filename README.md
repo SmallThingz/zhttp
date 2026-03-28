@@ -67,7 +67,7 @@ Add as a dependency:
 ```bash
 <!-- README_FETCH:START -->
 
-zig fetch --save git+https://github.com/SmallThingz/zhttp?ref=ac0dd7f644d22207fe9b9693082c864517b2c922
+zig fetch --save git+https://github.com/SmallThingz/zhttp?ref=9e770185ea8e5c18efc37a95651434a0a12d6e89
 <!-- README_FETCH:END -->
 ```
 
@@ -159,21 +159,6 @@ See [`examples/builtin_middlewares.zig`](./examples/builtin_middlewares.zig) for
 ## Performance Snapshots
 
 Benchmark commands and modes are documented in [`benchmark/README.md`](./benchmark/README.md).
-
-<!-- README_BENCHMARK:START -->
-
-Source: `benchmark/results/bench_latest.json`
-
-Config: host=`127.0.0.1` path=`/plaintext` conns=1 iters=200000 warmup=10000 full_request=false
-
-| Target | req/s | ns/req |
-|---|---:|---:|
-| zhttp | 109572.66 | 9126.40 |
-
-No benchmark transport errors were reported.
-
-Fairness notes: benchmark uses fixed response bytes discovered twice and pinned before timed runs
-<!-- README_BENCHMARK:END -->
 
 <!-- README_COMPARISON:START -->
 

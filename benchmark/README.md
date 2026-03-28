@@ -29,7 +29,7 @@ zig build bench
 ```
 
 `run_zhttp_external` writes `benchmark/results/bench_latest.json` and
-`benchmark/results/bench_latest.md`, and refreshes README benchmark/fetch sections.
+`benchmark/results/bench_latest.md`, and refreshes the README fetch section.
 
 ## FaF (external)
 

@@ -361,6 +361,7 @@ test "compression: check_then_add skips duplicate vary" {
 }
 
 test "compression: selects deflate when preferred" {
+    const payload = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
     const Mw = Compression(.{ .min_size = 0 });
     const MwCtx = struct {};
     const ReqT = @import("../request.zig").Request(
@@ -377,7 +378,7 @@ test "compression: selects deflate when preferred" {
             return .{
                 .status = .ok,
                 .headers = &.{},
-                .body = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                .body = payload,
             };
         }
     };
@@ -405,6 +406,53 @@ test "compression: selects deflate when preferred" {
     try std.testing.expectEqualStrings("deflate", res.headers[0].value);
     try std.testing.expect(res.body.len > 2);
     try std.testing.expectEqual(@as(u8, 0x78), res.body[0]);
+}
+
+test "compression: selects gzip when preferred" {
+    const payload = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
+    const Mw = Compression(.{ .min_size = 0 });
+    const MwCtx = struct {};
+    const ReqT = @import("../request.zig").Request(
+        struct { accept_encoding: parse.Optional(parse.String) },
+        struct {},
+        &.{},
+        MwCtx,
+    );
+
+    const Next = struct {
+        /// Test helper next-handler implementation with compressible payload.
+        pub const function = call;
+        pub fn call(comptime rctx: ReqCtx, _: rctx.T()) !Res {
+            return .{
+                .status = .ok,
+                .headers = &.{},
+                .body = payload,
+            };
+        }
+    };
+
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    const path_buf = "/".*;
+    const query_buf: [0]u8 = .{};
+    const line: @import("../request.zig").RequestLine = .{
+        .method = "GET",
+        .version = .http11,
+        .path = @constCast(path_buf[0..]),
+        .query = @constCast(query_buf[0..]),
+    };
+    const mw_ctx: MwCtx = .{};
+    var reqv = ReqT.init(a, std.testing.io, line, mw_ctx);
+    defer reqv.deinit(a);
+    var r = std.Io.Reader.fixed("Accept-Encoding: gzip, deflate;q=0\r\n\r\n");
+    try reqv.parseHeaders(a, &r, 1024);
+
+    const res = try test_helpers.runMiddlewareTest(Mw, ReqT, Next, &reqv, line.method);
+    try std.testing.expectEqualStrings("gzip", res.headers[0].value);
+    try std.testing.expect(res.body.len > 10);
+    try std.testing.expectEqual(@as(u8, 0x1f), res.body[0]);
+    try std.testing.expectEqual(@as(u8, 0x8b), res.body[1]);
 }
 
 test "compression: selects brotli when preferred" {

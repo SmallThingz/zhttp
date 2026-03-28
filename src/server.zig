@@ -37,6 +37,8 @@ pub const Config = struct {
     max_single_header_size: usize = 8 * 1024,
     /// Maximum total header bytes (bytes, including line endings).
     max_header_bytes: usize = 32 * 1024,
+    /// Maximum bytes the arena can retain after a reset
+    arena_reset_limit: usize = 1024 * 1024,
 };
 
 fn configField(comptime cfg: anytype, comptime name: []const u8) @FieldType(Config, name) {
@@ -325,11 +327,12 @@ pub fn Server(comptime def: anytype) type {
             var sr = stream.reader(self.io, &read_buf);
             var sw = stream.writer(self.io, &write_buf);
 
+            var arena = std.heap.ArenaAllocator.init(self.gpa);
+            defer arena.deinit();
             blk: switch (Action.@"continue") {
                 .@"continue" => {
-                    var arena = std.heap.ArenaAllocator.init(self.gpa);
-                    defer arena.deinit();
                     const a = arena.allocator();
+                    defer arena.reset(.{ .retain_with_limit = config.arena_reset_limit });
 
                     const line = request.parseRequestLineBorrowed(&sr.interface, Conf.max_request_line) catch |err| {
                         continue :blk switch (err) {

@@ -1,8 +1,6 @@
 const std = @import("std");
 const builtin = @import("builtin");
 
-const ReadmeBenchmarkStartMarker = "<!-- README_BENCHMARK:START -->";
-const ReadmeBenchmarkEndMarker = "<!-- README_BENCHMARK:END -->";
 const ReadmeComparisonStartMarker = "<!-- README_COMPARISON:START -->";
 const ReadmeComparisonEndMarker = "<!-- README_COMPARISON:END -->";
 const ReadmeFetchStartMarker = "<!-- README_FETCH:START -->";
@@ -1251,28 +1249,6 @@ fn renderBenchmarkMarkdown(allocator: std.mem.Allocator, snap: BenchmarkSnapshot
     return out.toOwnedSlice();
 }
 
-fn renderReadmeBenchmarkSummary(allocator: std.mem.Allocator, snap: BenchmarkSnapshot) ![]u8 {
-    var out: std.Io.Writer.Allocating = .init(allocator);
-    errdefer out.deinit();
-    const w = &out.writer;
-
-    try w.writeAll("Source: `benchmark/results/bench_latest.json`\n\n");
-    try w.print(
-        "Config: host=`{s}` path=`{s}` conns={d} iters={d} warmup={d} full_request={}\n\n",
-        .{ snap.config.host, snap.config.path, snap.config.conns, snap.config.iters, snap.config.warmup, snap.config.full_request },
-    );
-    try w.writeAll("| Target | req/s | ns/req |\n");
-    try w.writeAll("|---|---:|---:|\n");
-    try w.print("| zhttp | {d:.2} | {d:.2} |\n", .{ snap.zhttp.req_per_s, snap.zhttp.ns_per_req });
-    if (snap.zhttp.first_error == null) {
-        try w.writeAll("\nNo benchmark transport errors were reported.\n");
-    } else if (snap.zhttp.first_error) |err| {
-        try w.print("\n- zhttp first_error: `{s}`\n", .{err});
-    }
-    try w.print("\nFairness notes: {s}\n", .{snap.fairness});
-    return out.toOwnedSlice();
-}
-
 fn renderCompareMarkdown(allocator: std.mem.Allocator, snap: CompareSnapshot) ![]u8 {
     var out: std.Io.Writer.Allocating = .init(allocator);
     errdefer out.deinit();
@@ -1334,23 +1310,6 @@ fn renderReadmeComparisonSummary(allocator: std.mem.Allocator, snap: CompareSnap
     return out.toOwnedSlice();
 }
 
-fn syncReadmeBenchmarkSummary(io: std.Io, allocator: std.mem.Allocator, root: []const u8) !void {
-    const replacement = blk: {
-        const json_path = try std.fs.path.join(allocator, &.{ root, BenchmarkLatestJsonRelPath });
-        defer allocator.free(json_path);
-        const json = try readFileMaybe(io, allocator, json_path);
-        if (json == null) break :blk try allocator.dupe(u8, "Run `zig build bench` to generate benchmark summary.");
-        defer allocator.free(json.?);
-        const parsed = try std.json.parseFromSlice(BenchmarkSnapshot, allocator, json.?, .{
-            .ignore_unknown_fields = true,
-        });
-        defer parsed.deinit();
-        break :blk try renderReadmeBenchmarkSummary(allocator, parsed.value);
-    };
-    defer allocator.free(replacement);
-    try updateReadmeSection(io, allocator, root, ReadmeBenchmarkStartMarker, ReadmeBenchmarkEndMarker, replacement);
-}
-
 fn syncReadmeComparisonSummary(io: std.Io, allocator: std.mem.Allocator, root: []const u8) !void {
     const replacement = blk: {
         const json_path = try std.fs.path.join(allocator, &.{ root, ComparisonLatestJsonRelPath });
@@ -1368,7 +1327,7 @@ fn syncReadmeComparisonSummary(io: std.Io, allocator: std.mem.Allocator, root: [
     try updateReadmeSection(io, allocator, root, ReadmeComparisonStartMarker, ReadmeComparisonEndMarker, replacement);
 }
 
-/// Writes benchmark snapshot and refreshes README benchmark/fetch sections.
+/// Writes benchmark snapshot and refreshes README fetch section.
 pub fn writeBenchmarkSnapshotAndSyncReadme(
     io: std.Io,
     allocator: std.mem.Allocator,
@@ -1405,7 +1364,6 @@ pub fn writeBenchmarkSnapshotAndSyncReadme(
     defer allocator.free(md_path);
     _ = try writeFileIfChanged(io, allocator, md_path, md);
 
-    try syncReadmeBenchmarkSummary(io, allocator, root);
     try syncReadmeFetchCommand(io, allocator, root);
 
     const summary = try std.fmt.allocPrint(

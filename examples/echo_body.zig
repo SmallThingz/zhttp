@@ -23,6 +23,7 @@ fn usage() void {
 }
 
 const Echo = struct {
+    pub const Info: zhttp.router.EndpointInfo = .{};
     pub fn call(comptime rctx: ReqCtx, req: rctx.T()) !zhttp.Res {
         const body = try req.bodyAll(1024 * 1024);
         return zhttp.Res.text(200, body);
@@ -31,7 +32,7 @@ const Echo = struct {
 
 const SrvT = zhttp.Server(.{
     .routes = .{
-        zhttp.post("/echo", Echo, .{}),
+        zhttp.post("/echo", Echo),
     },
 });
 

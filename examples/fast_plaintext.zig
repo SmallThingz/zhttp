@@ -23,6 +23,7 @@ fn usage() void {
 }
 
 const Plaintext = struct {
+    pub const Info: zhttp.router.EndpointInfo = .{};
     pub fn call(comptime rctx: ReqCtx, req: rctx.T()) !zhttp.Res {
         _ = req;
         return .{
@@ -38,7 +39,7 @@ const Plaintext = struct {
 
 const SrvT = zhttp.Server(.{
     .routes = .{
-        zhttp.get("/plaintext", Plaintext, .{}),
+        zhttp.get("/plaintext", Plaintext),
     },
 });
 

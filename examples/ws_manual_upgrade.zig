@@ -25,7 +25,7 @@ fn usage() void {
         \\Notes:
         \\  - HTTP handshake validation is done in userspace via zwebsocket.
         \\  - `zhttp.upgrade.websocketResponse(...)` builds the 101 websocket response.
-        \\  - route .upgrade_handler owns upgraded connection lifecycle.
+        \\  - endpoint `upgrade(...)` owns upgraded connection lifecycle.
         \\
     , .{});
 }
@@ -52,6 +52,9 @@ const WsHeaders = struct {
 };
 
 const Handshake = struct {
+    pub const Info: zhttp.router.EndpointInfo = .{
+        .headers = WsHeaders,
+    };
     pub fn call(comptime rctx: ReqCtx, req: rctx.T()) !zhttp.Res {
         const auth = req.header(.x_auth) orelse return zhttp.Res.text(401, "missing x-auth\n");
         if (!std.mem.eql(u8, auth, "secret")) return zhttp.Res.text(403, "bad x-auth\n");
@@ -82,6 +85,17 @@ const Handshake = struct {
             .subprotocol = accepted.selected_subprotocol,
             .extensions = accepted.selected_extensions,
         });
+    }
+
+    pub fn upgrade(
+        server: anytype,
+        stream: *const std.Io.net.Stream,
+        r: *Io.Reader,
+        w: *Io.Writer,
+        line: zhttp.request.RequestLine,
+        res: zhttp.Res,
+    ) void {
+        return onUpgrade(server, stream, r, w, line, res);
     }
 };
 
@@ -136,10 +150,7 @@ fn onUpgrade(
 
 const Server = zhttp.Server(.{
     .routes = .{
-        zhttp.get("/ws", Handshake, .{
-            .headers = WsHeaders,
-            .upgrade_handler = onUpgrade,
-        }),
+        zhttp.get("/ws", Handshake),
     },
 });
 

@@ -469,7 +469,7 @@ fn RequestPWithPatternExt(
             return @field(self._query, @tagName(field)).get();
         }
 
-        /// Get a typed path param value (declared in route `opts.params` or middleware `Info.path`).
+        /// Get a typed path param value (declared in endpoint `Info.path` or middleware `Info.path`).
         /// If a route param is not declared, it defaults to a string.
         ///
         /// e.g. `req.paramValue(.id)`.

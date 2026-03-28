@@ -52,7 +52,6 @@ fn configField(comptime cfg: anytype, comptime name: []const u8) @FieldType(Conf
 /// - `error_handler`      Optional fallback transport/dispatch error handler:
 ///                        `fn(*Server, *Io.Writer, comptime ErrorSet: type, err: ErrorSet) router.Action`.
 /// - `not_found_handler`  Optional fallback endpoint type override for route misses.
-/// - `not_found_options`  Optional request options for the fallback handler (`headers`, `query`, `middlewares`).
 pub fn Server(comptime def: anytype) type {
     if (!@hasField(@TypeOf(def), "routes")) @compileError("Server definition must include `.routes = .{ ... }`");
     const Context = if (@hasField(@TypeOf(def), "Context")) def.Context else void;
@@ -83,14 +82,14 @@ pub fn Server(comptime def: anytype) type {
     };
     const Compiled = router.Compiled(Context, Routes, Middlewares);
     const DefaultNotFound = struct {
+        pub const Info: router.EndpointInfo = .{};
         pub fn call(comptime _: ReqCtx, req: anytype) !response.Res {
             _ = req;
             return response.Res.text(404, "not found");
         }
     };
     const NotFoundHandler = if (@hasField(DefT, "not_found_handler")) def.not_found_handler else DefaultNotFound;
-    const NotFoundOptions = if (@hasField(DefT, "not_found_options")) def.not_found_options else .{};
-    const NotFoundRoute = router.get("/", NotFoundHandler, NotFoundOptions);
+    const NotFoundRoute = router.get("/", NotFoundHandler);
     const NotFoundCompiled = router.Compiled(Context, .{NotFoundRoute}, Middlewares);
     const NotFoundMwList = middleware.concatTypeLists(GlobalMwList, NotFoundRoute.middlewares);
     const NotFoundStaticCtx = middleware.staticContextType(NotFoundMwList);
@@ -378,10 +377,11 @@ test "Connection: close header closes socket" {
     const SrvT = Server(.{
         .routes = .{
             router.get("/plaintext", struct {
+                pub const Info: router.EndpointInfo = .{};
                 pub fn call(comptime _: ReqCtx, req: anytype) !response.Res {
                     return Bench.plaintext(req);
                 }
-            }, .{}),
+            }),
         },
         .config = .{
             .read_buffer = 64 * 1024,
@@ -452,10 +452,11 @@ test "unknown path returns 404 and keeps connection" {
     const SrvT = Server(.{
         .routes = .{
             router.get("/ok", struct {
+                pub const Info: router.EndpointInfo = .{};
                 pub fn call(comptime _: ReqCtx, req: anytype) !response.Res {
                     return Handlers.ok(req);
                 }
-            }, .{}),
+            }),
         },
     });
 
@@ -530,23 +531,24 @@ test "not_found_handler can parse query headers and body" {
     const SrvT = Server(.{
         .routes = .{
             router.get("/ok", struct {
+                pub const Info: router.EndpointInfo = .{};
                 pub fn call(comptime _: ReqCtx, req: anytype) !response.Res {
                     return Handlers.ok(req);
                 }
-            }, .{}),
+            }),
         },
         .not_found_handler = struct {
+            pub const Info: router.EndpointInfo = .{
+                .query = struct {
+                    name: parse.Optional(parse.String),
+                },
+                .headers = struct {
+                    host: parse.Optional(parse.String),
+                },
+            };
             pub fn call(comptime _: ReqCtx, req: anytype) !response.Res {
                 return Handlers.missing(req);
             }
-        },
-        .not_found_options = .{
-            .query = struct {
-                name: parse.Optional(parse.String),
-            },
-            .headers = struct {
-                host: parse.Optional(parse.String),
-            },
         },
     });
 
@@ -619,10 +621,11 @@ test "HEAD response omits body" {
     const SrvT = Server(.{
         .routes = .{
             router.get("/ok", struct {
+                pub const Info: router.EndpointInfo = .{};
                 pub fn call(comptime _: ReqCtx, req: anytype) !response.Res {
                     return Handlers.ok(req);
                 }
-            }, .{}),
+            }),
         },
     });
 
@@ -677,10 +680,11 @@ test "bad request line returns 400" {
     const SrvT = Server(.{
         .routes = .{
             router.get("/ok", struct {
+                pub const Info: router.EndpointInfo = .{};
                 pub fn call(comptime _: ReqCtx, req: anytype) !response.Res {
                     return Handlers.ok(req);
                 }
-            }, .{}),
+            }),
         },
     });
 
@@ -743,10 +747,11 @@ test "custom error_handler handles handler errors only" {
     const SrvT = Server(.{
         .routes = .{
             router.get("/boom", struct {
+                pub const Info: router.EndpointInfo = .{};
                 pub fn call(comptime _: ReqCtx, req: anytype) !response.Res {
                     return Handlers.boom(req);
                 }
-            }, .{}),
+            }),
         },
         .error_handler = Handlers.onError,
     });
@@ -829,10 +834,11 @@ test "handler res.close closes socket" {
     const SrvT = Server(.{
         .routes = .{
             router.get("/x", struct {
+                pub const Info: router.EndpointInfo = .{};
                 pub fn call(comptime _: ReqCtx, req: anytype) !response.Res {
                     return Handlers.close_me(req);
                 }
-            }, .{}),
+            }),
         },
     });
 
@@ -888,11 +894,12 @@ test "HTTP/1.0 request does not keep-alive" {
     const SrvT = Server(.{
         .routes = .{
             router.get("/x", struct {
+                pub const Info: router.EndpointInfo = .{};
                 pub fn call(comptime _: ReqCtx, req: anytype) !response.Res {
                     _ = req;
                     return Handlers.ok();
                 }
-            }, .{}),
+            }),
         },
     });
 
@@ -935,7 +942,7 @@ test "HTTP/1.0 request does not keep-alive" {
     group.await(io) catch {};
 }
 
-test "upgrade_handler: 101 triggers upgrade callback and stream ownership" {
+test "endpoint upgrade: 101 triggers upgrade callback and stream ownership" {
     const State = struct {
         /// Stores `upgraded`.
         upgraded: bool = false,
@@ -966,11 +973,14 @@ test "upgrade_handler: 101 triggers upgrade callback and stream ownership" {
         .Context = State,
         .routes = .{
             router.get("/ws", struct {
+                pub const Info: router.EndpointInfo = .{};
                 pub fn call(comptime _: ReqCtx, req: anytype) !response.Res {
                     return Handlers.ws(req);
                 }
-            }, .{
-                .upgrade_handler = Handlers.onUpgrade,
+
+                pub fn upgrade(server: anytype, stream: *const std.Io.net.Stream, r: *Io.Reader, w: *Io.Writer, line: request.RequestLine, res: response.Res) void {
+                    return Handlers.onUpgrade(server, stream, r, w, line, res);
+                }
             }),
         },
     });
@@ -1060,15 +1070,21 @@ test "middleware static_context: per-route init and request access" {
     const SrvT = Server(.{
         .routes = .{
             router.get("/a", struct {
+                pub const Info: router.EndpointInfo = .{
+                    .middlewares = &.{StaticMw},
+                };
                 pub fn call(comptime _: ReqCtx, req: anytype) !response.Res {
                     return Handlers.a(req);
                 }
-            }, .{ .middlewares = .{StaticMw} }),
+            }),
             router.get("/b", struct {
+                pub const Info: router.EndpointInfo = .{
+                    .middlewares = &.{StaticMw},
+                };
                 pub fn call(comptime _: ReqCtx, req: anytype) !response.Res {
                     return Handlers.b(req);
                 }
-            }, .{ .middlewares = .{StaticMw} }),
+            }),
         },
     });
 
@@ -1152,10 +1168,13 @@ test "middleware static_context: init errors propagate from Server.init" {
     const SrvT = Server(.{
         .routes = .{
             router.get("/x", struct {
+                pub const Info: router.EndpointInfo = .{
+                    .middlewares = &.{FailingMw},
+                };
                 pub fn call(comptime _: ReqCtx, req: anytype) !response.Res {
                     return Handlers.ok(req);
                 }
-            }, .{ .middlewares = .{FailingMw} }),
+            }),
         },
     });
 

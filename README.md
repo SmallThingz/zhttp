@@ -32,6 +32,12 @@ const std = @import("std");
 const zhttp = @import("zhttp");
 
 const Hello = struct {
+    pub const Info: zhttp.router.EndpointInfo = .{
+        .query = struct {
+            name: zhttp.parse.Optional(zhttp.parse.String),
+        },
+    };
+
     pub fn call(comptime rctx: zhttp.ReqCtx, req: rctx.T()) !zhttp.Res {
         const name = req.queryParam(.name) orelse "world";
         const body = try std.fmt.allocPrint(req.allocator(), "hello {s}\n", .{name});
@@ -41,11 +47,7 @@ const Hello = struct {
 
 const App = zhttp.Server(.{
     .routes = .{
-        zhttp.get("/hello", Hello, .{
-            .query = struct {
-                name: zhttp.parse.Optional(zhttp.parse.String),
-            },
-        }),
+        zhttp.get("/hello", Hello),
     },
 });
 
@@ -78,14 +80,14 @@ exe.root_module.addImport("zhttp", zhttp_dep.module("zhttp"));
 
 ## 🧩 Library API (At a Glance)
 
-- `zhttp.Server(.{ ... })` accepts `.Context`, `.middlewares`, `.operations`, `.routes`, `.config`, `.error_handler`, `.not_found_handler`, and `.not_found_options`. `.error_handler` is a writer-based hook for user handler/middleware errors with signature `fn(*Server, *std.Io.Writer, comptime ErrorSet: type, err: ErrorSet) zhttp.router.Action`. Server parse/validation errors stay on the built-in bad-request path. If no not-found handler is provided, a built-in `404 not found` handler is used.
-- Route helpers: `zhttp.get`, `post`, `put`, `delete`, `patch`, `head`, `options`, and `zhttp.route(...)`.
-- Route options: `.headers`, `.query`, `.params`, `.middlewares`, `.upgrade_handler`.
-- Preferred route endpoint shape: `type` exposing `pub fn call(comptime rctx: zhttp.ReqCtx, req: rctx.T()) !zhttp.Res`.
-- `.upgrade_handler` is route-local and optional (`null` by default). If present and the route returns `101 Switching Protocols`, zhttp writes the upgrade response and calls `fn(server, stream, r, w, line, res) void`; that path returns `zhttp.router.Action.upgraded` and the upgrade handler owns connection close/lifecycle.
+- `zhttp.Server(.{ ... })` accepts `.Context`, `.middlewares`, `.operations`, `.routes`, `.config`, `.error_handler`, and `.not_found_handler`. `.error_handler` is a writer-based hook for user handler/middleware errors with signature `fn(*Server, *std.Io.Writer, comptime ErrorSet: type, err: ErrorSet) zhttp.router.Action`. Server parse/validation errors stay on the built-in bad-request path. If no not-found handler is provided, a built-in `404 not found` endpoint is used.
+- Route helpers: `zhttp.get`, `post`, `put`, `delete`, `patch`, `head`, `options`, and `zhttp.route(...)` each take `(pattern, EndpointType)`.
+- Endpoint types must expose `pub const Info: zhttp.router.EndpointInfo = .{ ... };` and `pub fn call(comptime rctx: zhttp.ReqCtx, req: rctx.T()) !zhttp.Res`.
+- `EndpointInfo` fields: `.headers`, `.query`, `.path`, `.middlewares`, `.operations`.
+- Optional endpoint upgrade hook: `pub fn upgrade(server, stream, r, w, line, res) void`. If present and `call` returns `101 Switching Protocols`, zhttp writes upgrade response and returns `zhttp.router.Action.upgraded`; the upgrade hook owns connection lifecycle.
 - Standard middleware signatures are available at top-level as `zhttp.CorsSignature`.
 - Header capture keys match case-insensitively, and `_` in field names matches `-` in incoming headers.
-- If `.params` is omitted, path params default to strings.
+- If `Info.path` is omitted, path params default to strings.
 - Route patterns support both segment params (`/users/{id}`) and trailing named globs (`/static/{*path}`).
 - Typed request accessors include `req.header(...)`, `req.queryParam(...)`, `req.paramValue(...)`, and `req.middlewareData(...)`.
 
@@ -106,10 +108,10 @@ exe.root_module.addImport("zhttp", zhttp_dep.module("zhttp"));
 - `zhttp.operations.Cors`
 - `zhttp.operations.Static`
 
-Both built-ins are zero-configuration operation types. `zhttp.operations.Cors`
-discovers matching middlewares by `zhttp.CorsSignature`, and
-`zhttp.operations.Static` discovers middlewares that expose
-`operationRoutes()`.
+Both built-ins are route-tagged operations. Add operation types to endpoint
+`Info.operations` and also register operation order in `Server(.{ .operations = .{...} })`.
+`zhttp.operations.Cors` discovers matching middlewares by `zhttp.CorsSignature`,
+and `zhttp.operations.Static` discovers middlewares that expose `operationRoutes()`.
 
 See [`examples/builtin_middlewares.zig`](./examples/builtin_middlewares.zig) for the full built-in stack in one server.
 

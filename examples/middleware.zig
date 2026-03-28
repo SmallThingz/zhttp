@@ -41,6 +41,7 @@ const Auth = struct {
 };
 
 const Public = struct {
+    pub const Info: zhttp.router.EndpointInfo = .{};
     pub fn call(comptime rctx: ReqCtx, req: rctx.T()) !zhttp.Res {
         _ = req;
         return zhttp.Res.text(200, "public\n");
@@ -48,6 +49,9 @@ const Public = struct {
 };
 
 const Private = struct {
+    pub const Info: zhttp.router.EndpointInfo = .{
+        .middlewares = &.{Auth},
+    };
     pub fn call(comptime rctx: ReqCtx, req: rctx.T()) !zhttp.Res {
         _ = req;
         return zhttp.Res.text(200, "private\n");
@@ -56,10 +60,8 @@ const Private = struct {
 
 const SrvT = zhttp.Server(.{
     .routes = .{
-        zhttp.get("/public", Public, .{}),
-        zhttp.get("/private", Private, .{
-            .middlewares = .{Auth},
-        }),
+        zhttp.get("/public", Public),
+        zhttp.get("/private", Private),
     },
 });
 

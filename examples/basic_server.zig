@@ -20,6 +20,7 @@ fn usage() void {
 }
 
 const Health = struct {
+    pub const Info: zhttp.router.EndpointInfo = .{};
     pub fn call(comptime rctx: ReqCtx, req: rctx.T()) !zhttp.Res {
         _ = req;
         return zhttp.Res.text(200, "ok");
@@ -27,6 +28,11 @@ const Health = struct {
 };
 
 const Hello = struct {
+    pub const Info: zhttp.router.EndpointInfo = .{
+        .query = struct {
+            name: zhttp.parse.Optional(zhttp.parse.String),
+        },
+    };
     pub fn call(comptime rctx: ReqCtx, req: rctx.T()) !zhttp.Res {
         const name_opt = req.queryParam(.name) orelse "world";
         const body = try std.fmt.allocPrint(req.allocator(), "hello {s}\n", .{name_opt});
@@ -35,6 +41,14 @@ const Hello = struct {
 };
 
 const User = struct {
+    pub const Info: zhttp.router.EndpointInfo = .{
+        .headers = struct {
+            host: zhttp.parse.Optional(zhttp.parse.String),
+        },
+        .path = struct {
+            id: zhttp.parse.Int(u64),
+        },
+    };
     pub fn call(comptime rctx: ReqCtx, req: rctx.T()) !zhttp.Res {
         const id = req.paramValue(.id);
         const host = req.header(.host) orelse "(no host)";
@@ -45,20 +59,9 @@ const User = struct {
 
 const SrvT = zhttp.Server(.{
     .routes = .{
-        zhttp.get("/health", Health, .{}),
-        zhttp.get("/hello", Hello, .{
-            .query = struct {
-                name: zhttp.parse.Optional(zhttp.parse.String),
-            },
-        }),
-        zhttp.get("/users/{id}", User, .{
-            .headers = struct {
-                host: zhttp.parse.Optional(zhttp.parse.String),
-            },
-            .params = struct {
-                id: zhttp.parse.Int(u64),
-            },
-        }),
+        zhttp.get("/health", Health),
+        zhttp.get("/hello", Hello),
+        zhttp.get("/users/{id}", User),
     },
 });
 

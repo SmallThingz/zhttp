@@ -3,19 +3,26 @@
 //! ## Route registration
 //!
 //! You register routes at comptime via `zhttp.Server(.{ .routes = .{ ... } })`.
-//! Route helpers accept a pattern, an endpoint, then comptime options:
+//! Route helpers accept a pattern and an endpoint type:
 //!
-//! - With options: `zhttp.get("/users/{id}", Endpoint, .{ .params = struct { id: zhttp.parse.Int(u64) } })`
-//! - No options: `zhttp.get("/health", Endpoint, .{})`
+//! - `zhttp.get("/users/{id}", Endpoint)`
+//! - `zhttp.get("/health", Endpoint)`
 //!
-//! Supported route option fields (all optional):
-//! - `.headers: type`    Header capture schema (header keys match case-insensitively; `_` matches `-`)
-//! - `.query: type`      Query capture schema (keys match exactly)
-//! - `.params: type`     Path param capture schema (for `{name}` / `{*name}` segments; defaults to strings)
-//! - `.middlewares: tuple` Per-route middleware types
-//! - `.upgrade_handler: fn(server, stream, r, w, line, res) void` (or `null`)
-//!   If set and the handler returns `101 Switching Protocols`, zhttp writes an upgrade response,
-//!   calls this function, and returns `.upgraded` (the upgrade handler owns connection lifecycle).
+//! Endpoint types must expose:
+//! - `pub const Info: zhttp.router.EndpointInfo = .{ ... }`
+//! - `pub fn call(comptime rctx: zhttp.ReqCtx, req: rctx.T()) !zhttp.Res`
+//!
+//! `EndpointInfo` fields:
+//! - `.headers: ?type`    Header capture schema (header keys match case-insensitively; `_` matches `-`)
+//! - `.query: ?type`      Query capture schema (keys match exactly)
+//! - `.path: ?type`       Path-param capture schema (for `{name}` / `{*name}` segments; defaults to strings)
+//! - `.middlewares: []const type` Per-endpoint middleware types
+//! - `.operations: []const type` Per-endpoint operation tags
+//!
+//! Optional endpoint upgrade hook:
+//! - `pub fn upgrade(server, stream, r, w, line, res) void`
+//!   If present and `call(...)` returns `101 Switching Protocols`, zhttp writes the upgrade response,
+//!   calls this function, and returns `.upgraded` (endpoint upgrade owns connection lifecycle).
 //!   Use `zhttp.upgrade.responseFor`, `zhttp.upgrade.websocketResponse`,
 //!   or `zhttp.upgrade.websocketResponseWithAccept` to build 101 responses.
 //!
@@ -29,11 +36,11 @@
 //! - `.error_handler: fn(*Server, *std.Io.Writer, comptime ErrorSet: type, err: ErrorSet) router.Action` (optional)
 //!   fallback error handler for user handler/middleware errors; server parse/validation errors stay on the built-in `400`/`414`/`431` path
 //! - `.not_found_handler: type` (optional) fallback endpoint type override for route misses
-//! - `.not_found_options: struct` (optional) request options for the fallback handler
 //!
 //! ## Endpoint Shape
 //!
-//! Preferred route endpoint shape:
+//! Required route endpoint shape:
+//! - `type` exposing `pub const Info: zhttp.router.EndpointInfo`
 //! - `type` exposing `pub fn call(comptime rctx: zhttp.ReqCtx, req: rctx.T()) !zhttp.Res`
 //!
 //! When `.Context` is configured, it is available only via `req.ctx()`.

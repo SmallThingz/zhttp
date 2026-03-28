@@ -260,13 +260,16 @@ pub fn Static(comptime opts: StaticOptions) type {
             .header = if (etag_enabled) StaticHeaders else null,
         };
         const Endpoint = struct {
+            pub const Info: router.EndpointInfo = .{
+                .headers = StaticHeaders,
+            };
             pub fn call(comptime _: ReqCtx, req: anytype) !Res {
                 return serve(req);
             }
         };
         const OperationRoutes = .{
-            router.get(pattern, Endpoint, .{ .headers = StaticHeaders }),
-            router.head(pattern, Endpoint, .{ .headers = StaticHeaders }),
+            router.get(pattern, Endpoint),
+            router.head(pattern, Endpoint),
         };
 
         pub fn operationRoutes() @TypeOf(OperationRoutes) {

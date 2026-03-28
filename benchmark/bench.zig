@@ -290,23 +290,27 @@ fn runBenchmark(init: std.process.Init, address: std.Io.net.IpAddress, request_b
     }
 }
 
-fn plaintext() !zhttp.Res {
-    const body = "Hello, World!";
-    return .{
-        .status = .ok,
-        .headers = &.{
-            .{ .name = "Server", .value = "F" },
-            .{ .name = "Content-Type", .value = "text/plain" },
-            .{ .name = "Date", .value = "Wed, 24 Feb 2021 12:00:00 GMT" },
-        },
-        .body = body,
-    };
-}
+const Plaintext = struct {
+    pub const Info: zhttp.router.EndpointInfo = .{};
+    pub fn call(comptime _: zhttp.ReqCtx, req: anytype) !zhttp.Res {
+        _ = req;
+        const body = "Hello, World!";
+        return .{
+            .status = .ok,
+            .headers = &.{
+                .{ .name = "Server", .value = "F" },
+                .{ .name = "Content-Type", .value = "text/plain" },
+                .{ .name = "Date", .value = "Wed, 24 Feb 2021 12:00:00 GMT" },
+            },
+            .body = body,
+        };
+    }
+};
 
 fn runZhttp(init: std.process.Init, cfg: Config) !void {
     const SrvT = zhttp.Server(.{
         .routes = .{
-            zhttp.get("/plaintext", plaintext, .{}),
+            zhttp.get("/plaintext", Plaintext),
         },
         .config = .{},
     });

@@ -21,7 +21,7 @@ fn validateRouteTuple(comptime routes: anytype) void {
 
 fn validateOperationType(comptime Op: type) void {
     if (!@hasDecl(Op, "operation")) {
-        @compileError("operation type " ++ @typeName(Op) ++ " must expose `pub fn operation(comptime router: anytype) void`");
+        @compileError("operation type " ++ @typeName(Op) ++ " must expose `pub fn operation(comptime router: anytype, op_indices: []const usize) void`");
     }
     const fn_t = @TypeOf(Op.operation);
     const info = @typeInfo(fn_t);
@@ -29,8 +29,13 @@ fn validateOperationType(comptime Op: type) void {
         @compileError("operation type " ++ @typeName(Op) ++ " operation must be a function");
     }
     const fn_info = info.@"fn";
-    if (fn_info.params.len != 1) {
-        @compileError("operation type " ++ @typeName(Op) ++ " operation must take exactly one parameter (router)");
+    if (fn_info.params.len != 2) {
+        @compileError("operation type " ++ @typeName(Op) ++ " operation must take exactly two parameters (router, op_indices)");
+    }
+    const p1 = fn_info.params[1].type orelse
+        @compileError("operation type " ++ @typeName(Op) ++ " operation second parameter must have an explicit type");
+    if (p1 != []const usize) {
+        @compileError("operation type " ++ @typeName(Op) ++ " operation second parameter must be []const usize");
     }
     if (fn_info.return_type != void) {
         @compileError("operation type " ++ @typeName(Op) ++ " operation must return void");
@@ -211,6 +216,13 @@ pub fn Router(comptime capacity: usize, comptime global_middlewares: []const typ
             return false;
         }
 
+        fn routeHasOperation(comptime route_decl: RouteDecl, comptime Op: type) bool {
+            inline for (route_decl.operations) |RouteOp| {
+                if (RouteOp == Op) return true;
+            }
+            return false;
+        }
+
         pub fn hasMiddleware(comptime self: *const Self, index: usize, comptime Mw: type) bool {
             return routeHasMiddleware(self.routeConst(index).*, Mw);
         }
@@ -258,10 +270,25 @@ pub fn Router(comptime capacity: usize, comptime global_middlewares: []const typ
             return false;
         }
 
+        pub fn hasOperation(comptime self: *const Self, index: usize, comptime Op: type) bool {
+            return routeHasOperation(self.routeConst(index).*, Op);
+        }
+
         pub fn filterByMiddleware(comptime self: *Self, comptime Mw: type) []const usize {
             comptime var n: usize = 0;
             inline for (self.all(), 0..) |route_decl, i| {
                 if (routeHasMiddleware(route_decl, Mw)) {
+                    self._index_buf[n] = i;
+                    n += 1;
+                }
+            }
+            return self._index_buf[0..n];
+        }
+
+        pub fn filterByOperation(comptime self: *Self, comptime Op: type) []const usize {
+            comptime var n: usize = 0;
+            inline for (self.all(), 0..) |route_decl, i| {
+                if (routeHasOperation(route_decl, Op)) {
                     self._index_buf[n] = i;
                     n += 1;
                 }
@@ -364,9 +391,14 @@ fn finalLen(
     const RouterT = Router(capacity, global_mws);
 
     var router = RouterT.init(routes_tuple);
+    var op_index_buf: [capacity]usize = undefined;
     inline for (ops) |Op| {
         validateOperationType(Op);
-        @call(.auto, Op.operation, .{&router});
+        const op_indices0 = router.filterByOperation(Op);
+        if (op_indices0.len == 0) continue;
+        for (op_indices0, 0..) |idx, i| op_index_buf[i] = idx;
+        const op_indices = op_index_buf[0..op_indices0.len];
+        @call(.auto, Op.operation, .{ &router, op_indices });
     }
     return router.count();
 }
@@ -384,9 +416,14 @@ fn applyWithLen(
     const RouterT = Router(capacity, global_mws);
 
     var router = RouterT.init(routes_tuple);
+    var op_index_buf: [capacity]usize = undefined;
     inline for (ops) |Op| {
         validateOperationType(Op);
-        @call(.auto, Op.operation, .{&router});
+        const op_indices0 = router.filterByOperation(Op);
+        if (op_indices0.len == 0) continue;
+        for (op_indices0, 0..) |idx, i| op_index_buf[i] = idx;
+        const op_indices = op_index_buf[0..op_indices0.len];
+        @call(.auto, Op.operation, .{ &router, op_indices });
     }
     return router.toTuple(out_len);
 }
@@ -409,24 +446,28 @@ pub const Static = @import("operations/static.zig").Static;
 test "operations: add and remove routes" {
     const Ops = struct {
         pub const MaxAddedRoutes: usize = 1;
-        pub fn operation(comptime r: anytype) void {
+        pub fn operation(comptime r: anytype, _: []const usize) void {
             r.add(router_mod.get("/b", struct {
+                pub const Info: router_mod.EndpointInfo = .{};
                 pub fn call(comptime _: @import("req_ctx.zig").ReqCtx, req: anytype) !@import("response.zig").Res {
                     _ = req;
                     return @import("response.zig").Res.text(200, "b");
                 }
-            }, .{}));
+            }));
             _ = r.remove(0);
         }
     };
 
     const out = apply(.{
         router_mod.get("/a", struct {
+            pub const Info: router_mod.EndpointInfo = .{
+                .operations = &.{Ops},
+            };
             pub fn call(comptime _: @import("req_ctx.zig").ReqCtx, req: anytype) !@import("response.zig").Res {
                 _ = req;
                 return @import("response.zig").Res.text(200, "a");
             }
-        }, .{}),
+        }),
     }, .{}, .{Ops});
 
     const fields = @typeInfo(@TypeOf(out)).@"struct".fields;
@@ -438,37 +479,84 @@ test "operations: order is tuple order and later ops see latest table" {
     const Res = @import("response.zig").Res;
     const OpA = struct {
         pub const MaxAddedRoutes: usize = 1;
-        pub fn operation(comptime r: anytype) void {
+        pub fn operation(comptime r: anytype, _: []const usize) void {
             r.add(router_mod.get("/later", struct {
+                pub const Info: router_mod.EndpointInfo = .{};
                 pub fn call(comptime _: @import("req_ctx.zig").ReqCtx, req: anytype) !Res {
                     _ = req;
                     return Res.text(200, "later");
                 }
-            }, .{}));
+            }));
         }
     };
     const OpB = struct {
-        pub fn operation(comptime r: anytype) void {
+        pub fn operation(comptime r: anytype, _: []const usize) void {
             if (r.hasMethodPath("GET", "/later")) {
                 _ = r.replace(0, router_mod.get("/first-replaced", struct {
+                    pub const Info: router_mod.EndpointInfo = .{};
                     pub fn call(comptime _: @import("req_ctx.zig").ReqCtx, req: anytype) !Res {
                         _ = req;
                         return Res.text(200, "first");
                     }
-                }, .{}));
+                }));
             }
         }
     };
 
     const out = apply(.{
         router_mod.get("/first", struct {
+            pub const Info: router_mod.EndpointInfo = .{
+                .operations = &.{ OpA, OpB },
+            };
             pub fn call(comptime _: @import("req_ctx.zig").ReqCtx, req: anytype) !Res {
                 _ = req;
                 return Res.text(200, "first");
             }
-        }, .{}),
+        }),
     }, .{}, .{ OpA, OpB });
 
     const fields = @typeInfo(@TypeOf(out)).@"struct".fields;
     try std.testing.expectEqualStrings("/first-replaced", @field(out, fields[0].name).pattern);
+}
+
+test "operations: operation receives only routes tagged in endpoint Info.operations" {
+    const Res = @import("response.zig").Res;
+    const TaggedOp = struct {
+        pub fn operation(comptime r: anytype, op_indices: []const usize) void {
+            if (op_indices.len != 1) {
+                @compileError("expected exactly one tagged route");
+            }
+            const idx = op_indices[0];
+            _ = r.replace(idx, router_mod.get("/tagged-replaced", struct {
+                pub const Info: router_mod.EndpointInfo = .{};
+                pub fn call(comptime _: @import("req_ctx.zig").ReqCtx, req: anytype) !Res {
+                    _ = req;
+                    return Res.text(200, "tagged");
+                }
+            }));
+        }
+    };
+
+    const out = apply(.{
+        router_mod.get("/untagged", struct {
+            pub const Info: router_mod.EndpointInfo = .{};
+            pub fn call(comptime _: @import("req_ctx.zig").ReqCtx, req: anytype) !Res {
+                _ = req;
+                return Res.text(200, "u");
+            }
+        }),
+        router_mod.get("/tagged", struct {
+            pub const Info: router_mod.EndpointInfo = .{
+                .operations = &.{TaggedOp},
+            };
+            pub fn call(comptime _: @import("req_ctx.zig").ReqCtx, req: anytype) !Res {
+                _ = req;
+                return Res.text(200, "t");
+            }
+        }),
+    }, .{}, .{TaggedOp});
+
+    const f = @typeInfo(@TypeOf(out)).@"struct".fields;
+    try std.testing.expectEqualStrings("/untagged", @field(out, f[0].name).pattern);
+    try std.testing.expectEqualStrings("/tagged-replaced", @field(out, f[1].name).pattern);
 }

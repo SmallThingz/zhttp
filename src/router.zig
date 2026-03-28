@@ -23,56 +23,21 @@ pub const Action = enum {
     upgraded,
 };
 
-/// Route options passed at comptime to `route`, `get`, `post`, etc.
+/// Compile-time endpoint metadata.
 ///
-/// Any struct with a subset of these fields is accepted:
-/// - `headers: type`  Request header captures (see `zhttp.parse.*` parsers)
-/// - `query: type`    Query-string captures
-/// - `params: type`   Path param captures (parsed from `{name}` and `{*name}` segments)
-/// - `middlewares: tuple` Per-route middleware types (same `call(...)` interface as global middlewares)
-///
-/// Notes:
-/// - Captures are *types* (e.g. `struct { id: zhttp.parse.Int(u64) }`), not values.
-/// - Header keys are normalized: `_` in field names matches `-` in header names.
-/// - Query keys are exact (case-sensitive).
-fn validateRouteOptions(comptime opts: anytype) void {
-    const OptT = @TypeOf(opts);
-    const info = @typeInfo(OptT);
-    if (info != .@"struct") @compileError("route options must be a struct literal");
-
-    inline for (info.@"struct".fields) |f| {
-        const name0 = f.name;
-        const name: []const u8 = name0[0..name0.len];
-        comptime {
-            const allowed = std.mem.eql(u8, name, "headers") or
-                std.mem.eql(u8, name, "query") or
-                std.mem.eql(u8, name, "params") or
-                std.mem.eql(u8, name, "middlewares") or
-                std.mem.eql(u8, name, "upgrade_handler");
-            if (!allowed) @compileError("unknown route option: " ++ name);
-
-            if (std.mem.eql(u8, name, "headers") or std.mem.eql(u8, name, "query") or std.mem.eql(u8, name, "params")) {
-                if (@TypeOf(@field(opts, name0)) != type) {
-                    @compileError("route option '" ++ name ++ "' must be a type (e.g. .{" ++ name ++ " = struct { ... } })");
-                }
-            } else if (std.mem.eql(u8, name, "middlewares")) {
-                const mw = @field(opts, name0);
-                const mw_info = @typeInfo(@TypeOf(mw));
-                if (mw_info != .@"struct" or !mw_info.@"struct".is_tuple) {
-                    @compileError("route option 'middlewares' must be a tuple (e.g. .{ .middlewares = .{Mw1, Mw2} })");
-                }
-            } else if (std.mem.eql(u8, name, "upgrade_handler")) {
-                const h = @field(opts, name0);
-                const ht = @TypeOf(h);
-                if (ht == @TypeOf(null)) continue;
-                const h_info = @typeInfo(ht);
-                if (h_info == .@"fn") continue;
-                if (h_info == .optional and @typeInfo(h_info.optional.child) == .@"fn") continue;
-                @compileError("route option 'upgrade_handler' must be fn(...) void, ?fn(...) void, or null");
-            }
-        }
-    }
-}
+/// Endpoint types must expose `pub const Info: router.EndpointInfo = .{ ... };`.
+pub const EndpointInfo = struct {
+    /// Optional request header capture schema.
+    headers: ?type = null,
+    /// Optional query capture schema.
+    query: ?type = null,
+    /// Optional path-param capture schema.
+    path: ?type = null,
+    /// Per-endpoint middleware types.
+    middlewares: []const type = &.{},
+    /// Per-endpoint operation types.
+    operations: []const type = &.{},
+};
 
 pub const RouteDecl = struct {
     /// Stores `method`.
@@ -89,33 +54,40 @@ pub const RouteDecl = struct {
     params: type,
     /// Stores `middlewares`.
     middlewares: []const type,
-    // Bridge type carrying `pub const value = null|fn|?fn`.
-    /// Stores `upgrade_handler`.
-    upgrade_handler: type,
+    /// Stores `operations`.
+    operations: []const type,
 };
 
-fn endpointType(comptime endpoint: type) type {
+fn validateStructTypeOpt(comptime field_name: []const u8, comptime maybe_t: ?type) void {
+    if (maybe_t) |T| {
+        if (@typeInfo(T) != .@"struct") {
+            @compileError("endpoint Info." ++ field_name ++ " must be a struct type");
+        }
+    }
+}
+
+fn validateEndpointInfo(comptime endpoint: type) EndpointInfo {
+    if (!@hasDecl(endpoint, "Info")) {
+        @compileError("route endpoint type must expose `pub const Info: router.EndpointInfo = .{ ... };`");
+    }
+    if (@TypeOf(endpoint.Info) != EndpointInfo) {
+        @compileError("route endpoint Info must be of type router.EndpointInfo");
+    }
+    const info: EndpointInfo = endpoint.Info;
+    validateStructTypeOpt("headers", info.headers);
+    validateStructTypeOpt("query", info.query);
+    validateStructTypeOpt("path", info.path);
+    return info;
+}
+
+fn endpointType(comptime endpoint: type) struct { endpoint: type, info: EndpointInfo } {
     if (!@hasDecl(endpoint, "call")) {
         @compileError("route endpoint type must expose `pub fn call(comptime rctx: ReqCtx, req: rctx.T()) !Res`");
     }
-    return endpoint;
-}
-
-fn tupleToTypeList(comptime t: anytype) []const type {
-    const info = @typeInfo(@TypeOf(t));
-    if (info != .@"struct" or !info.@"struct".is_tuple) {
-        @compileError("route option 'middlewares' must be a tuple (e.g. .{ .middlewares = .{Mw1, Mw2} })");
-    }
-    const fields = info.@"struct".fields;
-    if (fields.len == 0) return &.{};
-    const out: [fields.len]type = comptime blk: {
-        var tmp: [fields.len]type = undefined;
-        for (fields, 0..) |f, i| {
-            tmp[i] = @field(t, f.name);
-        }
-        break :blk tmp;
+    return .{
+        .endpoint = endpoint,
+        .info = validateEndpointInfo(endpoint),
     };
-    return out[0..];
 }
 
 /// Implements route.
@@ -125,54 +97,47 @@ pub fn route(
     comptime pattern: []const u8,
     /// Route endpoint type exposing `pub fn call(comptime rctx: ReqCtx, req: rctx.T()) !Res`.
     comptime endpoint: type,
-    /// Route options (see `zhttp/root.zig` docs). Use `.{}` for none.
-    comptime opts: anytype,
 ) RouteDecl {
-    validateRouteOptions(opts);
-    const OptT = @TypeOf(opts);
-    const Endpoint = endpointType(endpoint);
-    const UpgradeHandlerBridge = struct {
-        pub const value = if (@hasField(OptT, "upgrade_handler")) opts.upgrade_handler else null;
-    };
+    const ep = endpointType(endpoint);
     return .{
         .method = @tagName(method_lit),
         .pattern = pattern,
-        .endpoint = Endpoint,
-        .headers = if (@hasField(OptT, "headers")) opts.headers else struct {},
-        .query = if (@hasField(OptT, "query")) opts.query else struct {},
-        .params = if (@hasField(OptT, "params")) opts.params else struct {},
-        .middlewares = if (@hasField(OptT, "middlewares")) tupleToTypeList(opts.middlewares) else &.{},
-        .upgrade_handler = UpgradeHandlerBridge,
+        .endpoint = ep.endpoint,
+        .headers = ep.info.headers orelse struct {},
+        .query = ep.info.query orelse struct {},
+        .params = ep.info.path orelse struct {},
+        .middlewares = ep.info.middlewares,
+        .operations = ep.info.operations,
     };
 }
 
 /// Implements get.
-pub fn get(comptime pattern: []const u8, comptime endpoint: type, comptime opts: anytype) RouteDecl {
-    return route(.GET, pattern, endpoint, opts);
+pub fn get(comptime pattern: []const u8, comptime endpoint: type) RouteDecl {
+    return route(.GET, pattern, endpoint);
 }
 /// Implements post.
-pub fn post(comptime pattern: []const u8, comptime endpoint: type, comptime opts: anytype) RouteDecl {
-    return route(.POST, pattern, endpoint, opts);
+pub fn post(comptime pattern: []const u8, comptime endpoint: type) RouteDecl {
+    return route(.POST, pattern, endpoint);
 }
 /// Implements put.
-pub fn put(comptime pattern: []const u8, comptime endpoint: type, comptime opts: anytype) RouteDecl {
-    return route(.PUT, pattern, endpoint, opts);
+pub fn put(comptime pattern: []const u8, comptime endpoint: type) RouteDecl {
+    return route(.PUT, pattern, endpoint);
 }
 /// Implements delete.
-pub fn delete(comptime pattern: []const u8, comptime endpoint: type, comptime opts: anytype) RouteDecl {
-    return route(.DELETE, pattern, endpoint, opts);
+pub fn delete(comptime pattern: []const u8, comptime endpoint: type) RouteDecl {
+    return route(.DELETE, pattern, endpoint);
 }
 /// Implements patch.
-pub fn patch(comptime pattern: []const u8, comptime endpoint: type, comptime opts: anytype) RouteDecl {
-    return route(.PATCH, pattern, endpoint, opts);
+pub fn patch(comptime pattern: []const u8, comptime endpoint: type) RouteDecl {
+    return route(.PATCH, pattern, endpoint);
 }
 /// Implements head.
-pub fn head(comptime pattern: []const u8, comptime endpoint: type, comptime opts: anytype) RouteDecl {
-    return route(.HEAD, pattern, endpoint, opts);
+pub fn head(comptime pattern: []const u8, comptime endpoint: type) RouteDecl {
+    return route(.HEAD, pattern, endpoint);
 }
 /// Implements options.
-pub fn options(comptime pattern: []const u8, comptime endpoint: type, comptime opts: anytype) RouteDecl {
-    return route(.OPTIONS, pattern, endpoint, opts);
+pub fn options(comptime pattern: []const u8, comptime endpoint: type) RouteDecl {
+    return route(.OPTIONS, pattern, endpoint);
 }
 
 fn tupleConcatValuesType(comptime a: anytype, comptime b: anytype) type {
@@ -879,7 +844,7 @@ pub fn Compiled(
         }
 
         fn callUpgradeHandler(
-            comptime handler: anytype,
+            comptime Endpoint: type,
             server: anytype,
             stream: *const std.Io.net.Stream,
             r: *Io.Reader,
@@ -887,18 +852,19 @@ pub fn Compiled(
             line: request.RequestLine,
             res: Res,
         ) void {
+            const handler = Endpoint.upgrade;
             const HandlerT = @TypeOf(handler);
             const h_info = @typeInfo(HandlerT);
-            if (h_info != .@"fn") @compileError("upgrade_handler must be a function");
-            if (h_info.@"fn".return_type != void) @compileError("upgrade_handler must return void");
+            if (h_info != .@"fn") @compileError("endpoint upgrade must be a function");
+            if (h_info.@"fn".return_type != void) @compileError("endpoint upgrade must return void");
             if (h_info.@"fn".params.len != 6) {
-                @compileError("upgrade_handler must be fn(server, stream, r, w, line, res) void");
+                @compileError("endpoint upgrade must be fn(server, stream, r, w, line, res) void");
             }
             @call(.auto, handler, .{ server, stream, r, w, line, res });
         }
 
-        fn maybeHandleUpgrade(
-            comptime maybe_upgrade: anytype,
+        fn maybeHandleUpgradeEntry(
+            comptime Endpoint: type,
             server: anytype,
             stream: *const std.Io.net.Stream,
             r: *Io.Reader,
@@ -906,27 +872,12 @@ pub fn Compiled(
             line: request.RequestLine,
             res: Res,
         ) DispatchError!?Action {
-            if (@TypeOf(maybe_upgrade) == @TypeOf(null)) return null;
-
-            if (@typeInfo(@TypeOf(maybe_upgrade)) == .optional) {
-                if (maybe_upgrade) |upgrade_handler| {
-                    if (res.status == .switching_protocols) {
-                        try response.writeUpgrade(w, res);
-                        if (w.buffered().len != 0) try w.flush();
-                        callUpgradeHandler(upgrade_handler, server, stream, r, w, line, res);
-                        return .upgraded;
-                    }
-                }
-                return null;
-            }
-
-            if (res.status == .switching_protocols) {
-                try response.writeUpgrade(w, res);
-                if (w.buffered().len != 0) try w.flush();
-                callUpgradeHandler(maybe_upgrade, server, stream, r, w, line, res);
-                return .upgraded;
-            }
-            return null;
+            if (!@hasDecl(Endpoint, "upgrade")) return null;
+            if (res.status != .switching_protocols) return null;
+            try response.writeUpgrade(w, res);
+            if (w.buffered().len != 0) try w.flush();
+            callUpgradeHandler(Endpoint, server, stream, r, w, line, res);
+            return .upgraded;
         }
 
         /// Implements dispatch.
@@ -1004,7 +955,7 @@ pub fn Compiled(
 
                     // Ensure unread body is discarded before next request.
                     try reqv.discardUnreadBody();
-                    if (try maybeHandleUpgrade(rd.upgrade_handler.value, server, stream, r, w, line, res)) |act| return act;
+                    if (try maybeHandleUpgradeEntry(rd.endpoint, server, stream, r, w, line, res)) |act| return act;
                     const send_body = !(line.method.len == 4 and line.method[0] == 'H' and line.method[1] == 'E' and line.method[2] == 'A' and line.method[3] == 'D');
                     return finishResponse(w, res, reqv.keepAlive(), send_body);
                 }
@@ -1055,29 +1006,33 @@ test "router: exact + param + glob" {
     const App = struct {};
     const S = Compiled(App, .{
         get("/a", struct {
+            pub const Info: EndpointInfo = .{};
             pub fn call(comptime _: ReqCtx, req: anytype) !Res {
                 _ = req;
                 return Res.text(200, "a");
             }
-        }, .{}),
+        }),
         get("/u/{id}", struct {
+            pub const Info: EndpointInfo = .{};
             pub fn call(comptime _: ReqCtx, req: anytype) !Res {
                 _ = req;
                 return Res.text(200, "u");
             }
-        }, .{}),
+        }),
         get("/g/*", struct {
+            pub const Info: EndpointInfo = .{};
             pub fn call(comptime _: ReqCtx, req: anytype) !Res {
                 _ = req;
                 return Res.text(200, "g");
             }
-        }, .{}),
+        }),
         get("/ng/{*rest}", struct {
+            pub const Info: EndpointInfo = .{};
             pub fn call(comptime _: ReqCtx, req: anytype) !Res {
                 _ = req;
                 return Res.text(200, "ng");
             }
-        }, .{}),
+        }),
     }, .{});
 
     var p0 = "/a".*;
@@ -1099,11 +1054,12 @@ test "router: exact + param + glob" {
 test "router: trailing slash does not match exact literal" {
     const S = Compiled(void, .{
         get("/a", struct {
+            pub const Info: EndpointInfo = .{};
             pub fn call(comptime _: ReqCtx, req: anytype) !Res {
                 _ = req;
                 return Res.text(200, "a");
             }
-        }, .{}),
+        }),
     }, .{});
 
     var p1 = "/a/".*;
@@ -1113,11 +1069,12 @@ test "router: trailing slash does not match exact literal" {
 test "router: HEAD falls back to GET handler" {
     const S = Compiled(void, .{
         get("/x", struct {
+            pub const Info: EndpointInfo = .{};
             pub fn call(comptime _: ReqCtx, req: anytype) !Res {
                 _ = req;
                 return Res.text(200, "ok");
             }
-        }, .{}),
+        }),
     }, .{});
 
     var p = "/x".*;
@@ -1143,11 +1100,12 @@ test "middleware Info: supports 'header: type = ...' form" {
 
     _ = Compiled(void, .{
         get("/x", struct {
+            pub const Info: EndpointInfo = .{};
             pub fn call(comptime _: ReqCtx, req: anytype) !Res {
                 _ = req;
                 return Res.text(200, "x");
             }
-        }, .{}),
+        }),
     }, .{Mw});
 }
 
@@ -1187,11 +1145,12 @@ test "middleware Info: supports header/query/path/data captures" {
 
     const S = Compiled(void, .{
         get("/u/{id}", struct {
+            pub const Info: EndpointInfo = .{};
             pub fn call(comptime _: ReqCtx, req: anytype) !Res {
                 const auth = req.middlewareDataConst(.auth);
                 return Res.text(200, if (auth.seen) "ok" else "bad-data");
             }
-        }, .{}),
+        }),
     }, .{Mw});
 
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
@@ -1209,17 +1168,19 @@ test "middleware Info: supports header/query/path/data captures" {
 test "dispatch: pipelined request discards unread content-length body" {
     const S = Compiled(void, .{
         post("/x", struct {
+            pub const Info: EndpointInfo = .{};
             pub fn call(comptime _: ReqCtx, req: anytype) !Res {
                 _ = req;
                 return Res.text(200, "p");
             }
-        }, .{}),
+        }),
         get("/x", struct {
+            pub const Info: EndpointInfo = .{};
             pub fn call(comptime _: ReqCtx, req: anytype) !Res {
                 _ = req;
                 return Res.text(200, "g");
             }
-        }, .{}),
+        }),
     }, .{});
 
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
@@ -1251,17 +1212,19 @@ test "dispatch: pipelined request discards unread content-length body" {
 test "dispatch: pipelined request discards unread chunked body" {
     const S = Compiled(void, .{
         post("/x", struct {
+            pub const Info: EndpointInfo = .{};
             pub fn call(comptime _: ReqCtx, req: anytype) !Res {
                 _ = req;
                 return Res.text(200, "p");
             }
-        }, .{}),
+        }),
         get("/x", struct {
+            pub const Info: EndpointInfo = .{};
             pub fn call(comptime _: ReqCtx, req: anytype) !Res {
                 _ = req;
                 return Res.text(200, "g");
             }
-        }, .{}),
+        }),
     }, .{});
 
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
@@ -1296,10 +1259,11 @@ test "dispatch: pipelined request discards unread chunked body" {
 test "dispatch: path param percent-decodes" {
     const S = Compiled(void, .{
         get("/u/{id}", struct {
+            pub const Info: EndpointInfo = .{};
             pub fn call(comptime _: ReqCtx, req: anytype) !Res {
                 return Res.text(200, req.paramValue(.id));
             }
-        }, .{}),
+        }),
     }, .{});
 
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
@@ -1320,10 +1284,11 @@ test "dispatch: path param percent-decodes" {
 test "dispatch: named glob captures and percent-decodes" {
     const S = Compiled(void, .{
         get("/g/{*rest}", struct {
+            pub const Info: EndpointInfo = .{};
             pub fn call(comptime _: ReqCtx, req: anytype) !Res {
                 return Res.text(200, req.paramValue(.rest));
             }
-        }, .{}),
+        }),
     }, .{});
 
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
@@ -1341,17 +1306,18 @@ test "dispatch: named glob captures and percent-decodes" {
     try std.testing.expect(std.mem.endsWith(u8, out[0..res.len], "\r\n\r\na/b/c"));
 }
 
-test "dispatch: typed path params via opts.params" {
+test "dispatch: typed path params via endpoint Info.path" {
     const S = Compiled(void, .{
         get("/u/{id}", struct {
+            pub const Info: EndpointInfo = .{
+                .path = struct {
+                    id: parse.Int(u32),
+                },
+            };
             pub fn call(comptime _: ReqCtx, req: anytype) !Res {
                 const body = try std.fmt.allocPrint(req.allocator(), "{d}", .{req.paramValue(.id)});
                 return Res.text(200, body);
             }
-        }, .{
-            .params = struct {
-                id: parse.Int(u32),
-            },
         }),
     }, .{});
 
@@ -1369,14 +1335,15 @@ test "dispatch: typed path params via opts.params" {
 test "dispatch: typed path params bad value errors" {
     const S = Compiled(void, .{
         get("/u/{id}", struct {
+            pub const Info: EndpointInfo = .{
+                .path = struct {
+                    id: parse.Int(u32),
+                },
+            };
             pub fn call(comptime _: ReqCtx, req: anytype) !Res {
                 _ = req;
                 return Res.text(200, "ok");
             }
-        }, .{
-            .params = struct {
-                id: parse.Int(u32),
-            },
         }),
     }, .{});
 
@@ -1462,17 +1429,18 @@ test "dispatch: typed path params with non-string parsers allocate zero" {
 
     const S = Compiled(void, .{
         get("/u/{a}/{b}/{c}/{d}", struct {
+            pub const Info: EndpointInfo = .{
+                .path = struct {
+                    a: parse.Int(u32),
+                    b: parse.Int(u32),
+                    c: parse.Int(u32),
+                    d: parse.Int(u32),
+                },
+            };
             pub fn call(comptime _: ReqCtx, req: anytype) !Res {
                 const sum: u32 = req.paramValue(.a) + req.paramValue(.b) + req.paramValue(.c) + req.paramValue(.d);
                 return Res.text(200, if (sum == 10) "ok" else "bad");
             }
-        }, .{
-            .params = struct {
-                a: parse.Int(u32),
-                b: parse.Int(u32),
-                c: parse.Int(u32),
-                d: parse.Int(u32),
-            },
         }),
     }, .{});
 
@@ -1509,11 +1477,12 @@ test "dispatch: middleware Info.path works" {
 
     const S = Compiled(void, .{
         get("/u/{id}", struct {
+            pub const Info: EndpointInfo = .{};
             pub fn call(comptime _: ReqCtx, req: anytype) !Res {
                 const body = try std.fmt.allocPrint(req.allocator(), "{d}", .{req.paramValue(.id)});
                 return Res.text(200, body);
             }
-        }, .{}),
+        }),
     }, .{RequireId});
 
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
@@ -1545,12 +1514,13 @@ test "middleware data: set in middleware and handler access" {
 
     const S = Compiled(void, .{
         get("/x", struct {
+            pub const Info: EndpointInfo = .{};
             pub fn call(comptime _: ReqCtx, req: anytype) !Res {
                 const data = req.middlewareData(.auth);
                 data.user_id += 1;
                 return Res.text(200, if (data.user_id == 8) "ok" else "bad");
             }
-        }, .{}),
+        }),
     }, .{Auth});
 
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
@@ -1567,11 +1537,12 @@ test "middleware data: set in middleware and handler access" {
 test "dispatch: handler error uses callback" {
     const S = Compiled(void, .{
         get("/x", struct {
+            pub const Info: EndpointInfo = .{};
             pub fn call(comptime _: ReqCtx, req: anytype) !Res {
                 _ = req;
                 return error.Boom;
             }
-        }, .{}),
+        }),
     }, .{});
 
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
@@ -1615,23 +1586,26 @@ test "dispatch: handler error uses callback" {
 test "fuzz: router match does not crash" {
     const S = Compiled(void, .{
         get("/a", struct {
+            pub const Info: EndpointInfo = .{};
             pub fn call(comptime _: ReqCtx, req: anytype) !Res {
                 _ = req;
                 return Res.text(200, "a");
             }
-        }, .{}),
+        }),
         post("/b/{id}", struct {
+            pub const Info: EndpointInfo = .{};
             pub fn call(comptime _: ReqCtx, req: anytype) !Res {
                 _ = req;
                 return Res.text(200, "b");
             }
-        }, .{}),
+        }),
         put("/c/*", struct {
+            pub const Info: EndpointInfo = .{};
             pub fn call(comptime _: ReqCtx, req: anytype) !Res {
                 _ = req;
                 return Res.text(200, "c");
             }
-        }, .{}),
+        }),
     }, .{});
 
     const corpus = &.{ "GET", "POST", "HEAD", "BAD" };
@@ -1661,11 +1635,12 @@ test "fuzz: router match does not crash" {
 test "endpoint: call can ignore request data" {
     const S = Compiled(void, .{
         get("/a", struct {
+            pub const Info: EndpointInfo = .{};
             pub fn call(comptime _: ReqCtx, req: anytype) !Res {
                 _ = req;
                 return Res.text(200, "x");
             }
-        }, .{}),
+        }),
     }, .{});
 
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
@@ -1683,11 +1658,12 @@ test "handler: app ctx accessible through req" {
     const Ctx = struct { v: u8 };
     const S = Compiled(Ctx, .{
         get("/a", struct {
+            pub const Info: EndpointInfo = .{};
             pub fn call(comptime _: ReqCtx, req: anytype) !Res {
                 const ctx = req.ctx();
                 return Res.text(200, if (ctx.v == 1) "ok" else "bad");
             }
-        }, .{}),
+        }),
     }, .{});
 
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
@@ -1704,6 +1680,7 @@ test "handler: app ctx accessible through req" {
 
 test "route: endpoint type accepted" {
     const Endpoint = struct {
+        pub const Info: EndpointInfo = .{};
         pub fn call(comptime rctx: ReqCtx, req: rctx.T()) !Res {
             _ = req;
             return Res.text(200, "ok");
@@ -1711,7 +1688,7 @@ test "route: endpoint type accepted" {
     };
 
     const S = Compiled(void, .{
-        get("/e", Endpoint, .{}),
+        get("/e", Endpoint),
     }, .{});
 
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
@@ -1728,11 +1705,12 @@ test "route: endpoint type accepted" {
 test "dispatch: invalid path percent-encoding rejected" {
     const S = Compiled(void, .{
         get("/u/{id}", struct {
+            pub const Info: EndpointInfo = .{};
             pub fn call(comptime _: ReqCtx, req: anytype) !Res {
                 _ = req;
                 return Res.text(200, "x");
             }
-        }, .{}),
+        }),
     }, .{});
 
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
@@ -1762,7 +1740,7 @@ test "dispatch: invalid path percent-encoding rejected" {
     try std.testing.expectError(error.InvalidPercentEncoding, S.dispatch(&server, a, &r, &w, &stream, @ptrCast(&route_static_ctx), line, rid, params[0..S.MaxParams], 8 * 1024));
 }
 
-test "dispatch: route upgrade_handler handles 101 and returns upgraded action" {
+test "dispatch: endpoint upgrade handles 101 and returns upgraded action" {
     const ServerT = struct {
         /// Stores `io`.
         io: Io,
@@ -1778,6 +1756,7 @@ test "dispatch: route upgrade_handler handles 101 and returns upgraded action" {
     };
 
     const Routes = struct {
+        pub const Info: EndpointInfo = .{};
         pub fn call(comptime _: ReqCtx, req: anytype) !Res {
             _ = req;
             return .{
@@ -1792,10 +1771,14 @@ test "dispatch: route upgrade_handler handles 101 and returns upgraded action" {
         fn on_upgrade(server: *ServerT, _: *const std.Io.net.Stream, _: *Io.Reader, _: *Io.Writer, _: request.RequestLine, _: Res) void {
             server.upgraded = true;
         }
+
+        pub fn upgrade(server: *ServerT, stream: *const std.Io.net.Stream, r: *Io.Reader, w: *Io.Writer, line: request.RequestLine, res: Res) void {
+            return on_upgrade(server, stream, r, w, line, res);
+        }
     };
 
     const S = Compiled(void, .{
-        get("/ws", Routes, .{ .upgrade_handler = Routes.on_upgrade }),
+        get("/ws", Routes),
     }, .{});
 
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
@@ -1827,9 +1810,10 @@ test "dispatch: route upgrade_handler handles 101 and returns upgraded action" {
     try std.testing.expectEqualStrings(expected, out[0..w.end]);
 }
 
-test "dispatch: null upgrade_handler does not check status" {
+test "dispatch: endpoint without upgrade does not check status" {
     const S = Compiled(void, .{
         get("/ws", struct {
+            pub const Info: EndpointInfo = .{};
             pub fn call(comptime _: ReqCtx, req: anytype) !Res {
                 _ = req;
                 return .{
@@ -1840,7 +1824,7 @@ test "dispatch: null upgrade_handler does not check status" {
                     },
                 };
             }
-        }, .{ .upgrade_handler = null }),
+        }),
     }, .{});
 
     const ServerT = struct {
@@ -1872,4 +1856,51 @@ test "dispatch: null upgrade_handler does not check status" {
 
     try std.testing.expectEqual(Action.@"continue", action);
     try std.testing.expect(std.mem.indexOf(u8, out[0..w.end], "content-length: 0\r\n") != null);
+}
+
+test "dispatch: endpoint with upgrade but non-101 does not call upgrade" {
+    const ServerT = struct {
+        io: Io,
+        ctx: void,
+        called: bool = false,
+
+        pub fn handleHandlerError(_: *@This(), _: *Io.Writer, comptime _: type, _: anytype) Action {
+            unreachable;
+        }
+    };
+
+    const Endpoint = struct {
+        pub const Info: EndpointInfo = .{};
+
+        pub fn call(comptime _: ReqCtx, req: anytype) !Res {
+            _ = req;
+            return Res.text(200, "ok");
+        }
+
+        pub fn upgrade(server: *ServerT, _: *const std.Io.net.Stream, _: *Io.Reader, _: *Io.Writer, _: request.RequestLine, _: Res) void {
+            server.called = true;
+        }
+    };
+
+    const S = Compiled(void, .{
+        get("/x", Endpoint),
+    }, .{});
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    var server: ServerT = .{ .io = std.testing.io, .ctx = {} };
+    var r = Io.Reader.fixed("GET /x HTTP/1.1\r\nHost: x\r\n\r\n");
+    const line = try request.parseRequestLineBorrowed(&r, 8 * 1024);
+    var out: [256]u8 = undefined;
+    var params: [S.MaxParams][]u8 = undefined;
+    var w = Io.Writer.fixed(out[0..]);
+    var stream: std.Io.net.Stream = undefined;
+    const rid = S.match(line.method, line.path).?;
+    var route_static_ctx: struct {} = .{};
+    const action = try S.dispatch(&server, a, &r, &w, &stream, @ptrCast(&route_static_ctx), line, rid, params[0..S.MaxParams], 8 * 1024);
+
+    try std.testing.expectEqual(Action.@"continue", action);
+    try std.testing.expect(!server.called);
 }

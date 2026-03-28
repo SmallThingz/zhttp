@@ -26,9 +26,9 @@ pub const Static = struct {
     }
 
     /// Applies the operation to the mutable compile-time route table.
-    pub fn operation(comptime r: anytype) void {
-        const indices = r.filterByMiddlewareDecl("operationRoutes");
-        inline for (indices) |idx| {
+    pub fn operation(comptime r: anytype, op_indices: []const usize) void {
+        for (op_indices) |idx| {
+            if (!r.hasMiddlewareDecl(idx, "operationRoutes")) continue;
             const selected_mw = r.firstMiddlewareWithDecl(idx, "operationRoutes") orelse
                 @compileError("operations.Static: expected at least one middleware exposing `operationRoutes()`");
             addRoutesForMiddleware(r, selected_mw);
@@ -45,11 +45,14 @@ test "static operation adds GET/HEAD mount routes" {
 
     const out = ops.apply(.{
         router.get("/x", struct {
+            pub const Info: router.EndpointInfo = .{
+                .operations = &.{Static},
+            };
             pub fn call(comptime _: @import("../req_ctx.zig").ReqCtx, req: anytype) !Res {
                 _ = req;
                 return Res.text(200, "ok");
             }
-        }, .{}),
+        }),
     }, .{Mw}, .{Static});
 
     const fields = @typeInfo(@TypeOf(out)).@"struct".fields;

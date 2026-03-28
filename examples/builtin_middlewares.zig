@@ -24,6 +24,9 @@ fn usage() void {
 }
 
 const Public = struct {
+    pub const Info: zhttp.router.EndpointInfo = .{
+        .operations = &.{ zhttp.operations.Cors, zhttp.operations.Static },
+    };
     pub fn call(comptime rctx: ReqCtx, req: rctx.T()) !zhttp.Res {
         const rid = req.middlewareDataConst("rid").value[0..];
         const body = try std.fmt.allocPrint(req.allocator(), "public rid={s}\n", .{rid});
@@ -79,7 +82,7 @@ const SrvT = zhttp.Server(.{
         zhttp.operations.Static,
     },
     .routes = .{
-        zhttp.get("/public", Public, .{}),
+        zhttp.get("/public", Public),
     },
 });
 

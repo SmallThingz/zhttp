@@ -16,6 +16,7 @@ pub const Cors = struct {
     }
 
     const DefaultOptionsEndpoint = struct {
+        pub const Info: router.EndpointInfo = .{};
         pub fn call(comptime _: @import("../req_ctx.zig").ReqCtx, req: anytype) !response.Res {
             _ = req;
             return response.Res.text(404, "not found");
@@ -29,15 +30,28 @@ pub const Cors = struct {
         const selected_mw = r.firstMiddlewareWithSignature(group.indices[0], CorsSignature) orelse
             @compileError("operations.Cors: expected at least one middleware matching signature " ++ @typeName(CorsSignature));
 
-        r.add(router.options(group.path, DefaultOptionsEndpoint, .{
-            .middlewares = .{selected_mw},
-        }));
+        const Endpoint = struct {
+            pub const Info: router.EndpointInfo = .{
+                .middlewares = &.{selected_mw},
+            };
+            pub fn call(comptime rctx: @import("../req_ctx.zig").ReqCtx, req: rctx.T()) !response.Res {
+                return DefaultOptionsEndpoint.call(rctx, req);
+            }
+        };
+        r.add(router.options(group.path, Endpoint));
     }
 
     /// Applies the operation to the mutable compile-time route table.
-    pub fn operation(comptime r: anytype) void {
-        const indices = r.filterBySignature(CorsSignature);
-        r.forEachPathGroup(indices, onGroup);
+    pub fn operation(comptime r: anytype, op_indices: []const usize) void {
+        comptime var n: usize = 0;
+        var filtered: [op_indices.len]usize = undefined;
+        for (op_indices) |idx| {
+            if (r.firstMiddlewareWithSignature(idx, CorsSignature) != null) {
+                filtered[n] = idx;
+                n += 1;
+            }
+        }
+        r.forEachPathGroup(filtered[0..n], onGroup);
     }
 };
 
@@ -48,23 +62,32 @@ test "cors operation adds one OPTIONS route per matched path" {
 
     const out = ops.apply(.{
         router.get("/a", struct {
+            pub const Info: router.EndpointInfo = .{
+                .middlewares = &.{Mw},
+                .operations = &.{Cors},
+            };
             pub fn call(comptime _: @import("../req_ctx.zig").ReqCtx, req: anytype) !Res {
                 _ = req;
                 return Res.text(200, "ok");
             }
-        }, .{ .middlewares = .{Mw} }),
+        }),
         router.post("/a", struct {
+            pub const Info: router.EndpointInfo = .{
+                .middlewares = &.{Mw},
+                .operations = &.{Cors},
+            };
             pub fn call(comptime _: @import("../req_ctx.zig").ReqCtx, req: anytype) !Res {
                 _ = req;
                 return Res.text(200, "ok");
             }
-        }, .{ .middlewares = .{Mw} }),
+        }),
         router.get("/b", struct {
+            pub const Info: router.EndpointInfo = .{};
             pub fn call(comptime _: @import("../req_ctx.zig").ReqCtx, req: anytype) !Res {
                 _ = req;
                 return Res.text(200, "ok");
             }
-        }, .{}),
+        }),
     }, .{}, .{Cors});
 
     const fields = @typeInfo(@TypeOf(out)).@"struct".fields;

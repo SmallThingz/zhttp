@@ -37,6 +37,9 @@ const UpgradeHeaders = struct {
 };
 
 const UpgradeHandshake = struct {
+    pub const Info: zhttp.router.EndpointInfo = .{
+        .headers = UpgradeHeaders,
+    };
     pub fn call(comptime rctx: ReqCtx, req: rctx.T()) !zhttp.Res {
         const auth = req.header(.x_auth) orelse return zhttp.Res.text(401, "missing x-auth\n");
         if (!std.mem.eql(u8, auth, "secret")) return zhttp.Res.text(403, "bad x-auth\n");
@@ -46,8 +49,8 @@ const UpgradeHandshake = struct {
             return zhttp.Res.text(400, "expected connection: Upgrade\n");
         }
 
-        const upgrade = req.header(.upgrade) orelse return zhttp.Res.text(400, "missing upgrade\n");
-        if (!std.ascii.eqlIgnoreCase(upgrade, "chat")) {
+        const upgrade_value = req.header(.upgrade) orelse return zhttp.Res.text(400, "missing upgrade\n");
+        if (!std.ascii.eqlIgnoreCase(upgrade_value, "chat")) {
             return .{
                 .status = @enumFromInt(426),
                 .headers = &.{.{ .name = "upgrade", .value = "chat" }},
@@ -62,6 +65,17 @@ const UpgradeHandshake = struct {
             .protocol = "chat",
             .extra_headers = extra[0..],
         });
+    }
+
+    pub fn upgrade(
+        server: anytype,
+        stream: *const std.Io.net.Stream,
+        r: *Io.Reader,
+        w: *Io.Writer,
+        line: zhttp.request.RequestLine,
+        res: zhttp.Res,
+    ) void {
+        return onUpgrade(server, stream, r, w, line, res);
     }
 };
 
@@ -80,10 +94,7 @@ fn onUpgrade(
 
 const SrvT = zhttp.Server(.{
     .routes = .{
-        zhttp.get("/up", UpgradeHandshake, .{
-            .headers = UpgradeHeaders,
-            .upgrade_handler = onUpgrade,
-        }),
+        zhttp.get("/up", UpgradeHandshake),
     },
 });
 

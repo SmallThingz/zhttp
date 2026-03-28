@@ -8,7 +8,6 @@ const parse = @import("parse.zig");
 const request = @import("request.zig");
 const response = @import("response.zig");
 const urldecode = @import("urldecode.zig");
-const util = @import("util.zig");
 const middleware = @import("middleware.zig");
 const req_ctx = @import("req_ctx.zig");
 const ReqCtx = req_ctx.ReqCtx;
@@ -138,85 +137,6 @@ pub fn head(comptime pattern: []const u8, comptime endpoint: type) RouteDecl {
 /// Implements options.
 pub fn options(comptime pattern: []const u8, comptime endpoint: type) RouteDecl {
     return route(.OPTIONS, pattern, endpoint);
-}
-
-fn tupleConcatValuesType(comptime a: anytype, comptime b: anytype) type {
-    const la: usize = comptime util.tupleLen(a);
-    const lb: usize = comptime util.tupleLen(b);
-    if (la == 0) return @TypeOf(b);
-    if (lb == 0) return @TypeOf(a);
-    const OutFieldTypes = comptime blk: {
-        var out: [la + lb]type = undefined;
-        for (@typeInfo(@TypeOf(a)).@"struct".fields, 0..) |f, i| {
-            out[i] = @TypeOf(@field(a, f.name));
-        }
-        for (@typeInfo(@TypeOf(b)).@"struct".fields, 0..) |f, i| {
-            out[la + i] = @TypeOf(@field(b, f.name));
-        }
-        break :blk out;
-    };
-    return std.meta.Tuple(&OutFieldTypes);
-}
-
-fn tupleConcatValues(comptime a: anytype, comptime b: anytype) tupleConcatValuesType(a, b) {
-    const la: usize = comptime util.tupleLen(a);
-    const lb: usize = comptime util.tupleLen(b);
-    if (la == 0) return b;
-    if (lb == 0) return a;
-
-    const OutT = tupleConcatValuesType(a, b);
-    return comptime blk: {
-        var out: OutT = undefined;
-        for (@typeInfo(@TypeOf(a)).@"struct".fields, 0..) |f, i| {
-            @field(out, std.fmt.comptimePrint("{d}", .{i})) = @field(a, f.name);
-        }
-        for (@typeInfo(@TypeOf(b)).@"struct".fields, 0..) |f, i| {
-            @field(out, std.fmt.comptimePrint("{d}", .{la + i})) = @field(b, f.name);
-        }
-        break :blk out;
-    };
-}
-
-fn assertNoDuplicateRoutes(comptime routes: anytype) void {
-    const fields = @typeInfo(@TypeOf(routes)).@"struct".fields;
-    inline for (fields, 0..) |f, i| {
-        const r = @field(routes, f.name);
-        inline for (fields[0..i]) |pf| {
-            const pr = @field(routes, pf.name);
-            if (comptime std.mem.eql(u8, r.method, pr.method) and std.mem.eql(u8, r.pattern, pr.pattern)) {
-                @compileError("duplicate route: " ++ r.method ++ " " ++ r.pattern);
-            }
-        }
-    }
-}
-
-fn assertNoRouteCollisions(comptime a: anytype, comptime b: anytype) void {
-    const fa = @typeInfo(@TypeOf(a)).@"struct".fields;
-    const fb = @typeInfo(@TypeOf(b)).@"struct".fields;
-    inline for (fa) |f| {
-        const ra = @field(a, f.name);
-        inline for (fb) |g| {
-            const rb = @field(b, g.name);
-            if (comptime std.mem.eql(u8, ra.method, rb.method) and std.mem.eql(u8, ra.pattern, rb.pattern)) {
-                @compileError("route collision: " ++ ra.method ++ " " ++ ra.pattern);
-            }
-        }
-    }
-}
-
-fn mergeRoutesType(comptime user_routes: anytype, comptime extra_routes: anytype) type {
-    if (util.tupleLen(extra_routes) == 0) return @TypeOf(user_routes);
-    const a: @TypeOf(user_routes) = undefined;
-    const b: @TypeOf(extra_routes) = undefined;
-    return tupleConcatValuesType(a, b);
-}
-
-/// Implements merge routes.
-pub fn mergeRoutes(comptime user_routes: anytype, comptime extra_routes: anytype) mergeRoutesType(user_routes, extra_routes) {
-    if (util.tupleLen(extra_routes) == 0) return user_routes;
-    assertNoDuplicateRoutes(extra_routes);
-    assertNoRouteCollisions(user_routes, extra_routes);
-    return tupleConcatValues(user_routes, extra_routes);
 }
 
 fn structFieldsToST(comptime T: type) []const req_ctx.ST {

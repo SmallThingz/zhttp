@@ -353,6 +353,39 @@ fn parseBenchOutput(
     return res;
 }
 
+test "parseBenchOutput parses multiline non-quiet output" {
+    const input =
+        "zhttp conns=1 iters=1000 warmup=100 fixed_bytes=150\n" ++
+        "zhttp ok=1000 elapsed_ns=9764601\n" ++
+        "zhttp req/s=102410.74 ns/req=9764.6 MiB/s=14.65\n";
+    const res = try parseBenchOutput(std.testing.allocator, "zhttp", input);
+    defer if (res.first_error) |err| std.testing.allocator.free(err);
+    try std.testing.expectEqualStrings("zhttp", res.label);
+    try std.testing.expectEqual(@as(u64, 1000), res.ok);
+    try std.testing.expectEqual(@as(u64, 9_764_601), res.elapsed_ns);
+    try std.testing.expectEqual(@as(usize, 150), res.fixed_bytes);
+    try std.testing.expectApproxEqAbs(@as(f64, 102_410.74), res.req_per_s, 0.01);
+    try std.testing.expectApproxEqAbs(@as(f64, 9_764.6), res.ns_per_req, 0.01);
+    try std.testing.expectApproxEqAbs(@as(f64, 14.65), res.mib_per_s, 0.01);
+    try std.testing.expect(res.first_error == null);
+}
+
+test "parseBenchOutput parses quiet single-line output with first_error" {
+    const input =
+        "faf ok=3200000 elapsed_ns=6611809755 fixed_bytes=150 req/s=483982.47 ns/req=2066.2 MiB/s=69.23\n" ++
+        "first_error=ReadFailed\n";
+    const res = try parseBenchOutput(std.testing.allocator, "faf", input);
+    defer if (res.first_error) |err| std.testing.allocator.free(err);
+    try std.testing.expectEqualStrings("faf", res.label);
+    try std.testing.expectEqual(@as(u64, 3_200_000), res.ok);
+    try std.testing.expectEqual(@as(u64, 6_611_809_755), res.elapsed_ns);
+    try std.testing.expectEqual(@as(usize, 150), res.fixed_bytes);
+    try std.testing.expectApproxEqAbs(@as(f64, 483_982.47), res.req_per_s, 0.01);
+    try std.testing.expectApproxEqAbs(@as(f64, 2_066.2), res.ns_per_req, 0.01);
+    try std.testing.expectApproxEqAbs(@as(f64, 69.23), res.mib_per_s, 0.01);
+    try std.testing.expectEqualStrings("ReadFailed", res.first_error.?);
+}
+
 /// Implements spawn background.
 pub fn spawnBackground(io: std.Io, argv: []const []const u8, cwd: ?[]const u8, inherit: bool) !std.process.Child {
     const cwd_opt: std.process.Child.Cwd = if (cwd) |p| .{ .path = p } else .inherit;

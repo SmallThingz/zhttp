@@ -155,10 +155,8 @@ test {
     _ = @import("server.zig");
     _ = @import("middleware.zig");
     _ = @import("operations.zig");
-    _ = @import("operations/mod.zig");
     _ = @import("operations/cors.zig");
     _ = @import("operations/static.zig");
-    _ = @import("middleware/mod.zig");
     _ = @import("middleware/util.zig");
     _ = @import("middleware/compression.zig");
     _ = @import("middleware/cors.zig");

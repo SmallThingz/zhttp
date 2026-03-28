@@ -8,6 +8,34 @@ pub const Header = struct {
     value: []const u8,
 };
 
+pub const ChunkedWriter = struct {
+    /// Stores `w`.
+    w: *std.Io.Writer,
+
+    /// Writes one HTTP chunk (hex length + CRLF + payload + CRLF).
+    pub fn writeAll(self: *ChunkedWriter, bytes: []const u8) !void {
+        if (bytes.len == 0) return;
+        var len_buf: [32]u8 = undefined;
+        const len_hex = std.fmt.bufPrint(&len_buf, "{x}", .{bytes.len}) catch unreachable;
+        try self.w.writeAll(len_hex);
+        try self.w.writeAll("\r\n");
+        try self.w.writeAll(bytes);
+        try self.w.writeAll("\r\n");
+    }
+
+    /// Writes the final zero-length chunk terminator.
+    pub fn finish(self: *ChunkedWriter) !void {
+        try self.w.writeAll("0\r\n\r\n");
+    }
+};
+
+pub const BodyStream = struct {
+    /// Stores `writeFn`.
+    writeFn: *const fn (cw: *ChunkedWriter) std.Io.Writer.Error!void,
+};
+
+const empty_segment_body_const: *const [0][]const u8 = &.{};
+
 pub const Res = struct {
     /// Stores `status`.
     status: std.http.Status = .ok,
@@ -75,6 +103,46 @@ pub const Res = struct {
     }
 };
 
+pub const SegmentedRes = struct {
+    /// Stores `status`.
+    status: std.http.Status = .ok,
+    /// Stores `headers`.
+    headers: []const Header = &.{},
+    /// Stores `body`.
+    body: [][]const u8 = @constCast(empty_segment_body_const[0..]),
+    /// Stores `close`.
+    close: bool = false,
+};
+
+pub const StreamRes = struct {
+    /// Stores `status`.
+    status: std.http.Status = .ok,
+    /// Stores `headers`.
+    headers: []const Header = &.{},
+    /// Stores `body`.
+    body: BodyStream,
+    /// Stores `close`.
+    close: bool = false,
+};
+
+/// Maps a body representation to a concrete response type.
+pub fn Response(comptime Body: type) type {
+    if (Body == []const u8) return Res;
+    if (Body == [][]const u8) return SegmentedRes;
+    if (Body == BodyStream) return StreamRes;
+    @compileError("unsupported response body type; expected []const u8, [][]const u8, or response.BodyStream");
+}
+
+fn segmentedContentLength(parts: [][]const u8) usize {
+    var total: usize = 0;
+    for (parts) |p| {
+        const sum, const ov = @addWithOverflow(total, p.len);
+        if (ov != 0) unreachable;
+        total = sum;
+    }
+    return total;
+}
+
 /// Converts values in the range [0, 100) to a base 10 string.
 pub fn digits2(value: u8) [2]u8 {
     if (builtin.mode == .ReleaseSmall) {
@@ -110,8 +178,73 @@ pub fn write(
     }
 }
 
+/// Writes any supported response type.
+pub fn writeAny(
+    w: *std.Io.Writer,
+    res: anytype,
+    keep_alive: bool,
+    send_body: bool,
+) !void {
+    const T = @TypeOf(res);
+    if (T == Res) return write(w, res, keep_alive, send_body);
+    if (T == SegmentedRes) return writeSegmented(w, res, keep_alive, send_body);
+    if (T == StreamRes) return writeStream(w, res, keep_alive, send_body);
+    @compileError("unsupported response type; expected response.Res, response.SegmentedRes, or response.StreamRes");
+}
+
+fn writeSegmented(
+    w: *std.Io.Writer,
+    res: SegmentedRes,
+    keep_alive: bool,
+    send_body: bool,
+) !void {
+    try writeStatusLine(w, res.status);
+
+    const close_conn = (!keep_alive) or res.close;
+    try w.writeAll(if (close_conn) "connection: close\r\n" else "connection: keep-alive\r\n");
+
+    for (res.headers) |h| {
+        try w.writeAll(h.name);
+        try w.writeAll(": ");
+        try w.writeAll(h.value);
+        try w.writeAll("\r\n");
+    }
+
+    try writeContentLength(w, segmentedContentLength(res.body));
+
+    if (send_body and res.body.len != 0) {
+        try w.writeVecAll(res.body);
+    }
+}
+
+fn writeStream(
+    w: *std.Io.Writer,
+    res: StreamRes,
+    keep_alive: bool,
+    send_body: bool,
+) !void {
+    try writeStatusLine(w, res.status);
+
+    const close_conn = (!keep_alive) or res.close;
+    try w.writeAll(if (close_conn) "connection: close\r\n" else "connection: keep-alive\r\n");
+
+    for (res.headers) |h| {
+        try w.writeAll(h.name);
+        try w.writeAll(": ");
+        try w.writeAll(h.value);
+        try w.writeAll("\r\n");
+    }
+    try w.writeAll("transfer-encoding: chunked\r\n\r\n");
+
+    if (send_body) {
+        var cw: ChunkedWriter = .{ .w = w };
+        try res.body.writeFn(&cw);
+        try cw.finish();
+    }
+}
+
 /// Implements write upgrade.
-pub fn writeUpgrade(w: *std.Io.Writer, res: Res) !void {
+pub fn writeUpgrade(w: *std.Io.Writer, res: anytype) !void {
     try writeStatusLine(w, res.status);
     for (res.headers) |h| {
         try w.writeAll(h.name);
@@ -218,6 +351,43 @@ test "writeUpgrade: does not inject connection or content-length" {
         "upgrade: websocket\r\n" ++
         "\r\n";
     try std.testing.expectEqualStrings(expected, out[0..w.end]);
+}
+
+test "writeAny: segmented body uses content-length sum and writes all parts" {
+    const parts = [_][]const u8{ "hello", " ", "world" };
+    const res: SegmentedRes = .{
+        .status = .ok,
+        .body = @constCast(parts[0..]),
+    };
+    var out: [256]u8 = undefined;
+    var w = std.Io.Writer.fixed(out[0..]);
+    try writeAny(&w, res, true, true);
+    try std.testing.expect(std.mem.indexOf(u8, out[0..w.end], "content-length: 11\r\n") != null);
+    try std.testing.expect(std.mem.endsWith(u8, out[0..w.end], "\r\nhello world"));
+}
+
+test "writeAny: stream body writes chunked encoding" {
+    const S = struct {
+        fn stream(cw: *ChunkedWriter) !void {
+            try cw.writeAll("hello");
+            try cw.writeAll("!");
+        }
+    };
+    const res: StreamRes = .{
+        .status = .ok,
+        .body = .{ .writeFn = S.stream },
+    };
+    var out: [512]u8 = undefined;
+    var w = std.Io.Writer.fixed(out[0..]);
+    try writeAny(&w, res, true, true);
+    try std.testing.expect(std.mem.indexOf(u8, out[0..w.end], "transfer-encoding: chunked\r\n\r\n") != null);
+    try std.testing.expect(std.mem.endsWith(u8, out[0..w.end], "5\r\nhello\r\n1\r\n!\r\n0\r\n\r\n"));
+}
+
+test "Response: maps supported body shapes" {
+    try std.testing.expect(Response([]const u8) == Res);
+    try std.testing.expect(Response([][]const u8) == SegmentedRes);
+    try std.testing.expect(Response(BodyStream) == StreamRes);
 }
 
 test "digits2: handles boundaries" {

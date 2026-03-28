@@ -44,7 +44,7 @@ pub const RouteDecl = struct {
     method: []const u8,
     /// Stores `pattern`.
     pattern: []const u8,
-    /// Stores endpoint type exposing `pub fn call(comptime rctx: ReqCtx, req: rctx.T()) !Res`.
+    /// Stores endpoint type exposing `pub fn call(comptime rctx: ReqCtx, req: rctx.T()) !rctx.Response(Body)`.
     endpoint: type,
     /// Stores `headers`.
     headers: type,
@@ -82,7 +82,7 @@ fn validateEndpointInfo(comptime endpoint: type) EndpointInfo {
 
 fn endpointType(comptime endpoint: type) struct { endpoint: type, info: EndpointInfo } {
     if (!@hasDecl(endpoint, "call")) {
-        @compileError("route endpoint type must expose `pub fn call(comptime rctx: ReqCtx, req: rctx.T()) !Res`");
+        @compileError("route endpoint type must expose `pub fn call(comptime rctx: ReqCtx, req: rctx.T()) !rctx.Response(Body)`");
     }
     return .{
         .endpoint = endpoint,
@@ -95,7 +95,7 @@ pub fn route(
     /// HTTP method enum literal, e.g. `.GET`.
     comptime method_lit: @EnumLiteral(),
     comptime pattern: []const u8,
-    /// Route endpoint type exposing `pub fn call(comptime rctx: ReqCtx, req: rctx.T()) !Res`.
+    /// Route endpoint type exposing `pub fn call(comptime rctx: ReqCtx, req: rctx.T()) !rctx.Response(Body)`.
     comptime endpoint: type,
 ) RouteDecl {
     const ep = endpointType(endpoint);
@@ -835,8 +835,8 @@ pub fn Compiled(
             return false;
         }
 
-        fn finishResponse(w: *Io.Writer, res: Res, keep_alive: bool, send_body: bool) !Action {
-            try response.write(w, res, keep_alive, send_body);
+        fn finishResponse(w: *Io.Writer, res: anytype, keep_alive: bool, send_body: bool) !Action {
+            try response.writeAny(w, res, keep_alive, send_body);
             if (w.buffered().len != 0) {
                 try w.flush();
             }
@@ -850,7 +850,7 @@ pub fn Compiled(
             r: *Io.Reader,
             w: *Io.Writer,
             line: request.RequestLine,
-            res: Res,
+            res: anytype,
         ) void {
             const handler = Endpoint.upgrade;
             const HandlerT = @TypeOf(handler);
@@ -870,7 +870,7 @@ pub fn Compiled(
             r: *Io.Reader,
             w: *Io.Writer,
             line: request.RequestLine,
-            res: Res,
+            res: anytype,
         ) DispatchError!?Action {
             if (!@hasDecl(Endpoint, "upgrade")) return null;
             if (res.status != .switching_protocols) return null;
@@ -923,6 +923,21 @@ pub fn Compiled(
                         .idx = 0,
                         ._base_req_type = ReqT,
                     };
+                    comptime {
+                        const ReqW = rctx.T();
+                        const call_ret = @TypeOf(@call(.auto, rd.endpoint.call, .{ rctx, @as(ReqW, undefined) }));
+                        const resp_t = switch (@typeInfo(call_ret)) {
+                            .error_union => |eu| eu.payload,
+                            else => call_ret,
+                        };
+                        if (MwList.len != 0 and resp_t != response.Res) {
+                            @compileError(
+                                "endpoint " ++ @typeName(rd.endpoint) ++
+                                    " returns " ++ @typeName(resp_t) ++
+                                    " but this route has middleware; only rctx.Response([]const u8) is supported with middleware currently",
+                            );
+                        }
+                    }
 
                     var reqv = ReqT.initWithCtx(allocator, server.io, line, mw_ctx, server.ctx, route_mw_static_ctx);
                     reqv.setReader(r);
@@ -1494,6 +1509,72 @@ test "dispatch: middleware Info.path works" {
     var out: [256]u8 = undefined;
     const res = try dispatchForTest(S, {}, a, &r, line, out[0..]);
     try std.testing.expect(std.mem.endsWith(u8, out[0..res.len], "\r\n\r\n7"));
+}
+
+test "dispatch: segmented response uses content-length" {
+    const S = Compiled(void, .{
+        get("/seg", struct {
+            pub const Info: EndpointInfo = .{};
+            const parts = [_][]const u8{ "ab", "cdef" };
+
+            pub fn call(comptime rctx: ReqCtx, req: rctx.T()) !rctx.Response([][]const u8) {
+                _ = req;
+                return .{
+                    .status = .ok,
+                    .body = @constCast(parts[0..]),
+                };
+            }
+        }),
+    }, .{});
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    var r = Io.Reader.fixed("GET /seg HTTP/1.1\r\n\r\n");
+    const line = try request.parseRequestLineBorrowed(&r, 8 * 1024);
+    var out: [256]u8 = undefined;
+    const res = try dispatchForTest(S, {}, a, &r, line, out[0..]);
+    try std.testing.expectEqual(.@"continue", res.action);
+    try std.testing.expect(std.mem.indexOf(u8, out[0..res.len], "content-length: 6\r\n") != null);
+    try std.testing.expect(std.mem.endsWith(u8, out[0..res.len], "\r\n\r\nabcdef"));
+}
+
+test "dispatch: stream response uses chunked transfer-encoding" {
+    const StreamEndpoint = struct {
+        pub const Info: EndpointInfo = .{};
+
+        const Writer = struct {
+            fn write(cw: *response.ChunkedWriter) !void {
+                try cw.writeAll("ab");
+                try cw.writeAll("cd");
+            }
+        };
+
+        pub fn call(comptime rctx: ReqCtx, req: rctx.T()) !rctx.Response(response.BodyStream) {
+            _ = req;
+            return .{
+                .status = .ok,
+                .body = .{ .writeFn = Writer.write },
+            };
+        }
+    };
+
+    const S = Compiled(void, .{
+        get("/stream", StreamEndpoint),
+    }, .{});
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    var r = Io.Reader.fixed("GET /stream HTTP/1.1\r\n\r\n");
+    const line = try request.parseRequestLineBorrowed(&r, 8 * 1024);
+    var out: [512]u8 = undefined;
+    const res = try dispatchForTest(S, {}, a, &r, line, out[0..]);
+    try std.testing.expectEqual(.@"continue", res.action);
+    try std.testing.expect(std.mem.indexOf(u8, out[0..res.len], "transfer-encoding: chunked\r\n\r\n") != null);
+    try std.testing.expect(std.mem.endsWith(u8, out[0..res.len], "2\r\nab\r\n2\r\ncd\r\n0\r\n\r\n"));
 }
 
 test "middleware data: set in middleware and handler access" {

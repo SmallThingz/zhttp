@@ -139,6 +139,12 @@ pub fn envString(env: *const std.process.Environ.Map, name: []const u8, default:
     return env.get(name) orelse default;
 }
 
+/// Implements env optional int.
+pub fn envOptionalInt(env: *const std.process.Environ.Map, name: []const u8) ?usize {
+    const v = env.get(name) orelse return null;
+    return std.fmt.parseInt(usize, v, 10) catch null;
+}
+
 /// Implements parse key val.
 pub fn parseKeyVal(arg: []const u8) ?struct { key: []const u8, val: []const u8 } {
     if (!std.mem.startsWith(u8, arg, "--")) return null;
@@ -256,6 +262,11 @@ fn buildZigExe(
         "--global-cache-dir",
         global_cache_dir,
     }, root, true);
+}
+
+/// Ensures `zig-out/bin/zhttp-bench` exists and is up-to-date.
+pub fn ensureBenchBinary(io: std.Io, allocator: std.mem.Allocator, root: []const u8) !void {
+    try buildZigExe(io, allocator, root, "benchmark/bench.zig", "zig-out/bin/zhttp-bench", "zhttp-bench");
 }
 
 fn terminateChild(io: std.Io, child: *std.process.Child) void {

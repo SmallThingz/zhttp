@@ -12,6 +12,12 @@ This folder contains a tiny, allocation-free hot-loop benchmark client:
 zig build bench -Doptimize=ReleaseFast -- --mode=zhttp --conns=1 --iters=200000 --warmup=10000
 ```
 
+Convenience runner (environment-driven defaults):
+
+```sh
+CONNS=1 ITERS=200000 WARMUP=10000 zig run benchmark/run_zhttp.zig
+```
+
 ## zhttp (external)
 
 Runs `zhttp-bench-server` and benchmarks it via the same client in `--mode=external`:
@@ -53,3 +59,11 @@ Notes:
 - For the helper scripts, set `FULL_REQUEST=1` to pass `--full-request`:
   - `FULL_REQUEST=1 zig run benchmark/run_zhttp_external.zig`
   - `FULL_REQUEST=1 zig run benchmark/run_faf.zig`
+
+## perf helper
+
+`run_perf.zig` replaces the old shell helper and records/report profiles by driving `zhttp-bench`:
+
+```sh
+MODE=zhttp CONNS=1 ITERS=200000 WARMUP=10000 zig run benchmark/run_perf.zig
+```

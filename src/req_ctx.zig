@@ -1,4 +1,5 @@
 const std = @import("std");
+const response = @import("response.zig");
 
 comptime {
     @setEvalBranchQuota(200_000);
@@ -95,15 +96,21 @@ pub const ReqCtx = struct {
         };
     }
 
-    /// Returns the response type for this request context.
-    pub fn Response(comptime self: Self) type {
+    /// Returns a concrete response type for a selected body representation.
+    pub fn Response(comptime self: Self, comptime Body: type) type {
+        _ = self;
+        return response.Response(Body);
+    }
+
+    /// Returns the inferred endpoint/middleware response type for this request context.
+    fn InferredResponse(comptime self: Self) type {
         assertHandlerType(self.handler);
         const HandlerReq = self.T();
         const handler_ret = @TypeOf(@call(.auto, self.handler.function, .{ self, @as(HandlerReq, undefined) }));
         return payloadType(handler_ret);
     }
 
-    fn invoke(comptime self: Self, req: self.T()) !self.Response() {
+    fn invoke(comptime self: Self, req: self.T()) !self.InferredResponse() {
         if (self.idx < self.middlewares.len) {
             const Mw = self.middlewares[self.idx];
             return @call(.auto, Mw.call, .{ self, req });
@@ -309,7 +316,7 @@ pub const ReqCtx = struct {
     }
 
     /// Invokes the next handler in the middleware chain.
-    pub fn next(comptime self: Self, req: self.T()) !self.Response() {
+    pub fn next(comptime self: Self, req: self.T()) !self.InferredResponse() {
         const next_idx = self.idx + 1;
         if (next_idx > self.middlewares.len) {
             return self.invoke(req);
@@ -325,7 +332,7 @@ pub const ReqCtx = struct {
     }
 
     /// Runs this component.
-    pub fn run(comptime self: Self, req: self.T()) !self.Response() {
+    pub fn run(comptime self: Self, req: self.T()) !self.InferredResponse() {
         return self.invoke(req);
     }
 };

@@ -511,6 +511,209 @@ fn appendChunkedBody(buf: []u8, body: []const u8, random: std.Random) ![]const u
     return buf[0..w.end];
 }
 
+fn runSoakVarietyCase(
+    io: Io,
+    port: u16,
+    random: std.Random,
+    case_id: usize,
+    upgrade_cases: *usize,
+    malformed_cases: *usize,
+    keepalive_cases: *usize,
+) !void {
+    switch (case_id) {
+        0 => {
+            var expected_buf: [256]u8 = undefined;
+            const expected = try renderTextResponse(200, "ok", false, true, expected_buf[0..]);
+            try sendOneShotExpect(io, port, "GET /ok HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n", expected);
+        },
+        1 => {
+            var expected_buf: [256]u8 = undefined;
+            const expected = try renderTextResponse(200, "ok", false, false, expected_buf[0..]);
+            try sendOneShotExpect(io, port, "HEAD /ok HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n", expected);
+        },
+        2 => {
+            var body: [32]u8 = undefined;
+            const len = random.uintLessThan(usize, body.len + 1);
+            randomAscii(random, body[0..len]);
+
+            var req_buf: [512]u8 = undefined;
+            const req = try std.fmt.bufPrint(
+                &req_buf,
+                "POST /echo HTTP/1.1\r\nHost: x\r\nConnection: close\r\nContent-Length: {d}\r\n\r\n{s}",
+                .{ len, body[0..len] },
+            );
+            var resp_body: [64]u8 = undefined;
+            const body_out = try std.fmt.bufPrint(&resp_body, "echo:{s}", .{body[0..len]});
+            var expected_buf: [256]u8 = undefined;
+            const expected = try renderTextResponse(200, body_out, false, true, expected_buf[0..]);
+            try sendOneShotExpect(io, port, req, expected);
+        },
+        3 => {
+            var body: [32]u8 = undefined;
+            const len = random.uintLessThan(usize, body.len + 1);
+            randomAscii(random, body[0..len]);
+            var chunk_buf: [512]u8 = undefined;
+            const chunks = try appendChunkedBody(chunk_buf[0..], body[0..len], random);
+
+            var req_buf: [768]u8 = undefined;
+            const req = try std.fmt.bufPrint(
+                &req_buf,
+                "POST /echo HTTP/1.1\r\nHost: x\r\nConnection: close\r\nTransfer-Encoding: chunked\r\n\r\n{s}",
+                .{chunks},
+            );
+            var resp_body: [64]u8 = undefined;
+            const body_out = try std.fmt.bufPrint(&resp_body, "echo:{s}", .{body[0..len]});
+            var expected_buf: [256]u8 = undefined;
+            const expected = try renderTextResponse(200, body_out, false, true, expected_buf[0..]);
+            try sendOneShotExpect(io, port, req, expected);
+        },
+        4 => {
+            var expected_buf: [256]u8 = undefined;
+            const expected = try renderTextResponse(200, "123", false, true, expected_buf[0..]);
+            try sendOneShotExpect(io, port, "GET /item/123 HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n", expected);
+        },
+        5 => {
+            var expected_buf: [256]u8 = undefined;
+            const expected = try renderTextResponse(200, "123", false, true, expected_buf[0..]);
+            try sendOneShotExpect(io, port, "GET /item/%31%32%33 HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n", expected);
+        },
+        6 => {
+            var expected_buf: [256]u8 = undefined;
+            const expected = try renderTextResponse(200, "a b", false, true, expected_buf[0..]);
+            try sendOneShotExpect(io, port, "GET /search?name=a%20b HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n", expected);
+        },
+        7 => {
+            var expected_buf: [256]u8 = undefined;
+            const expected = try renderTextResponse(404, "not found", false, true, expected_buf[0..]);
+            try sendOneShotExpect(io, port, "GET /missing HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n", expected);
+        },
+        8 => {
+            malformed_cases.* += 1;
+            var expected_buf: [256]u8 = undefined;
+            const expected = try renderTextResponse(400, "bad request", false, true, expected_buf[0..]);
+            try sendOneShotExpect(io, port, "POST /drain HTTP/1.1\r\nHost: x\r\nContent-Length: 1\r\nContent-Length: 2\r\n\r\n", expected);
+        },
+        9 => {
+            malformed_cases.* += 1;
+            var expected_buf: [256]u8 = undefined;
+            const expected = try renderTextResponse(400, "bad request", false, true, expected_buf[0..]);
+            try sendOneShotExpect(io, port, "POST /drain HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\nContent-Length: 0\r\n\r\n", expected);
+        },
+        10 => {
+            malformed_cases.* += 1;
+            var expected_buf: [256]u8 = undefined;
+            const expected = try renderTextResponse(400, "bad request", false, true, expected_buf[0..]);
+            try sendOneShotExpect(io, port, "GET /ok HTTP/1.1\r\nBroken\r\n\r\n", expected);
+        },
+        11 => {
+            malformed_cases.* += 1;
+            var req_buf: [512]u8 = undefined;
+            var w = Io.Writer.fixed(req_buf[0..]);
+            try w.writeAll("GET /ok HTTP/1.1\r\nX: ");
+            var i: usize = 0;
+            while (i < 300) : (i += 1) try w.writeByte('z');
+            try w.writeAll("\r\n\r\n");
+            var expected_buf: [256]u8 = undefined;
+            const expected = try renderTextResponse(431, "bad request", false, true, expected_buf[0..]);
+            try sendOneShotExpect(io, port, req_buf[0..w.end], expected);
+        },
+        12 => {
+            upgrade_cases.* += 1;
+            var stream = try Io.net.IpAddress.connect(&.{ .ip4 = Io.net.Ip4Address.loopback(port) }, io, .{ .mode = .stream });
+            defer stream.close(io);
+
+            var rb: [4 * 1024]u8 = undefined;
+            var wb: [512]u8 = undefined;
+            var sr = stream.reader(io, &rb);
+            var sw = stream.writer(io, &wb);
+
+            try sw.interface.writeAll(
+                "GET /up HTTP/1.1\r\n" ++
+                    "Host: x\r\n" ++
+                    "Connection: Upgrade\r\n" ++
+                    "Upgrade: testproto\r\n" ++
+                    "\r\n",
+            );
+            try sw.interface.flush();
+
+            var expected_buf: [256]u8 = undefined;
+            const expected = try renderUpgradeResponse(&.{
+                .{ .name = "connection", .value = "Upgrade" },
+                .{ .name = "upgrade", .value = "testproto" },
+            }, expected_buf[0..]);
+            try expectReadEquals(&sr.interface, expected);
+            try sw.interface.writeAll("ping");
+            try sw.interface.flush();
+            try expectReadEquals(&sr.interface, "pong");
+            try expectClosed(&sr.interface);
+        },
+        13 => {
+            keepalive_cases.* += 1;
+            var body: [24]u8 = undefined;
+            const len = 1 + random.uintLessThan(usize, body.len);
+            randomAscii(random, body[0..len]);
+
+            var req_buf: [768]u8 = undefined;
+            const req = try std.fmt.bufPrint(
+                &req_buf,
+                "POST /drain HTTP/1.1\r\nHost: x\r\nContent-Length: {d}\r\n\r\n{s}" ++
+                    "GET /ok HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n",
+                .{ len, body[0..len] },
+            );
+
+            var resp1_buf: [256]u8 = undefined;
+            const resp1 = try renderTextResponse(200, "drain", true, true, resp1_buf[0..]);
+            var resp2_buf: [256]u8 = undefined;
+            const resp2 = try renderTextResponse(200, "ok", false, true, resp2_buf[0..]);
+            var expected_concat: [512]u8 = undefined;
+            @memcpy(expected_concat[0..resp1.len], resp1);
+            @memcpy(expected_concat[resp1.len .. resp1.len + resp2.len], resp2);
+            try sendOneShotExpect(io, port, req, expected_concat[0 .. resp1.len + resp2.len]);
+        },
+        14 => {
+            malformed_cases.* += 1;
+            var expected_buf: [256]u8 = undefined;
+            const expected = try renderTextResponse(400, "bad request", false, true, expected_buf[0..]);
+            try sendOneShotExpect(io, port, "POST /drain HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n1\r\naXY0\r\n\r\n", expected);
+        },
+        15 => {
+            malformed_cases.* += 1;
+            try sendAndCloseEarly(io, port, "GET /ok HTTP/1.1\r\nHost: x");
+        },
+        16 => {
+            malformed_cases.* += 1;
+            try sendAndCloseEarly(io, port, "POST /drain HTTP/1.1\r\nHost: x\r\nContent-Length: 8\r\n\r\nabc");
+        },
+        17 => {
+            upgrade_cases.* += 1;
+            var stream = try Io.net.IpAddress.connect(&.{ .ip4 = Io.net.Ip4Address.loopback(port) }, io, .{ .mode = .stream });
+            defer stream.close(io);
+
+            var rb: [4 * 1024]u8 = undefined;
+            var wb: [512]u8 = undefined;
+            var sr = stream.reader(io, &rb);
+            var sw = stream.writer(io, &wb);
+
+            try sw.interface.writeAll(
+                "GET /up HTTP/1.1\r\n" ++
+                    "Host: x\r\n" ++
+                    "Connection: Upgrade\r\n" ++
+                    "Upgrade: testproto\r\n" ++
+                    "\r\n",
+            );
+            try sw.interface.flush();
+
+            var expected_buf: [256]u8 = undefined;
+            const expected = try renderUpgradeResponse(&.{
+                .{ .name = "connection", .value = "Upgrade" },
+                .{ .name = "upgrade", .value = "testproto" },
+            }, expected_buf[0..]);
+            try expectReadEquals(&sr.interface, expected);
+        },
+        else => unreachable,
+    }
+}
+
 test "Connection: close header closes socket" {
     const Bench = struct {
         fn plaintext(_: anytype) !response.Res {
@@ -2020,215 +2223,27 @@ test "server soak: one second real-socket variety including malformed keepalive 
 
     var prng = std.Random.DefaultPrng.init(0x5eed_cafe_1234_5678);
     const random = prng.random();
-    const start = Io.Clock.awake.now(io);
-
-    var iterations: usize = 0;
+    const soak_case_count = 18;
     var upgrade_cases: usize = 0;
     var malformed_cases: usize = 0;
     var keepalive_cases: usize = 0;
-
-    while (start.untilNow(io, .awake).nanoseconds < std.time.ns_per_s) : (iterations += 1) {
-        const case_id = iterations % 18;
-        switch (case_id) {
-            0 => {
-                var expected_buf: [256]u8 = undefined;
-                const expected = try renderTextResponse(200, "ok", false, true, expected_buf[0..]);
-                try sendOneShotExpect(io, port, "GET /ok HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n", expected);
-            },
-            1 => {
-                var expected_buf: [256]u8 = undefined;
-                const expected = try renderTextResponse(200, "ok", false, false, expected_buf[0..]);
-                try sendOneShotExpect(io, port, "HEAD /ok HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n", expected);
-            },
-            2 => {
-                var body: [32]u8 = undefined;
-                const len = random.uintLessThan(usize, body.len + 1);
-                randomAscii(random, body[0..len]);
-
-                var req_buf: [512]u8 = undefined;
-                const req = try std.fmt.bufPrint(
-                    &req_buf,
-                    "POST /echo HTTP/1.1\r\nHost: x\r\nConnection: close\r\nContent-Length: {d}\r\n\r\n{s}",
-                    .{ len, body[0..len] },
-                );
-                var resp_body: [64]u8 = undefined;
-                const body_out = try std.fmt.bufPrint(&resp_body, "echo:{s}", .{body[0..len]});
-                var expected_buf: [256]u8 = undefined;
-                const expected = try renderTextResponse(200, body_out, false, true, expected_buf[0..]);
-                try sendOneShotExpect(io, port, req, expected);
-            },
-            3 => {
-                var body: [32]u8 = undefined;
-                const len = random.uintLessThan(usize, body.len + 1);
-                randomAscii(random, body[0..len]);
-                var chunk_buf: [512]u8 = undefined;
-                const chunks = try appendChunkedBody(chunk_buf[0..], body[0..len], random);
-
-                var req_buf: [768]u8 = undefined;
-                const req = try std.fmt.bufPrint(
-                    &req_buf,
-                    "POST /echo HTTP/1.1\r\nHost: x\r\nConnection: close\r\nTransfer-Encoding: chunked\r\n\r\n{s}",
-                    .{chunks},
-                );
-                var resp_body: [64]u8 = undefined;
-                const body_out = try std.fmt.bufPrint(&resp_body, "echo:{s}", .{body[0..len]});
-                var expected_buf: [256]u8 = undefined;
-                const expected = try renderTextResponse(200, body_out, false, true, expected_buf[0..]);
-                try sendOneShotExpect(io, port, req, expected);
-            },
-            4 => {
-                var expected_buf: [256]u8 = undefined;
-                const expected = try renderTextResponse(200, "123", false, true, expected_buf[0..]);
-                try sendOneShotExpect(io, port, "GET /item/123 HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n", expected);
-            },
-            5 => {
-                var expected_buf: [256]u8 = undefined;
-                const expected = try renderTextResponse(200, "123", false, true, expected_buf[0..]);
-                try sendOneShotExpect(io, port, "GET /item/%31%32%33 HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n", expected);
-            },
-            6 => {
-                var expected_buf: [256]u8 = undefined;
-                const expected = try renderTextResponse(200, "a b", false, true, expected_buf[0..]);
-                try sendOneShotExpect(io, port, "GET /search?name=a%20b HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n", expected);
-            },
-            7 => {
-                var expected_buf: [256]u8 = undefined;
-                const expected = try renderTextResponse(404, "not found", false, true, expected_buf[0..]);
-                try sendOneShotExpect(io, port, "GET /missing HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n", expected);
-            },
-            8 => {
-                malformed_cases += 1;
-                var expected_buf: [256]u8 = undefined;
-                const expected = try renderTextResponse(400, "bad request", false, true, expected_buf[0..]);
-                try sendOneShotExpect(io, port, "POST /drain HTTP/1.1\r\nHost: x\r\nContent-Length: 1\r\nContent-Length: 2\r\n\r\n", expected);
-            },
-            9 => {
-                malformed_cases += 1;
-                var expected_buf: [256]u8 = undefined;
-                const expected = try renderTextResponse(400, "bad request", false, true, expected_buf[0..]);
-                try sendOneShotExpect(io, port, "POST /drain HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\nContent-Length: 0\r\n\r\n", expected);
-            },
-            10 => {
-                malformed_cases += 1;
-                var expected_buf: [256]u8 = undefined;
-                const expected = try renderTextResponse(400, "bad request", false, true, expected_buf[0..]);
-                try sendOneShotExpect(io, port, "GET /ok HTTP/1.1\r\nBroken\r\n\r\n", expected);
-            },
-            11 => {
-                malformed_cases += 1;
-                var req_buf: [512]u8 = undefined;
-                var w = Io.Writer.fixed(req_buf[0..]);
-                try w.writeAll("GET /ok HTTP/1.1\r\nX: ");
-                var i: usize = 0;
-                while (i < 300) : (i += 1) try w.writeByte('z');
-                try w.writeAll("\r\n\r\n");
-                var expected_buf: [256]u8 = undefined;
-                const expected = try renderTextResponse(431, "bad request", false, true, expected_buf[0..]);
-                try sendOneShotExpect(io, port, req_buf[0..w.end], expected);
-            },
-            12 => {
-                upgrade_cases += 1;
-                var stream = try Io.net.IpAddress.connect(&.{ .ip4 = Io.net.Ip4Address.loopback(port) }, io, .{ .mode = .stream });
-                defer stream.close(io);
-
-                var rb: [4 * 1024]u8 = undefined;
-                var wb: [512]u8 = undefined;
-                var sr = stream.reader(io, &rb);
-                var sw = stream.writer(io, &wb);
-
-                try sw.interface.writeAll(
-                    "GET /up HTTP/1.1\r\n" ++
-                        "Host: x\r\n" ++
-                        "Connection: Upgrade\r\n" ++
-                        "Upgrade: testproto\r\n" ++
-                        "\r\n",
-                );
-                try sw.interface.flush();
-
-                var expected_buf: [256]u8 = undefined;
-                const expected = try renderUpgradeResponse(&.{
-                    .{ .name = "connection", .value = "Upgrade" },
-                    .{ .name = "upgrade", .value = "testproto" },
-                }, expected_buf[0..]);
-                try expectReadEquals(&sr.interface, expected);
-                try sw.interface.writeAll("ping");
-                try sw.interface.flush();
-                try expectReadEquals(&sr.interface, "pong");
-                try expectClosed(&sr.interface);
-            },
-            13 => {
-                keepalive_cases += 1;
-                var body: [24]u8 = undefined;
-                const len = 1 + random.uintLessThan(usize, body.len);
-                randomAscii(random, body[0..len]);
-
-                var req_buf: [768]u8 = undefined;
-                const req = try std.fmt.bufPrint(
-                    &req_buf,
-                    "POST /drain HTTP/1.1\r\nHost: x\r\nContent-Length: {d}\r\n\r\n{s}" ++
-                        "GET /ok HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n",
-                    .{ len, body[0..len] },
-                );
-
-                var resp1_buf: [256]u8 = undefined;
-                const resp1 = try renderTextResponse(200, "drain", true, true, resp1_buf[0..]);
-                var resp2_buf: [256]u8 = undefined;
-                const resp2 = try renderTextResponse(200, "ok", false, true, resp2_buf[0..]);
-                var expected_concat: [512]u8 = undefined;
-                @memcpy(expected_concat[0..resp1.len], resp1);
-                @memcpy(expected_concat[resp1.len .. resp1.len + resp2.len], resp2);
-                try sendOneShotExpect(io, port, req, expected_concat[0 .. resp1.len + resp2.len]);
-            },
-            14 => {
-                malformed_cases += 1;
-                var expected_buf: [256]u8 = undefined;
-                const expected = try renderTextResponse(400, "bad request", false, true, expected_buf[0..]);
-                try sendOneShotExpect(io, port, "POST /drain HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n1\r\naXY0\r\n\r\n", expected);
-            },
-            15 => {
-                malformed_cases += 1;
-                try sendAndCloseEarly(io, port, "GET /ok HTTP/1.1\r\nHost: x");
-            },
-            16 => {
-                malformed_cases += 1;
-                try sendAndCloseEarly(io, port, "POST /drain HTTP/1.1\r\nHost: x\r\nContent-Length: 8\r\n\r\nabc");
-            },
-            17 => {
-                upgrade_cases += 1;
-                var stream = try Io.net.IpAddress.connect(&.{ .ip4 = Io.net.Ip4Address.loopback(port) }, io, .{ .mode = .stream });
-                defer stream.close(io);
-
-                var rb: [4 * 1024]u8 = undefined;
-                var wb: [512]u8 = undefined;
-                var sr = stream.reader(io, &rb);
-                var sw = stream.writer(io, &wb);
-
-                try sw.interface.writeAll(
-                    "GET /up HTTP/1.1\r\n" ++
-                        "Host: x\r\n" ++
-                        "Connection: Upgrade\r\n" ++
-                        "Upgrade: testproto\r\n" ++
-                        "\r\n",
-                );
-                try sw.interface.flush();
-
-                var expected_buf: [256]u8 = undefined;
-                const expected = try renderUpgradeResponse(&.{
-                    .{ .name = "connection", .value = "Upgrade" },
-                    .{ .name = "upgrade", .value = "testproto" },
-                }, expected_buf[0..]);
-                try expectReadEquals(&sr.interface, expected);
-            },
-            else => unreachable,
-        }
+    var mandatory_case: usize = 0;
+    while (mandatory_case < soak_case_count) : (mandatory_case += 1) {
+        try runSoakVarietyCase(io, port, random, mandatory_case, &upgrade_cases, &malformed_cases, &keepalive_cases);
     }
 
-    try std.testing.expect(iterations >= 18);
+    const start = Io.Clock.awake.now(io);
+    var timed_iterations: usize = 0;
+    while (start.untilNow(io, .awake).nanoseconds < std.time.ns_per_s) : (timed_iterations += 1) {
+        try runSoakVarietyCase(io, port, random, timed_iterations % soak_case_count, &upgrade_cases, &malformed_cases, &keepalive_cases);
+    }
+
+    try std.testing.expect(timed_iterations != 0);
+    group.cancel(io);
+    group.await(io) catch {};
+
     try std.testing.expect(upgrade_cases != 0);
     try std.testing.expect(malformed_cases != 0);
     try std.testing.expect(keepalive_cases != 0);
     try std.testing.expect(ctx.upgrades == upgrade_cases);
-
-    group.cancel(io);
-    group.await(io) catch {};
 }

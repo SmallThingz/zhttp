@@ -78,22 +78,34 @@ pub fn write(
     keep_alive: bool,
     send_body: bool,
 ) !void {
-    var effective = res;
-    if (!keep_alive) effective.close = true;
-    effective.format_connection_header = true;
-    effective.format_content_length = true;
-    effective.format_send_body = send_body;
-    effective.format_body_len_override = if (send_body) null else res.body.len;
-    try effective.format(w);
+    try writeStatusLine(w, res.status);
+
+    const close_conn = (!keep_alive) or res.close;
+    try w.writeAll(if (close_conn) "connection: close\r\n" else "connection: keep-alive\r\n");
+
+    for (res.headers) |h| {
+        try w.writeAll(h.name);
+        try w.writeAll(": ");
+        try w.writeAll(h.value);
+        try w.writeAll("\r\n");
+    }
+
+    try writeContentLength(w, res.body.len);
+
+    if (send_body and res.body.len != 0) {
+        try w.writeAll(res.body);
+    }
 }
 
 pub fn writeUpgrade(w: *std.Io.Writer, res: Res) !void {
-    var effective = res;
-    effective.format_connection_header = false;
-    effective.format_content_length = false;
-    effective.format_send_body = false;
-    effective.format_body_len_override = null;
-    try effective.format(w);
+    try writeStatusLine(w, res.status);
+    for (res.headers) |h| {
+        try w.writeAll(h.name);
+        try w.writeAll(": ");
+        try w.writeAll(h.value);
+        try w.writeAll("\r\n");
+    }
+    try w.writeAll("\r\n");
 }
 
 fn writeStatusLine(w: *std.Io.Writer, status: std.http.Status) !void {
@@ -109,6 +121,14 @@ fn writeStatusLine(w: *std.Io.Writer, status: std.http.Status) !void {
         try w.writeAll(phrase);
     }
     try w.writeAll("\r\n");
+}
+
+fn writeContentLength(w: *std.Io.Writer, body_len: usize) !void {
+    var len_buf: [32]u8 = undefined;
+    const len_str = std.fmt.bufPrint(&len_buf, "{d}", .{body_len}) catch unreachable;
+    try w.writeAll("content-length: ");
+    try w.writeAll(len_str);
+    try w.writeAll("\r\n\r\n");
 }
 
 test "write: HEAD omits body but keeps content-length" {

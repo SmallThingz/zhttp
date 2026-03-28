@@ -133,6 +133,7 @@ pub fn Response(comptime Body: type) type {
     @compileError("unsupported response body type; expected []const u8, [][]const u8, or response.BodyStream");
 }
 
+/// Computes the total byte length across all segmented body parts.
 fn segmentedContentLength(parts: [][]const u8) usize {
     var total: usize = 0;
     for (parts) |p| {
@@ -192,6 +193,7 @@ pub fn writeAny(
     @compileError("unsupported response type; expected response.Res, response.SegmentedRes, or response.StreamRes");
 }
 
+/// Writes a segmented fixed-length response.
 fn writeSegmented(
     w: *std.Io.Writer,
     res: SegmentedRes,
@@ -217,6 +219,7 @@ fn writeSegmented(
     }
 }
 
+/// Writes a stream response using HTTP chunked transfer encoding.
 fn writeStream(
     w: *std.Io.Writer,
     res: StreamRes,
@@ -255,6 +258,7 @@ pub fn writeUpgrade(w: *std.Io.Writer, res: anytype) !void {
     try w.writeAll("\r\n");
 }
 
+/// Writes the HTTP/1.1 status line.
 fn writeStatusLine(w: *std.Io.Writer, status: std.http.Status) !void {
     const status_code: u16 = @intCast(@intFromEnum(status));
     var status_buf: [3]u8 = undefined;
@@ -270,6 +274,7 @@ fn writeStatusLine(w: *std.Io.Writer, status: std.http.Status) !void {
     try w.writeAll("\r\n");
 }
 
+/// Writes the `content-length` header and header terminator.
 fn writeContentLength(w: *std.Io.Writer, body_len: usize) !void {
     var len_buf: [32]u8 = undefined;
     const len_str = std.fmt.bufPrint(&len_buf, "{d}", .{body_len}) catch unreachable;

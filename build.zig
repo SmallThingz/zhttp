@@ -60,36 +60,6 @@ pub fn build(b: *std.Build) void {
         }),
     });
 
-    const bench_server_exe = b.addExecutable(.{
-        .name = "zhttp-bench-server",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("benchmark/zhttp_server.zig"),
-            .target = target,
-            .optimize = optimize,
-            .imports = &.{
-                .{ .name = "zhttp", .module = mod },
-            },
-        }),
-    });
-    const bench_server_step = b.step("bench-server", "Build the benchmark server");
-    bench_server_step.dependOn(&bench_server_exe.step);
-
-    const origin_bench_exe = b.addExecutable(.{
-        .name = "zhttp-bench-origin-match",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("benchmark/origin_match.zig"),
-            .target = target,
-            .optimize = optimize,
-        }),
-    });
-    origin_bench_exe.root_module.addImport("zhttp", mod);
-    const origin_bench_run = b.addRunArtifact(origin_bench_exe);
-    if (b.args) |args| {
-        origin_bench_run.addArgs(args);
-    }
-    const origin_bench_step = b.step("bench-origin", "Benchmark origin decision tree against a hash map baseline");
-    origin_bench_step.dependOn(&origin_bench_run.step);
-
     const bench_step = b.step("bench", "Run benchmarks");
     const bench_zhttp_exe = b.addExecutable(.{
         .name = "zhttp-bench-zhttp",
@@ -103,22 +73,25 @@ pub fn build(b: *std.Build) void {
     if (b.args) |args| {
         bench_zhttp_run.addArgs(args);
     }
+    bench_zhttp_run.step.dependOn(&bench_exe.step);
     bench_step.dependOn(&bench_zhttp_run.step);
-    const bench_faf_exe = b.addExecutable(.{
-        .name = "zhttp-bench-faf",
+
+    const bench_compare_exe = b.addExecutable(.{
+        .name = "zhttp-bench-compare",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("benchmark/run_faf.zig"),
+            .root_source_file = b.path("benchmark/run_compare.zig"),
             .target = target,
             .optimize = optimize,
         }),
     });
-    const bench_faf_run = b.addRunArtifact(bench_faf_exe);
-    bench_faf_run.addPrefixedArtifactArg("--bench-bin=", bench_exe);
+    const bench_compare_run = b.addRunArtifact(bench_compare_exe);
+    bench_compare_run.addPrefixedArtifactArg("--bench-bin=", bench_exe);
     if (b.args) |args| {
-        bench_faf_run.addArgs(args);
+        bench_compare_run.addArgs(args);
     }
-    bench_faf_run.step.dependOn(&bench_exe.step);
-    bench_step.dependOn(&bench_faf_run.step);
+    bench_compare_run.step.dependOn(&bench_exe.step);
+    const bench_compare_step = b.step("bench-compare", "Run fair zhttp-vs-FaF benchmark and sync README summary");
+    bench_compare_step.dependOn(&bench_compare_run.step);
 
     const examples_step = b.step("examples", "Build all examples");
     const examples_check_step = b.step("examples-check", "Run all examples with --smoke");

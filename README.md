@@ -65,7 +65,10 @@ pub fn main(init: std.process.Init) !void {
 Add as a dependency:
 
 ```bash
-zig fetch --save <git-or-tarball-url>
+<!-- README_FETCH:START -->
+
+zig fetch --save git+https://github.com/SmallThingz/zhttp?ref=7e643ef880041c7154c54eaf56aefc39274e0b30
+<!-- README_FETCH:END -->
 ```
 
 `build.zig`:
@@ -160,7 +163,41 @@ zig build bench -Doptimize=ReleaseFast -- --mode=zhttp --conns=1 --iters=200000 
 zig run benchmark/run_zhttp_external.zig
 BENCH_BIN=./zig-out/bin/zhttp-bench zig run benchmark/run_faf.zig
 zig run benchmark/run_compare.zig
+# or via build step:
+zig build bench
+zig build bench-compare
 ```
+
+<!-- README_BENCHMARK:START -->
+
+Source: `benchmark/results/bench_latest.json`
+
+Config: host=`127.0.0.1` path=`/plaintext` conns=1 iters=1000 warmup=100 full_request=false
+
+| Target | req/s | ns/req |
+|---|---:|---:|
+| zhttp | 102410.74 | 9764.60 |
+
+No benchmark transport errors were reported.
+
+Fairness notes: benchmark uses fixed response bytes discovered twice and pinned before timed runs
+<!-- README_BENCHMARK:END -->
+
+<!-- README_COMPARISON:START -->
+
+Source: `benchmark/results/latest.json`
+
+Config: host=`127.0.0.1` path=`/plaintext` conns=16 iters=200000 warmup=10000 full_request=true
+
+| Target | req/s | ns/req | relative |
+|---|---:|---:|---:|
+| zhttp | 697758.53 | 1433.20 | 1.442x vs faf |
+| faf | 483982.47 | 2066.20 | 0.694x vs zhttp |
+
+No benchmark transport errors were reported.
+
+Fairness notes: both targets use the same benchmark client settings (host/path/conns/iters/warmup/full_request), and fixed response bytes are discovered twice then pinned per target before timed runs
+<!-- README_COMPARISON:END -->
 
 For the full benchmark modes and notes, see [`benchmark/README.md`](./benchmark/README.md).
 
@@ -170,13 +207,4 @@ For the full benchmark modes and notes, see [`benchmark/README.md`](./benchmark/
 zig build test
 zig build examples
 zig build examples-check
-zig build bench-server
 ```
-
-## ⚠️ Current Scope
-
-`zhttp` is intentionally focused on a small HTTP/1.1 server core.
-
-- Request parsing covers HTTP/1.0 and HTTP/1.1.
-- Responses are written as HTTP/1.1 with either `Content-Length` or `Transfer-Encoding: chunked`.
-- Keep-alive and HEAD response semantics are handled.

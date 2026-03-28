@@ -1,6 +1,18 @@
 const std = @import("std");
 const builtin = @import("builtin");
 
+const ReadmeBenchmarkStartMarker = "<!-- README_BENCHMARK:START -->";
+const ReadmeBenchmarkEndMarker = "<!-- README_BENCHMARK:END -->";
+const ReadmeComparisonStartMarker = "<!-- README_COMPARISON:START -->";
+const ReadmeComparisonEndMarker = "<!-- README_COMPARISON:END -->";
+const ReadmeFetchStartMarker = "<!-- README_FETCH:START -->";
+const ReadmeFetchEndMarker = "<!-- README_FETCH:END -->";
+const BenchmarkResultsRelDir = "benchmark/results";
+const BenchmarkLatestJsonRelPath = "benchmark/results/bench_latest.json";
+const BenchmarkLatestMdRelPath = "benchmark/results/bench_latest.md";
+const ComparisonLatestJsonRelPath = "benchmark/results/latest.json";
+const ComparisonLatestMdRelPath = "benchmark/results/latest.md";
+
 pub const BenchConfig = struct {
     /// Stores `port`.
     port: u16,
@@ -20,6 +32,40 @@ pub const BenchConfig = struct {
     fixed_bytes: ?usize = null,
     /// Stores `quiet`.
     quiet: bool = false,
+};
+
+pub const BenchResult = struct {
+    /// Stores `label`.
+    label: []const u8,
+    /// Stores `ok`.
+    ok: u64,
+    /// Stores `elapsed_ns`.
+    elapsed_ns: u64,
+    /// Stores `fixed_bytes`.
+    fixed_bytes: usize,
+    /// Stores `req_per_s`.
+    req_per_s: f64,
+    /// Stores `ns_per_req`.
+    ns_per_req: f64,
+    /// Stores `mib_per_s`.
+    mib_per_s: f64,
+    /// Stores `first_error`.
+    first_error: ?[]const u8 = null,
+};
+
+pub const CompareConfig = struct {
+    /// Stores `host`.
+    host: []const u8,
+    /// Stores `path`.
+    path: []const u8,
+    /// Stores `conns`.
+    conns: usize,
+    /// Stores `iters`.
+    iters: usize,
+    /// Stores `warmup`.
+    warmup: usize,
+    /// Stores `full_request`.
+    full_request: bool,
 };
 
 /// Implements trim cr.
@@ -181,6 +227,132 @@ pub fn runCheckedEnv(
     }
 }
 
+const CapturedRun = struct {
+    stdout: []u8,
+    stderr: []u8,
+};
+
+fn runCapturedEnv(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    argv: []const []const u8,
+    cwd: ?[]const u8,
+    env_map: ?*const std.process.Environ.Map,
+) !CapturedRun {
+    const cwd_opt: std.process.Child.Cwd = if (cwd) |p| .{ .path = p } else .inherit;
+    const result = try std.process.run(allocator, io, .{
+        .argv = argv,
+        .cwd = cwd_opt,
+        .environ_map = env_map,
+        .stdout_limit = .limited(2 * 1024 * 1024),
+        .stderr_limit = .limited(2 * 1024 * 1024),
+    });
+    switch (result.term) {
+        .exited => |code| if (code != 0) return error.ProcessFailed,
+        else => return error.ProcessFailed,
+    }
+    return .{
+        .stdout = result.stdout,
+        .stderr = result.stderr,
+    };
+}
+
+fn writeStdout(io: std.Io, text: []const u8) !void {
+    var buffer: [2048]u8 = undefined;
+    const file = std.Io.File.stdout();
+    var out = file.writer(io, &buffer);
+    try out.interface.writeAll(text);
+}
+
+fn writeStderr(io: std.Io, text: []const u8) !void {
+    var buffer: [2048]u8 = undefined;
+    const file = std.Io.File.stderr();
+    var out = file.writer(io, &buffer);
+    try out.interface.writeAll(text);
+}
+
+fn parseBenchOutput(
+    allocator: std.mem.Allocator,
+    label: []const u8,
+    out: []const u8,
+) !BenchResult {
+    var res: BenchResult = .{
+        .label = label,
+        .ok = 0,
+        .elapsed_ns = 0,
+        .fixed_bytes = 0,
+        .req_per_s = 0,
+        .ns_per_req = 0,
+        .mib_per_s = 0,
+        .first_error = null,
+    };
+
+    var have_ok = false;
+    var have_elapsed = false;
+    var have_fixed = false;
+    var have_reqps = false;
+    var have_ns = false;
+    var have_mib = false;
+
+    var lines = std.mem.splitScalar(u8, out, '\n');
+    while (lines.next()) |line0| {
+        const line = std.mem.trim(u8, line0, " \t\r");
+        if (line.len == 0) continue;
+
+        if (std.mem.startsWith(u8, line, "first_error=")) {
+            if (res.first_error == null) {
+                res.first_error = try allocator.dupe(u8, line["first_error=".len..]);
+            }
+            continue;
+        }
+
+        var tokens = std.mem.splitScalar(u8, line, ' ');
+        while (tokens.next()) |tok| {
+            if (tok.len == 0) continue;
+            const eq = std.mem.indexOfScalar(u8, tok, '=') orelse continue;
+            const key = tok[0..eq];
+            const val = tok[eq + 1 ..];
+            if (key.len == 0 or val.len == 0) continue;
+
+            if (std.mem.eql(u8, key, "ok")) {
+                res.ok = std.fmt.parseInt(u64, val, 10) catch continue;
+                have_ok = true;
+                continue;
+            }
+            if (std.mem.eql(u8, key, "elapsed_ns")) {
+                res.elapsed_ns = std.fmt.parseInt(u64, val, 10) catch continue;
+                have_elapsed = true;
+                continue;
+            }
+            if (std.mem.eql(u8, key, "fixed_bytes")) {
+                res.fixed_bytes = std.fmt.parseInt(usize, val, 10) catch continue;
+                have_fixed = true;
+                continue;
+            }
+            if (std.mem.eql(u8, key, "req/s")) {
+                res.req_per_s = std.fmt.parseFloat(f64, val) catch continue;
+                have_reqps = true;
+                continue;
+            }
+            if (std.mem.eql(u8, key, "ns/req")) {
+                res.ns_per_req = std.fmt.parseFloat(f64, val) catch continue;
+                have_ns = true;
+                continue;
+            }
+            if (std.mem.eql(u8, key, "MiB/s")) {
+                res.mib_per_s = std.fmt.parseFloat(f64, val) catch continue;
+                have_mib = true;
+                continue;
+            }
+        }
+    }
+
+    if (!have_ok or !have_elapsed or !have_fixed or !have_reqps or !have_ns or !have_mib) {
+        return error.BenchmarkOutputParseFailed;
+    }
+    return res;
+}
+
 /// Implements spawn background.
 pub fn spawnBackground(io: std.Io, argv: []const []const u8, cwd: ?[]const u8, inherit: bool) !std.process.Child {
     const cwd_opt: std.process.Child.Cwd = if (cwd) |p| .{ .path = p } else .inherit;
@@ -288,7 +460,7 @@ pub fn runZhttpExternal(
     cfg: BenchConfig,
     root: []const u8,
     environ: std.process.Environ,
-) !void {
+) !BenchResult {
     printLabel(io, "== zhttp ==");
     try buildZigExe(io, allocator, root, "benchmark/zhttp_server.zig", "zig-out/bin/zhttp-bench-server", "zhttp-bench-server");
 
@@ -304,15 +476,25 @@ pub fn runZhttpExternal(
     defer terminateChild(io, &server);
 
     try std.Io.sleep(io, std.Io.Duration.fromMilliseconds(200), .awake);
+    const addr = try std.Io.net.IpAddress.parseIp4(cfg.host, cfg.port);
+    const req_bytes = try buildRequest(allocator, cfg.host, cfg.path, cfg.full_request);
+    defer allocator.free(req_bytes);
+    const fixed_first = try discoverFixedResponseBytes(io, addr, req_bytes);
+    const fixed_second = try discoverFixedResponseBytes(io, addr, req_bytes);
+    if (fixed_first != fixed_second) return error.ResponseSizeChanged;
+    const fixed_bytes = cfg.fixed_bytes orelse fixed_first;
+    if (cfg.fixed_bytes != null and fixed_bytes != fixed_first) return error.FixedBytesMismatch;
 
     var conns_buf: [32]u8 = undefined;
     var iters_buf: [32]u8 = undefined;
     var warmup_buf: [32]u8 = undefined;
     var port_num_buf: [32]u8 = undefined;
+    var fixed_buf: [32]u8 = undefined;
     const conns_arg = try std.fmt.bufPrint(&conns_buf, "--conns={d}", .{cfg.conns});
     const iters_arg = try std.fmt.bufPrint(&iters_buf, "--iters={d}", .{cfg.iters});
     const warmup_arg = try std.fmt.bufPrint(&warmup_buf, "--warmup={d}", .{cfg.warmup});
     const port_num_arg = try std.fmt.bufPrint(&port_num_buf, "--port={d}", .{cfg.port});
+    const fixed_arg = try std.fmt.bufPrint(&fixed_buf, "--fixed-bytes={d}", .{fixed_bytes});
     var host_buf: [64]u8 = undefined;
     const host_arg = try std.fmt.bufPrint(&host_buf, "--host={s}", .{cfg.host});
     var path_buf: [256]u8 = undefined;
@@ -330,18 +512,21 @@ pub fn runZhttpExternal(
         conns_arg,
         iters_arg,
         warmup_arg,
+        fixed_arg,
     });
     if (cfg.full_request) try bench_args.append(allocator, "--full-request");
     if (cfg.quiet) try bench_args.append(allocator, "--quiet");
-    if (cfg.fixed_bytes) |v| {
-        var fixed_buf: [32]u8 = undefined;
-        const fixed_arg = try std.fmt.bufPrint(&fixed_buf, "--fixed-bytes={d}", .{v});
-        try bench_args.append(allocator, fixed_arg);
-    }
     var env = try std.process.Environ.createMap(environ, allocator);
     defer env.deinit();
     try env.put("BENCH_LABEL", "zhttp ");
-    try runCheckedEnv(io, bench_args.items, root, true, &env);
+    const captured = try runCapturedEnv(io, allocator, bench_args.items, root, &env);
+    defer allocator.free(captured.stdout);
+    defer allocator.free(captured.stderr);
+    if (captured.stdout.len != 0) try writeStdout(io, captured.stdout);
+    if (captured.stderr.len != 0) try writeStderr(io, captured.stderr);
+    const merged = try std.mem.concat(allocator, u8, &.{ captured.stdout, "\n", captured.stderr });
+    defer allocator.free(merged);
+    return parseBenchOutput(allocator, "zhttp", merged);
 }
 
 fn dirExists(io: std.Io, path: []const u8) bool {
@@ -677,7 +862,7 @@ pub fn runFaf(
     bench_bin_opt: ?[]const u8,
     environ: std.process.Environ,
     root: []const u8,
-) !void {
+) !BenchResult {
     printLabel(io, "== FaF ==");
     if (cfg.port != 8080) return error.InvalidPort;
 
@@ -779,7 +964,8 @@ pub fn runFaf(
     defer env.deinit();
     const rustflags = env.get("RUSTFLAGS") orelse "";
     if (rustflags.len == 0) {
-        try env.put("RUSTFLAGS", "-Ctarget-cpu=native");
+        // Favor runtime throughput for the benchmark target.
+        try env.put("RUSTFLAGS", "-Ctarget-cpu=native -Ccodegen-units=1 -Clto=fat -Cpanic=abort");
     }
 
     var rustc_cmd = rustc_bin;
@@ -882,5 +1068,347 @@ pub fn runFaf(
     const fixed_arg = try std.fmt.bufPrint(&fixed_buf, "--fixed-bytes={d}", .{fixed_bytes});
     try bench_args.append(allocator, fixed_arg);
     try env.put("BENCH_LABEL", "faf ");
-    try runCheckedEnv(io, bench_args.items, root, true, &env);
+    const captured = try runCapturedEnv(io, allocator, bench_args.items, root, &env);
+    defer allocator.free(captured.stdout);
+    defer allocator.free(captured.stderr);
+    if (captured.stdout.len != 0) try writeStdout(io, captured.stdout);
+    if (captured.stderr.len != 0) try writeStderr(io, captured.stderr);
+    const merged = try std.mem.concat(allocator, u8, &.{ captured.stdout, "\n", captured.stderr });
+    defer allocator.free(merged);
+    return parseBenchOutput(allocator, "faf", merged);
+}
+
+const BenchmarkSnapshot = struct {
+    generated_unix: i64,
+    fairness: []const u8,
+    config: CompareConfig,
+    zhttp: BenchResult,
+};
+
+const CompareSnapshot = struct {
+    generated_unix: i64,
+    fairness: []const u8,
+    config: CompareConfig,
+    zhttp: BenchResult,
+    faf: BenchResult,
+};
+
+fn nowUnixSeconds() i64 {
+    if (builtin.os.tag != .linux) return 0;
+    const linux = std.os.linux;
+    var ts: linux.timespec = undefined;
+    const rc = linux.clock_gettime(linux.CLOCK.REALTIME, &ts);
+    if (rc != 0) return 0;
+    return @intCast(ts.sec);
+}
+
+fn updateReadmeSection(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    root: []const u8,
+    start_marker: []const u8,
+    end_marker: []const u8,
+    replacement: []const u8,
+) !void {
+    const readme_path = try std.fs.path.join(allocator, &.{ root, "README.md" });
+    defer allocator.free(readme_path);
+    const readme = try readFileMaybe(io, allocator, readme_path) orelse return error.FileNotFound;
+    defer allocator.free(readme);
+
+    const start = std.mem.indexOf(u8, readme, start_marker) orelse return error.ReadmeBenchMarkersMissing;
+    const after_start = start + start_marker.len;
+    const end = std.mem.indexOfPos(u8, readme, after_start, end_marker) orelse return error.ReadmeBenchMarkersMissing;
+
+    var out: std.ArrayList(u8) = .empty;
+    defer out.deinit(allocator);
+    try out.appendSlice(allocator, readme[0..after_start]);
+    try out.appendSlice(allocator, "\n\n");
+    try out.appendSlice(allocator, replacement);
+    if (replacement.len == 0 or replacement[replacement.len - 1] != '\n') try out.append(allocator, '\n');
+    if (readme[end - 1] != '\n') try out.append(allocator, '\n');
+    try out.appendSlice(allocator, readme[end..]);
+
+    _ = try writeFileIfChanged(io, allocator, readme_path, out.items);
+}
+
+fn gitOutputTrimmed(io: std.Io, allocator: std.mem.Allocator, root: []const u8, argv: []const []const u8) !?[]u8 {
+    const out = std.process.run(allocator, io, .{
+        .argv = argv,
+        .cwd = .{ .path = root },
+        .stdout_limit = .limited(4096),
+        .stderr_limit = .limited(4096),
+    }) catch return null;
+    defer allocator.free(out.stdout);
+    defer allocator.free(out.stderr);
+    switch (out.term) {
+        .exited => |code| if (code != 0) return null,
+        else => return null,
+    }
+    const trimmed = std.mem.trim(u8, out.stdout, " \t\r\n");
+    if (trimmed.len == 0) return null;
+    return try allocator.dupe(u8, trimmed);
+}
+
+fn normalizeRemoteUrl(allocator: std.mem.Allocator, raw: []const u8) !?[]u8 {
+    var view = raw;
+    var owned: ?[]u8 = null;
+    defer if (owned) |buf| allocator.free(buf);
+
+    if (std.mem.startsWith(u8, raw, "git@github.com:")) {
+        owned = try std.fmt.allocPrint(allocator, "https://github.com/{s}", .{raw["git@github.com:".len..]});
+        view = owned.?;
+    } else if (std.mem.startsWith(u8, raw, "ssh://git@github.com/")) {
+        owned = try std.fmt.allocPrint(allocator, "https://github.com/{s}", .{raw["ssh://git@github.com/".len..]});
+        view = owned.?;
+    } else if (!std.mem.startsWith(u8, raw, "https://") and !std.mem.startsWith(u8, raw, "http://")) {
+        return null;
+    }
+
+    const no_dot_git = if (std.mem.endsWith(u8, view, ".git")) view[0 .. view.len - 4] else view;
+    return try allocator.dupe(u8, no_dot_git);
+}
+
+fn syncReadmeFetchCommand(io: std.Io, allocator: std.mem.Allocator, root: []const u8) !void {
+    const replacement = blk: {
+        const remote = try gitOutputTrimmed(io, allocator, root, &.{ "git", "config", "--get", "remote.origin.url" });
+        if (remote == null) break :blk try allocator.dupe(u8, "zig fetch --save <git-or-tarball-url>");
+        defer allocator.free(remote.?);
+
+        const head = try gitOutputTrimmed(io, allocator, root, &.{ "git", "rev-parse", "HEAD" });
+        if (head == null) break :blk try allocator.dupe(u8, "zig fetch --save <git-or-tarball-url>");
+        defer allocator.free(head.?);
+
+        const url = try normalizeRemoteUrl(allocator, remote.?);
+        if (url == null) break :blk try allocator.dupe(u8, "zig fetch --save <git-or-tarball-url>");
+        defer allocator.free(url.?);
+
+        break :blk try std.fmt.allocPrint(allocator, "zig fetch --save git+{s}?ref={s}", .{ url.?, head.? });
+    };
+    defer allocator.free(replacement);
+    try updateReadmeSection(io, allocator, root, ReadmeFetchStartMarker, ReadmeFetchEndMarker, replacement);
+}
+
+fn renderBenchmarkMarkdown(allocator: std.mem.Allocator, snap: BenchmarkSnapshot) ![]u8 {
+    var out: std.Io.Writer.Allocating = .init(allocator);
+    errdefer out.deinit();
+    const w = &out.writer;
+
+    try w.writeAll("# zhttp Benchmark Snapshot\n\n");
+    try w.print("Generated (unix): {d}\n\n", .{snap.generated_unix});
+    try w.print(
+        "Config: host=`{s}` path=`{s}` conns={d} iters={d} warmup={d} full_request={}\n\n",
+        .{ snap.config.host, snap.config.path, snap.config.conns, snap.config.iters, snap.config.warmup, snap.config.full_request },
+    );
+    try w.writeAll("| Target | req/s | ns/req | MiB/s | fixed_bytes | ok | elapsed_ns |\n");
+    try w.writeAll("|---|---:|---:|---:|---:|---:|---:|\n");
+    try w.print(
+        "| zhttp | {d:.2} | {d:.2} | {d:.2} | {d} | {d} | {d} |\n",
+        .{ snap.zhttp.req_per_s, snap.zhttp.ns_per_req, snap.zhttp.mib_per_s, snap.zhttp.fixed_bytes, snap.zhttp.ok, snap.zhttp.elapsed_ns },
+    );
+    if (snap.zhttp.first_error) |err| {
+        try w.print("\n- zhttp first_error: `{s}`\n", .{err});
+    }
+    try w.print("\nFairness notes: {s}\n", .{snap.fairness});
+    return out.toOwnedSlice();
+}
+
+fn renderReadmeBenchmarkSummary(allocator: std.mem.Allocator, snap: BenchmarkSnapshot) ![]u8 {
+    var out: std.Io.Writer.Allocating = .init(allocator);
+    errdefer out.deinit();
+    const w = &out.writer;
+
+    try w.writeAll("Source: `benchmark/results/bench_latest.json`\n\n");
+    try w.print(
+        "Config: host=`{s}` path=`{s}` conns={d} iters={d} warmup={d} full_request={}\n\n",
+        .{ snap.config.host, snap.config.path, snap.config.conns, snap.config.iters, snap.config.warmup, snap.config.full_request },
+    );
+    try w.writeAll("| Target | req/s | ns/req |\n");
+    try w.writeAll("|---|---:|---:|\n");
+    try w.print("| zhttp | {d:.2} | {d:.2} |\n", .{ snap.zhttp.req_per_s, snap.zhttp.ns_per_req });
+    if (snap.zhttp.first_error == null) {
+        try w.writeAll("\nNo benchmark transport errors were reported.\n");
+    } else if (snap.zhttp.first_error) |err| {
+        try w.print("\n- zhttp first_error: `{s}`\n", .{err});
+    }
+    try w.print("\nFairness notes: {s}\n", .{snap.fairness});
+    return out.toOwnedSlice();
+}
+
+fn renderCompareMarkdown(allocator: std.mem.Allocator, snap: CompareSnapshot) ![]u8 {
+    var out: std.Io.Writer.Allocating = .init(allocator);
+    errdefer out.deinit();
+    const w = &out.writer;
+
+    const z_rel = if (snap.faf.req_per_s == 0.0) 0.0 else snap.zhttp.req_per_s / snap.faf.req_per_s;
+    const f_rel = if (snap.zhttp.req_per_s == 0.0) 0.0 else snap.faf.req_per_s / snap.zhttp.req_per_s;
+
+    try w.writeAll("# zhttp vs FaF Benchmark Snapshot\n\n");
+    try w.print("Generated (unix): {d}\n\n", .{snap.generated_unix});
+    try w.print(
+        "Config: host=`{s}` path=`{s}` conns={d} iters={d} warmup={d} full_request={}\n\n",
+        .{ snap.config.host, snap.config.path, snap.config.conns, snap.config.iters, snap.config.warmup, snap.config.full_request },
+    );
+    try w.writeAll("| Target | req/s | ns/req | MiB/s | fixed_bytes | ok | elapsed_ns | relative |\n");
+    try w.writeAll("|---|---:|---:|---:|---:|---:|---:|---:|\n");
+    try w.print(
+        "| zhttp | {d:.2} | {d:.2} | {d:.2} | {d} | {d} | {d} | {d:.3}x vs faf |\n",
+        .{ snap.zhttp.req_per_s, snap.zhttp.ns_per_req, snap.zhttp.mib_per_s, snap.zhttp.fixed_bytes, snap.zhttp.ok, snap.zhttp.elapsed_ns, z_rel },
+    );
+    try w.print(
+        "| faf | {d:.2} | {d:.2} | {d:.2} | {d} | {d} | {d} | {d:.3}x vs zhttp |\n",
+        .{ snap.faf.req_per_s, snap.faf.ns_per_req, snap.faf.mib_per_s, snap.faf.fixed_bytes, snap.faf.ok, snap.faf.elapsed_ns, f_rel },
+    );
+    if (snap.zhttp.first_error) |err| {
+        try w.print("\n- zhttp first_error: `{s}`\n", .{err});
+    }
+    if (snap.faf.first_error) |err| {
+        try w.print("- faf first_error: `{s}`\n", .{err});
+    }
+    try w.print("\nFairness notes: {s}\n", .{snap.fairness});
+    return out.toOwnedSlice();
+}
+
+fn renderReadmeComparisonSummary(allocator: std.mem.Allocator, snap: CompareSnapshot) ![]u8 {
+    var out: std.Io.Writer.Allocating = .init(allocator);
+    errdefer out.deinit();
+    const w = &out.writer;
+
+    const z_rel = if (snap.faf.req_per_s == 0.0) 0.0 else snap.zhttp.req_per_s / snap.faf.req_per_s;
+    const f_rel = if (snap.zhttp.req_per_s == 0.0) 0.0 else snap.faf.req_per_s / snap.zhttp.req_per_s;
+
+    try w.writeAll("Source: `benchmark/results/latest.json`\n\n");
+    try w.print(
+        "Config: host=`{s}` path=`{s}` conns={d} iters={d} warmup={d} full_request={}\n\n",
+        .{ snap.config.host, snap.config.path, snap.config.conns, snap.config.iters, snap.config.warmup, snap.config.full_request },
+    );
+    try w.writeAll("| Target | req/s | ns/req | relative |\n");
+    try w.writeAll("|---|---:|---:|---:|\n");
+    try w.print("| zhttp | {d:.2} | {d:.2} | {d:.3}x vs faf |\n", .{ snap.zhttp.req_per_s, snap.zhttp.ns_per_req, z_rel });
+    try w.print("| faf | {d:.2} | {d:.2} | {d:.3}x vs zhttp |\n", .{ snap.faf.req_per_s, snap.faf.ns_per_req, f_rel });
+    if (snap.zhttp.first_error == null and snap.faf.first_error == null) {
+        try w.writeAll("\nNo benchmark transport errors were reported.\n");
+    } else {
+        if (snap.zhttp.first_error) |err| try w.print("\n- zhttp first_error: `{s}`\n", .{err});
+        if (snap.faf.first_error) |err| try w.print("- faf first_error: `{s}`\n", .{err});
+    }
+    try w.print("\nFairness notes: {s}\n", .{snap.fairness});
+    return out.toOwnedSlice();
+}
+
+fn syncReadmeBenchmarkSummary(io: std.Io, allocator: std.mem.Allocator, root: []const u8) !void {
+    const replacement = blk: {
+        const json_path = try std.fs.path.join(allocator, &.{ root, BenchmarkLatestJsonRelPath });
+        defer allocator.free(json_path);
+        const json = try readFileMaybe(io, allocator, json_path);
+        if (json == null) break :blk try allocator.dupe(u8, "Run `zig build bench` to generate benchmark summary.");
+        defer allocator.free(json.?);
+        const parsed = try std.json.parseFromSlice(BenchmarkSnapshot, allocator, json.?, .{
+            .ignore_unknown_fields = true,
+        });
+        defer parsed.deinit();
+        break :blk try renderReadmeBenchmarkSummary(allocator, parsed.value);
+    };
+    defer allocator.free(replacement);
+    try updateReadmeSection(io, allocator, root, ReadmeBenchmarkStartMarker, ReadmeBenchmarkEndMarker, replacement);
+}
+
+fn syncReadmeComparisonSummary(io: std.Io, allocator: std.mem.Allocator, root: []const u8) !void {
+    const replacement = blk: {
+        const json_path = try std.fs.path.join(allocator, &.{ root, ComparisonLatestJsonRelPath });
+        defer allocator.free(json_path);
+        const json = try readFileMaybe(io, allocator, json_path);
+        if (json == null) break :blk try allocator.dupe(u8, "Run `zig build bench-compare` to generate comparison summary.");
+        defer allocator.free(json.?);
+        const parsed = try std.json.parseFromSlice(CompareSnapshot, allocator, json.?, .{
+            .ignore_unknown_fields = true,
+        });
+        defer parsed.deinit();
+        break :blk try renderReadmeComparisonSummary(allocator, parsed.value);
+    };
+    defer allocator.free(replacement);
+    try updateReadmeSection(io, allocator, root, ReadmeComparisonStartMarker, ReadmeComparisonEndMarker, replacement);
+}
+
+/// Writes benchmark snapshot and refreshes README benchmark/fetch sections.
+pub fn writeBenchmarkSnapshotAndSyncReadme(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    root: []const u8,
+    cfg: CompareConfig,
+    zhttp: BenchResult,
+) !void {
+    const results_dir = try std.fs.path.join(allocator, &.{ root, BenchmarkResultsRelDir });
+    defer allocator.free(results_dir);
+    try std.Io.Dir.createDirPath(.cwd(), io, results_dir);
+
+    const snap: BenchmarkSnapshot = .{
+        .generated_unix = nowUnixSeconds(),
+        .fairness = "benchmark uses fixed response bytes discovered twice and pinned before timed runs",
+        .config = cfg,
+        .zhttp = zhttp,
+    };
+
+    var json_writer: std.Io.Writer.Allocating = .init(allocator);
+    defer json_writer.deinit();
+    var json_stream: std.json.Stringify = .{
+        .writer = &json_writer.writer,
+        .options = .{ .whitespace = .indent_2 },
+    };
+    try json_stream.write(snap);
+
+    const json_path = try std.fs.path.join(allocator, &.{ root, BenchmarkLatestJsonRelPath });
+    defer allocator.free(json_path);
+    _ = try writeFileIfChanged(io, allocator, json_path, json_writer.written());
+
+    const md = try renderBenchmarkMarkdown(allocator, snap);
+    defer allocator.free(md);
+    const md_path = try std.fs.path.join(allocator, &.{ root, BenchmarkLatestMdRelPath });
+    defer allocator.free(md_path);
+    _ = try writeFileIfChanged(io, allocator, md_path, md);
+
+    try syncReadmeBenchmarkSummary(io, allocator, root);
+    try syncReadmeFetchCommand(io, allocator, root);
+}
+
+/// Writes benchmark comparison snapshot and refreshes README comparison/fetch sections.
+pub fn writeCompareSnapshotAndSyncReadme(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    root: []const u8,
+    cfg: CompareConfig,
+    zhttp: BenchResult,
+    faf: BenchResult,
+) !void {
+    const results_dir = try std.fs.path.join(allocator, &.{ root, BenchmarkResultsRelDir });
+    defer allocator.free(results_dir);
+    try std.Io.Dir.createDirPath(.cwd(), io, results_dir);
+
+    const snap: CompareSnapshot = .{
+        .generated_unix = nowUnixSeconds(),
+        .fairness = "both targets use the same benchmark client settings (host/path/conns/iters/warmup/full_request), and fixed response bytes are discovered twice then pinned per target before timed runs",
+        .config = cfg,
+        .zhttp = zhttp,
+        .faf = faf,
+    };
+
+    var json_writer: std.Io.Writer.Allocating = .init(allocator);
+    defer json_writer.deinit();
+    var json_stream: std.json.Stringify = .{
+        .writer = &json_writer.writer,
+        .options = .{ .whitespace = .indent_2 },
+    };
+    try json_stream.write(snap);
+
+    const json_path = try std.fs.path.join(allocator, &.{ root, ComparisonLatestJsonRelPath });
+    defer allocator.free(json_path);
+    _ = try writeFileIfChanged(io, allocator, json_path, json_writer.written());
+
+    const md = try renderCompareMarkdown(allocator, snap);
+    defer allocator.free(md);
+    const md_path = try std.fs.path.join(allocator, &.{ root, ComparisonLatestMdRelPath });
+    defer allocator.free(md_path);
+    _ = try writeFileIfChanged(io, allocator, md_path, md);
+
+    try syncReadmeComparisonSummary(io, allocator, root);
+    try syncReadmeFetchCommand(io, allocator, root);
 }

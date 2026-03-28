@@ -88,5 +88,14 @@ pub fn main(init: std.process.Init) !void {
         .fixed_bytes = fixed_bytes,
         .quiet = quiet orelse false,
     };
-    try scripts.runZhttpExternal(init.io, allocator, cfg, root, init.minimal.environ);
+    const result = try scripts.runZhttpExternal(init.io, allocator, cfg, root, init.minimal.environ);
+    const readme_cfg: scripts.CompareConfig = .{
+        .host = cfg.host,
+        .path = cfg.path,
+        .conns = cfg.conns,
+        .iters = cfg.iters,
+        .warmup = cfg.warmup,
+        .full_request = cfg.full_request,
+    };
+    try scripts.writeBenchmarkSnapshotAndSyncReadme(init.io, allocator, root, readme_cfg, result);
 }

@@ -110,7 +110,7 @@ pub fn main(init: std.process.Init) !void {
         .fixed_bytes = fixed_val,
         .quiet = quiet_val,
     };
-    scripts.runFaf(init.io, allocator, cfg, faf_dir, faf_core_dir, rustc_bin, bench_bin, init.minimal.environ, root) catch |err| switch (err) {
+    _ = scripts.runFaf(init.io, allocator, cfg, faf_dir, faf_core_dir, rustc_bin, bench_bin, init.minimal.environ, root) catch |err| switch (err) {
         error.CargoMissing => {
             var buffer: [256]u8 = undefined;
             const stderr_file = std.Io.File.stderr();

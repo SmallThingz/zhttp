@@ -835,6 +835,7 @@ pub fn Compiled(
             return false;
         }
 
+        /// Serializes and flushes a response and returns the next connection action.
         fn finishResponse(w: *Io.Writer, res: anytype, keep_alive: bool, send_body: bool) !Action {
             try response.writeAny(w, res, keep_alive, send_body);
             if (w.buffered().len != 0) {
@@ -843,6 +844,7 @@ pub fn Compiled(
             return if (!keep_alive or res.close) .close else .@"continue";
         }
 
+        /// Invokes endpoint-defined upgrade callback after a successful 101 write.
         fn callUpgradeHandler(
             comptime Endpoint: type,
             server: anytype,
@@ -863,6 +865,7 @@ pub fn Compiled(
             @call(.auto, handler, .{ server, stream, r, w, line, res });
         }
 
+        /// Handles `101 Switching Protocols` when an endpoint exposes `upgrade`.
         fn maybeHandleUpgradeEntry(
             comptime Endpoint: type,
             server: anytype,

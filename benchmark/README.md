@@ -24,7 +24,12 @@ Runs `zhttp-bench-server` and benchmarks it via the same client in `--mode=exter
 
 ```sh
 zig run benchmark/run_zhttp_external.zig
+# or
+zig build bench
 ```
+
+`run_zhttp_external` writes `benchmark/results/bench_latest.json` and
+`benchmark/results/bench_latest.md`, and refreshes README benchmark/fetch sections.
 
 ## FaF (external)
 
@@ -41,10 +46,20 @@ BENCH_BIN=./zig-out/bin/zhttp-bench zig run benchmark/run_faf.zig
 ## Compare (external)
 
 Runs both servers with the same benchmark client settings (defaults: `FULL_REQUEST=1`, `CONNS=16`):
+- identical `host/path/conns/iters/warmup/full_request`
+- fixed response bytes discovered twice per target and pinned for the timed run
 
 ```sh
 zig run benchmark/run_compare.zig
+# or
+zig build bench-compare
 ```
+
+`run_compare` writes:
+- `benchmark/results/latest.json`
+- `benchmark/results/latest.md`
+
+and refreshes README comparison/fetch sections.
 
 To point at an already running server:
 
@@ -55,6 +70,7 @@ zig build bench -Doptimize=ReleaseFast -- --mode=external --host=127.0.0.1 --por
 Notes:
 - `--host` is currently expected to be an IPv4 literal.
 - If `--fixed-bytes` is not provided, the benchmark auto-discovers `Content-Length` once (outside the hot loop).
+- `run_zhttp_external.zig` and `run_faf.zig` both validate response size stability by discovering fixed bytes twice before timing.
 - Use `--full-request` to send `Host:` and `Connection:` headers (default is the minimal `GET ...\r\n\r\n` request).
 - For the helper scripts, set `FULL_REQUEST=1` to pass `--full-request`:
   - `FULL_REQUEST=1 zig run benchmark/run_zhttp_external.zig`

@@ -110,6 +110,7 @@ pub const ReqCtx = struct {
         return payloadType(handler_ret);
     }
 
+    /// Executes either the current middleware or the terminal endpoint function.
     fn invoke(comptime self: Self, req: self.T()) !self.InferredResponse() {
         if (self.idx < self.middlewares.len) {
             const Mw = self.middlewares[self.idx];

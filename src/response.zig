@@ -258,37 +258,21 @@ fn writeStatusLine(w: *std.Io.Writer, status: std.http.Status) !void {
     var status_buf: [3]u8 = undefined;
     status_buf[1..3].* = digits2(@intCast(status_code % 100));
     status_buf[0] = @intCast('0' + (status_code / 100) % 10);
-    var line_buf: [128]u8 = undefined;
-    var len: usize = 0;
-    @memcpy(line_buf[len .. len + 9], "HTTP/1.1 ");
-    len += 9;
-    @memcpy(line_buf[len .. len + 3], &status_buf);
-    len += 3;
+    var parts: [5][]const u8 = .{ "HTTP/1.1 ", &status_buf, "", "", "" };
     if (status.phrase()) |phrase| {
-        line_buf[len] = ' ';
-        len += 1;
-        @memcpy(line_buf[len .. len + phrase.len], phrase);
-        len += phrase.len;
+        parts[2] = " ";
+        parts[3] = phrase;
     }
-    @memcpy(line_buf[len .. len + 2], "\r\n");
-    len += 2;
-    try w.writeAll(line_buf[0..len]);
+    parts[4] = "\r\n";
+    try w.writeVecAll(parts[0..]);
 }
 
 /// Writes the `content-length` header and header terminator.
 fn writeContentLength(w: *std.Io.Writer, body_len: usize) !void {
     var len_buf: [32]u8 = undefined;
     const len_str = std.fmt.bufPrint(&len_buf, "{d}", .{body_len}) catch unreachable;
-    var line_buf: [64]u8 = undefined;
-    var line_len: usize = 0;
-    const prefix = "content-length: ";
-    @memcpy(line_buf[line_len .. line_len + prefix.len], prefix);
-    line_len += prefix.len;
-    @memcpy(line_buf[line_len .. line_len + len_str.len], len_str);
-    line_len += len_str.len;
-    @memcpy(line_buf[line_len .. line_len + 4], "\r\n\r\n");
-    line_len += 4;
-    try w.writeAll(line_buf[0..line_len]);
+    var parts: [3][]const u8 = .{ "content-length: ", len_str, "\r\n\r\n" };
+    try w.writeVecAll(parts[0..]);
 }
 
 test "write: HEAD omits body but keeps content-length" {

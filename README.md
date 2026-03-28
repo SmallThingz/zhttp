@@ -155,6 +155,9 @@ See [`examples/builtin_middlewares.zig`](./examples/builtin_middlewares.zig) for
 - `examples/route_static_access.zig`
 - `examples/echo_body.zig`
 - `examples/fast_plaintext.zig`
+- `examples/response_modes.zig`
+- `examples/compression_negotiation.zig`
+- `examples/custom_operation.zig`
 
 ## Performance Snapshots
 

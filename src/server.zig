@@ -1384,3 +1384,328 @@ test "ReqCtx.Server allows cross-route static context access" {
     group.cancel(io);
     group.await(io) catch {};
 }
+
+test "server variation: global middleware applies to route and not_found handler" {
+    const HeaderMw = struct {
+        pub const Info: middleware.MiddlewareInfo = .{
+            .name = "hdr",
+        };
+
+        pub fn call(comptime rctx: ReqCtx, req: rctx.T()) !response.Res {
+            var res = try rctx.next(req);
+            const a = req.allocator();
+            const out = try a.alloc(response.Header, res.headers.len + 1);
+            @memcpy(out[0..res.headers.len], res.headers);
+            out[res.headers.len] = .{ .name = "x-global-mw", .value = "1" };
+            res.headers = out;
+            return res;
+        }
+    };
+
+    const OkEndpoint = struct {
+        pub const Info: router.EndpointInfo = .{};
+        pub fn call(comptime _: ReqCtx, _: anytype) !response.Res {
+            return response.Res.text(200, "ok");
+        }
+    };
+
+    const NotFoundEndpoint = struct {
+        pub const Info: router.EndpointInfo = .{};
+        pub fn call(comptime _: ReqCtx, _: anytype) !response.Res {
+            return response.Res.text(404, "miss");
+        }
+    };
+
+    const io = std.testing.io;
+    primeSocketBackend();
+
+    const SrvT = Server(.{
+        .middlewares = .{HeaderMw},
+        .routes = .{
+            router.get("/ok", OkEndpoint),
+        },
+        .not_found_handler = NotFoundEndpoint,
+    });
+
+    const addr0: Io.net.IpAddress = .{ .ip4 = Io.net.Ip4Address.loopback(0) };
+    var server = try SrvT.init(std.testing.allocator, io, addr0, {});
+    defer server.deinit();
+    const port: u16 = server.listener.socket.address.getPort();
+
+    var group: Io.Group = .init;
+    defer group.cancel(io);
+    try group.concurrent(io, SrvT.run, .{&server});
+
+    const addr: Io.net.IpAddress = .{ .ip4 = Io.net.Ip4Address.loopback(port) };
+
+    {
+        var stream = try Io.net.IpAddress.connect(&addr, io, .{ .mode = .stream });
+        defer stream.close(io);
+
+        var rb: [4 * 1024]u8 = undefined;
+        var wb: [256]u8 = undefined;
+        var sr = stream.reader(io, &rb);
+        var sw = stream.writer(io, &wb);
+
+        try sw.interface.writeAll("GET /ok HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n");
+        try sw.interface.flush();
+
+        const ok_resp =
+            "HTTP/1.1 200 OK\r\n" ++
+            "connection: close\r\n" ++
+            "content-type: text/plain; charset=utf-8\r\n" ++
+            "x-global-mw: 1\r\n" ++
+            "content-length: 2\r\n" ++
+            "\r\n" ++
+            "ok";
+        var got_ok: [ok_resp.len]u8 = undefined;
+        try sr.interface.readSliceAll(got_ok[0..]);
+        try std.testing.expectEqualStrings(ok_resp, got_ok[0..]);
+    }
+
+    {
+        var stream = try Io.net.IpAddress.connect(&addr, io, .{ .mode = .stream });
+        defer stream.close(io);
+
+        var rb: [4 * 1024]u8 = undefined;
+        var wb: [256]u8 = undefined;
+        var sr = stream.reader(io, &rb);
+        var sw = stream.writer(io, &wb);
+
+        try sw.interface.writeAll("GET /missing HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n");
+        try sw.interface.flush();
+
+        const miss_resp =
+            "HTTP/1.1 404 Not Found\r\n" ++
+            "connection: close\r\n" ++
+            "content-type: text/plain; charset=utf-8\r\n" ++
+            "x-global-mw: 1\r\n" ++
+            "content-length: 4\r\n" ++
+            "\r\n" ++
+            "miss";
+        var got_miss: [miss_resp.len]u8 = undefined;
+        try sr.interface.readSliceAll(got_miss[0..]);
+        try std.testing.expectEqualStrings(miss_resp, got_miss[0..]);
+    }
+
+    group.cancel(io);
+    group.await(io) catch {};
+}
+
+test "server variation: operations.Cors generates runtime OPTIONS preflight route" {
+    const CorsMw = middleware.Cors(.{
+        .origins = &.{"https://allowed.test"},
+        .methods = &.{"GET"},
+    });
+
+    const ApiEndpoint = struct {
+        pub const Info: router.EndpointInfo = .{
+            .middlewares = &.{CorsMw},
+            .operations = &.{operations.Cors},
+        };
+        pub fn call(comptime _: ReqCtx, _: anytype) !response.Res {
+            return response.Res.text(200, "ok");
+        }
+    };
+
+    const io = std.testing.io;
+    primeSocketBackend();
+
+    const SrvT = Server(.{
+        .routes = .{
+            router.get("/api", ApiEndpoint),
+        },
+        .operations = .{operations.Cors},
+    });
+
+    const addr0: Io.net.IpAddress = .{ .ip4 = Io.net.Ip4Address.loopback(0) };
+    var server = try SrvT.init(std.testing.allocator, io, addr0, {});
+    defer server.deinit();
+    const port: u16 = server.listener.socket.address.getPort();
+
+    var group: Io.Group = .init;
+    defer group.cancel(io);
+    try group.concurrent(io, SrvT.run, .{&server});
+
+    var stream = try Io.net.IpAddress.connect(&.{ .ip4 = Io.net.Ip4Address.loopback(port) }, io, .{ .mode = .stream });
+    defer stream.close(io);
+
+    var rb: [4 * 1024]u8 = undefined;
+    var wb: [512]u8 = undefined;
+    var sr = stream.reader(io, &rb);
+    var sw = stream.writer(io, &wb);
+
+    try sw.interface.writeAll(
+        "OPTIONS /api HTTP/1.1\r\n" ++
+            "Host: x\r\n" ++
+            "Origin: https://allowed.test\r\n" ++
+            "Access-Control-Request-Method: GET\r\n" ++
+            "Connection: close\r\n" ++
+            "\r\n",
+    );
+    try sw.interface.flush();
+
+    const resp =
+        "HTTP/1.1 204 No Content\r\n" ++
+        "connection: close\r\n" ++
+        "access-control-allow-origin: https://allowed.test\r\n" ++
+        "access-control-allow-methods: GET\r\n" ++
+        "vary: origin, access-control-request-method, access-control-request-headers\r\n" ++
+        "content-length: 0\r\n" ++
+        "\r\n";
+    var got: [resp.len]u8 = undefined;
+    try sr.interface.readSliceAll(got[0..]);
+    try std.testing.expectEqualStrings(resp, got[0..]);
+
+    group.cancel(io);
+    group.await(io) catch {};
+}
+
+test "server variation: operations.Static generates runtime GET and HEAD mount routes" {
+    const StaticMw = middleware.Static(.{
+        .dir = "testdata/static",
+        .mount = "/assets",
+        .etag = false,
+        .in_memory_cache = false,
+        .fs_watch = .{ .enabled = false },
+    });
+
+    const AnchorEndpoint = struct {
+        pub const Info: router.EndpointInfo = .{
+            .middlewares = &.{StaticMw},
+            .operations = &.{operations.Static},
+        };
+        pub fn call(comptime _: ReqCtx, _: anytype) !response.Res {
+            return response.Res.text(200, "anchor");
+        }
+    };
+
+    const io = std.testing.io;
+    primeSocketBackend();
+
+    const SrvT = Server(.{
+        .middlewares = .{StaticMw},
+        .routes = .{
+            router.get("/_anchor", AnchorEndpoint),
+        },
+        .operations = .{operations.Static},
+    });
+
+    const addr0: Io.net.IpAddress = .{ .ip4 = Io.net.Ip4Address.loopback(0) };
+    var server = try SrvT.init(std.testing.allocator, io, addr0, {});
+    defer server.deinit();
+    const port: u16 = server.listener.socket.address.getPort();
+
+    var group: Io.Group = .init;
+    defer group.cancel(io);
+    try group.concurrent(io, SrvT.run, .{&server});
+
+    {
+        var stream = try Io.net.IpAddress.connect(&.{ .ip4 = Io.net.Ip4Address.loopback(port) }, io, .{ .mode = .stream });
+        defer stream.close(io);
+
+        var rb: [4 * 1024]u8 = undefined;
+        var wb: [512]u8 = undefined;
+        var sr = stream.reader(io, &rb);
+        var sw = stream.writer(io, &wb);
+
+        try sw.interface.writeAll("HEAD /assets/hello.txt HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n");
+        try sw.interface.flush();
+
+        const head_resp =
+            "HTTP/1.1 200 OK\r\n" ++
+            "connection: close\r\n" ++
+            "content-type: text/plain; charset=utf-8\r\n" ++
+            "content-length: 6\r\n" ++
+            "\r\n";
+        var got_head: [head_resp.len]u8 = undefined;
+        try sr.interface.readSliceAll(got_head[0..]);
+        try std.testing.expectEqualStrings(head_resp, got_head[0..]);
+    }
+
+    {
+        var stream = try Io.net.IpAddress.connect(&.{ .ip4 = Io.net.Ip4Address.loopback(port) }, io, .{ .mode = .stream });
+        defer stream.close(io);
+
+        var rb: [4 * 1024]u8 = undefined;
+        var wb: [512]u8 = undefined;
+        var sr = stream.reader(io, &rb);
+        var sw = stream.writer(io, &wb);
+
+        try sw.interface.writeAll("GET /assets/hello.txt HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n");
+        try sw.interface.flush();
+
+        const get_resp =
+            "HTTP/1.1 200 OK\r\n" ++
+            "connection: close\r\n" ++
+            "content-type: text/plain; charset=utf-8\r\n" ++
+            "content-length: 6\r\n" ++
+            "\r\n" ++
+            "hello\n";
+        var got_get: [get_resp.len]u8 = undefined;
+        try sr.interface.readSliceAll(got_get[0..]);
+        try std.testing.expectEqualStrings(get_resp, got_get[0..]);
+    }
+
+    group.cancel(io);
+    group.await(io) catch {};
+}
+
+test "server variation: unbuffered writer config works" {
+    const SimpleEndpoint = struct {
+        pub const Info: router.EndpointInfo = .{};
+        pub fn call(comptime _: ReqCtx, _: anytype) !response.Res {
+            return response.Res.text(200, "ok");
+        }
+    };
+
+    const io = std.testing.io;
+    primeSocketBackend();
+
+    const SrvT = Server(.{
+        .routes = .{
+            router.get("/ok", SimpleEndpoint),
+        },
+        .config = .{
+            .read_buffer = 4 * 1024,
+            .write_buffer = 0,
+            .max_request_line = 1024,
+            .max_single_header_size = 1024,
+            .max_header_bytes = 4 * 1024,
+        },
+    });
+
+    const addr0: Io.net.IpAddress = .{ .ip4 = Io.net.Ip4Address.loopback(0) };
+    var server = try SrvT.init(std.testing.allocator, io, addr0, {});
+    defer server.deinit();
+    const port: u16 = server.listener.socket.address.getPort();
+
+    var group: Io.Group = .init;
+    defer group.cancel(io);
+    try group.concurrent(io, SrvT.run, .{&server});
+
+    var stream = try Io.net.IpAddress.connect(&.{ .ip4 = Io.net.Ip4Address.loopback(port) }, io, .{ .mode = .stream });
+    defer stream.close(io);
+
+    var rb: [4 * 1024]u8 = undefined;
+    var wb: [1]u8 = undefined;
+    var sr = stream.reader(io, &rb);
+    var sw = stream.writer(io, &wb);
+
+    try sw.interface.writeAll("GET /ok HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n");
+    try sw.interface.flush();
+
+    const resp =
+        "HTTP/1.1 200 OK\r\n" ++
+        "connection: close\r\n" ++
+        "content-type: text/plain; charset=utf-8\r\n" ++
+        "content-length: 2\r\n" ++
+        "\r\n" ++
+        "ok";
+    var got: [resp.len]u8 = undefined;
+    try sr.interface.readSliceAll(got[0..]);
+    try std.testing.expectEqualStrings(resp, got[0..]);
+
+    group.cancel(io);
+    group.await(io) catch {};
+}

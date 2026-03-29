@@ -126,20 +126,14 @@ fn structFieldsToST(comptime T: type) []const req_ctx.ST {
 
 const SegmentKind = enum { lit, param, glob, glob_param };
 const Segment = struct {
-    /// Stores `kind`.
     kind: SegmentKind,
-    /// Stores `lit`.
     lit: []const u8 = "",
-    /// Stores `param_index`.
     param_index: u8 = 0,
 };
 
 const Pattern = struct {
-    /// Stores `segments`.
     segments: []const Segment,
-    /// Stores `param_names`.
     param_names: []const []const u8,
-    /// Stores `glob`.
     glob: bool,
 };
 
@@ -327,11 +321,8 @@ fn matchPatternNoCapture(p: Pattern, path: []u8) bool {
 }
 
 const ExactEntry = struct {
-    /// Stores `path`.
     path: []const u8,
-    /// Stores `hash`.
     hash: u64,
-    /// Stores `route_index`.
     route_index: u16,
 };
 
@@ -891,6 +882,35 @@ test "compilePattern glob only at end" {
     _ = compilePattern("/a/{*rest}");
 }
 
+fn TestServer(comptime CtxT: type) type {
+    return struct {
+        const RouteStaticCtx = struct {};
+        io: Io,
+        gpa: Allocator,
+        ctx: CtxT,
+        route_static_ctx: RouteStaticCtx = .{},
+
+        pub fn RouteStaticType(comptime route_index: usize) type {
+            _ = route_index;
+            return RouteStaticCtx;
+        }
+
+        pub fn routeStatic(self: *@This(), comptime route_index: usize) *RouteStaticCtx {
+            _ = route_index;
+            return &self.route_static_ctx;
+        }
+
+        pub fn routeStaticConst(self: *const @This(), comptime route_index: usize) *const RouteStaticCtx {
+            _ = route_index;
+            return &self.route_static_ctx;
+        }
+
+        pub fn handleHandlerError(_: *@This(), _: *Io.Writer, comptime _: type, _: anytype) Action {
+            unreachable;
+        }
+    };
+}
+
 fn dispatchForTest(
     comptime S: type,
     ctx: anytype,
@@ -899,40 +919,7 @@ fn dispatchForTest(
     line: request.RequestLine,
     out: []u8,
 ) !struct { action: Action, len: usize } {
-    const ServerT = struct {
-        const RouteStaticCtx = struct {};
-        /// Stores `io`.
-        io: Io,
-        /// Stores `gpa`.
-        gpa: Allocator,
-        /// Stores `ctx`.
-        ctx: @TypeOf(ctx),
-        /// Stores `route_static_ctx`.
-        route_static_ctx: RouteStaticCtx = .{},
-
-        /// Returns static context type for route index.
-        pub fn RouteStaticType(comptime route_index: usize) type {
-            _ = route_index;
-            return RouteStaticCtx;
-        }
-
-        /// Returns mutable route static context by route index.
-        pub fn routeStatic(self: *@This(), comptime route_index: usize) *RouteStaticCtx {
-            _ = route_index;
-            return &self.route_static_ctx;
-        }
-
-        /// Returns const route static context by route index.
-        pub fn routeStaticConst(self: *const @This(), comptime route_index: usize) *const RouteStaticCtx {
-            _ = route_index;
-            return &self.route_static_ctx;
-        }
-
-        /// Implements handle handler error.
-        pub fn handleHandlerError(_: *@This(), _: *Io.Writer, comptime _: type, _: anytype) Action {
-            unreachable;
-        }
-    };
+    const ServerT = TestServer(@TypeOf(ctx));
     var server: ServerT = .{
         .io = std.testing.io,
         .gpa = allocator,
@@ -1030,7 +1017,6 @@ test "middleware Info: supports 'header: type = ...' form" {
         pub const Info = @import("middleware.zig").MiddlewareInfo{
             .name = "mw_needs",
             .header = struct {
-                /// Stores `host`.
                 host: parse.Optional(parse.String),
             },
             .query = struct {},
@@ -1056,22 +1042,18 @@ test "middleware Info: supports 'header: type = ...' form" {
 test "middleware Info: supports header/query/path/data captures" {
     const Mw = struct {
         const AuthData = struct {
-            /// Stores `seen`.
             seen: bool = false,
         };
         pub const Info = @import("middleware.zig").MiddlewareInfo{
             .name = "auth",
             .data = AuthData,
             .path = struct {
-                /// Stores `id`.
                 id: parse.Int(u32),
             },
             .query = struct {
-                /// Stores `q`.
                 q: parse.String,
             },
             .header = struct {
-                /// Stores `x_token`.
                 x_token: parse.String,
             },
         };
@@ -1549,44 +1531,10 @@ test "dispatch: typed path params bad value errors" {
     var r = Io.Reader.fixed("GET /u/nope HTTP/1.1\r\n\r\n");
     const line = try request.parseRequestLineBorrowed(&r, 8 * 1024);
     var out: [256]u8 = undefined;
-    _ = &out;
     var params: [S.MaxParams][]u8 = undefined;
     var w = Io.Writer.fixed(out[0..]);
     var stream: std.Io.net.Stream = undefined;
-    const ServerT = struct {
-        const RouteStaticCtx = struct {};
-        /// Stores `io`.
-        io: Io,
-        /// Stores `gpa`.
-        gpa: Allocator,
-        /// Stores `ctx`.
-        ctx: void,
-        /// Stores `route_static_ctx`.
-        route_static_ctx: RouteStaticCtx = .{},
-
-        /// Returns static context type for route index.
-        pub fn RouteStaticType(comptime route_index: usize) type {
-            if (route_index != 0) @compileError("route index out of bounds");
-            return RouteStaticCtx;
-        }
-
-        /// Returns mutable route static context by route index.
-        pub fn routeStatic(self: *@This(), comptime route_index: usize) *RouteStaticCtx {
-            if (route_index != 0) @compileError("route index out of bounds");
-            return &self.route_static_ctx;
-        }
-
-        /// Returns const route static context by route index.
-        pub fn routeStaticConst(self: *const @This(), comptime route_index: usize) *const RouteStaticCtx {
-            if (route_index != 0) @compileError("route index out of bounds");
-            return &self.route_static_ctx;
-        }
-
-        /// Implements handle handler error.
-        pub fn handleHandlerError(_: *@This(), _: *Io.Writer, comptime _: type, _: anytype) Action {
-            unreachable;
-        }
-    };
+    const ServerT = TestServer(void);
     var server: ServerT = .{ .io = std.testing.io, .gpa = a, .ctx = {} };
     const rid = S.match(line.method, line.path).?;
     try std.testing.expectError(error.BadValue, S.dispatch(&server, a, &r, &w, &stream, line, rid, params[0..S.MaxParams], 8 * 1024, 8 * 1024));
@@ -1597,15 +1545,10 @@ test "dispatch: typed path params with non-string parsers allocate zero" {
     const Alignment = std.mem.Alignment;
 
     const CountingAllocator = struct {
-        /// Stores `inner`.
         inner: Alloc,
-        /// Stores `alloc_calls`.
         alloc_calls: usize = 0,
-        /// Stores `resize_calls`.
         resize_calls: usize = 0,
-        /// Stores `remap_calls`.
         remap_calls: usize = 0,
-        /// Stores `free_calls`.
         free_calls: usize = 0,
 
         fn allocator(self: *@This()) Alloc {
@@ -1680,7 +1623,6 @@ test "dispatch: middleware Info.path works" {
         pub const Info = @import("middleware.zig").MiddlewareInfo{
             .name = "require_id",
             .path = struct {
-                /// Stores `id`.
                 id: parse.Int(u32),
             },
         };
@@ -1919,15 +1861,10 @@ test "dispatch: handler error uses callback" {
     var stream: std.Io.net.Stream = undefined;
     const ServerT = struct {
         const RouteStaticCtx = struct {};
-        /// Stores `io`.
         io: Io,
-        /// Stores `gpa`.
         gpa: Allocator,
-        /// Stores `ctx`.
         ctx: void,
-        /// Stores `called`.
         called: *bool,
-        /// Stores `route_static_ctx`.
         route_static_ctx: RouteStaticCtx = .{},
 
         /// Returns static context type for route index.
@@ -2107,40 +2044,7 @@ test "dispatch: invalid path percent-encoding rejected" {
     var params: [S.MaxParams][]u8 = undefined;
     var w = Io.Writer.fixed(out[0..]);
     var stream: std.Io.net.Stream = undefined;
-    const ServerT = struct {
-        const RouteStaticCtx = struct {};
-        /// Stores `io`.
-        io: Io,
-        /// Stores `gpa`.
-        gpa: Allocator,
-        /// Stores `ctx`.
-        ctx: void,
-        /// Stores `route_static_ctx`.
-        route_static_ctx: RouteStaticCtx = .{},
-
-        /// Returns static context type for route index.
-        pub fn RouteStaticType(comptime route_index: usize) type {
-            if (route_index != 0) @compileError("route index out of bounds");
-            return RouteStaticCtx;
-        }
-
-        /// Returns mutable route static context by route index.
-        pub fn routeStatic(self: *@This(), comptime route_index: usize) *RouteStaticCtx {
-            if (route_index != 0) @compileError("route index out of bounds");
-            return &self.route_static_ctx;
-        }
-
-        /// Returns const route static context by route index.
-        pub fn routeStaticConst(self: *const @This(), comptime route_index: usize) *const RouteStaticCtx {
-            if (route_index != 0) @compileError("route index out of bounds");
-            return &self.route_static_ctx;
-        }
-
-        /// Implements handle handler error.
-        pub fn handleHandlerError(_: *@This(), _: *Io.Writer, comptime _: type, _: anytype) Action {
-            unreachable;
-        }
-    };
+    const ServerT = TestServer(void);
     var server: ServerT = .{ .io = std.testing.io, .gpa = a, .ctx = {} };
     const rid = S.match(line.method, line.path).?;
     try std.testing.expectError(error.InvalidPercentEncoding, S.dispatch(&server, a, &r, &w, &stream, line, rid, params[0..S.MaxParams], 8 * 1024, 8 * 1024));
@@ -2149,15 +2053,10 @@ test "dispatch: invalid path percent-encoding rejected" {
 test "dispatch: endpoint upgrade handles 101 and returns upgraded action" {
     const ServerT = struct {
         const RouteStaticCtx = struct {};
-        /// Stores `io`.
         io: Io,
-        /// Stores `gpa`.
         gpa: Allocator,
-        /// Stores `ctx`.
         ctx: void,
-        /// Stores `upgraded`.
         upgraded: bool,
-        /// Stores `route_static_ctx`.
         route_static_ctx: RouteStaticCtx = .{},
 
         /// Returns static context type for route index.
@@ -2256,40 +2155,7 @@ test "dispatch: endpoint without upgrade does not check status" {
         }),
     }, .{});
 
-    const ServerT = struct {
-        const RouteStaticCtx = struct {};
-        /// Stores `io`.
-        io: Io,
-        /// Stores `gpa`.
-        gpa: Allocator,
-        /// Stores `ctx`.
-        ctx: void,
-        /// Stores `route_static_ctx`.
-        route_static_ctx: RouteStaticCtx = .{},
-
-        /// Returns static context type for route index.
-        pub fn RouteStaticType(comptime route_index: usize) type {
-            if (route_index != 0) @compileError("route index out of bounds");
-            return RouteStaticCtx;
-        }
-
-        /// Returns mutable route static context by route index.
-        pub fn routeStatic(self: *@This(), comptime route_index: usize) *RouteStaticCtx {
-            if (route_index != 0) @compileError("route index out of bounds");
-            return &self.route_static_ctx;
-        }
-
-        /// Returns const route static context by route index.
-        pub fn routeStaticConst(self: *const @This(), comptime route_index: usize) *const RouteStaticCtx {
-            if (route_index != 0) @compileError("route index out of bounds");
-            return &self.route_static_ctx;
-        }
-
-        /// Implements handle handler error.
-        pub fn handleHandlerError(_: *@This(), _: *Io.Writer, comptime _: type, _: anytype) Action {
-            unreachable;
-        }
-    };
+    const ServerT = TestServer(void);
 
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();

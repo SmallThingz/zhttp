@@ -339,9 +339,7 @@ pub const PathString = String;
 
 /// Parse and store a required UTF-8-ish string (no validation).
 pub const String = struct {
-    /// Stores `value`.
     value: []const u8 = "",
-    /// Stores `owned`.
     owned: ?[]u8 = null,
 
     pub const empty: String = .{ .value = "", .owned = null };
@@ -374,9 +372,7 @@ pub const String = struct {
 /// Implements optional.
 pub fn Optional(comptime P: type) type {
     return struct {
-        /// Stores `present`.
         present: bool = false,
-        /// Stores `inner`.
         inner: P = .empty,
 
         pub const empty: @This() = .{};
@@ -408,7 +404,6 @@ pub fn Optional(comptime P: type) type {
 /// Implements int.
 pub fn Int(comptime T: type) type {
     return struct {
-        /// Stores `value`.
         value: T = undefined,
         pub const empty: @This() = .{};
 
@@ -437,7 +432,6 @@ pub fn Int(comptime T: type) type {
 /// Implements float.
 pub fn Float(comptime T: type) type {
     return struct {
-        /// Stores `value`.
         value: T = undefined,
         pub const empty: @This() = .{};
 
@@ -464,7 +458,6 @@ pub fn Float(comptime T: type) type {
 }
 
 pub const Bool = struct {
-    /// Stores `value`.
     value: bool = undefined,
     pub const empty: Bool = .{};
 
@@ -501,7 +494,6 @@ pub const Bool = struct {
 /// Implements enum.
 pub fn Enum(comptime E: type) type {
     return struct {
-        /// Stores `value`.
         value: E = undefined,
         pub const empty: @This() = .{};
 
@@ -530,7 +522,6 @@ pub fn Enum(comptime E: type) type {
 /// Implements slice of.
 pub fn SliceOf(comptime P: type) type {
     return struct {
-        /// Stores `list`.
         list: std.ArrayListUnmanaged(P) = .empty,
         pub const empty: @This() = .{};
 
@@ -564,9 +555,7 @@ pub fn SliceOf(comptime P: type) type {
 
 test "Lookup: header find is case-insensitive and '_' matches '-'" {
     const H = struct {
-        /// Stores `content_type`.
         content_type: Optional(String),
-        /// Stores `host`.
         host: Optional(String),
     };
     const L = Lookup(H, .header);
@@ -578,7 +567,6 @@ test "Lookup: header find is case-insensitive and '_' matches '-'" {
 
 test "Lookup: query find is case-sensitive" {
     const Q = struct {
-        /// Stores `page`.
         page: Optional(Int(u32)),
     };
     const L = Lookup(Q, .query);
@@ -601,13 +589,10 @@ test "mergeStructs: merges without losing fields" {
 
 test "mergeHeaderStructs: normalized duplicates with same type are coalesced" {
     const A = struct {
-        /// Stores `x_token`.
         x_token: Optional(String),
     };
     const B = struct {
-        /// Stores `X_TOKEN`.
         X_TOKEN: Optional(String),
-        /// Stores `host`.
         host: Optional(String),
     };
     const M = mergeHeaderStructs(A, B);

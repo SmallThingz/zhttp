@@ -111,17 +111,11 @@ pub fn Server(comptime def: anytype) type {
     const NotFoundCompiled = router.Compiled(Context, .{NotFoundRoute}, Middlewares);
 
     return struct {
-        /// Stores `io`.
         io: Io,
-        /// Stores `gpa`.
         gpa: Allocator,
-        /// Stores `listener`.
         listener: std.Io.net.Server,
-        /// Stores `group`.
         group: Io.Group = .init,
-        /// Stores `ctx`.
         ctx: if (Context == void) void else *Context,
-        /// Stores per-route middleware static contexts.
         route_static_ctx: RouteStaticCtxTuple,
 
         const Self = @This();
@@ -891,8 +885,6 @@ test "Connection: close header closes socket" {
     var one: [1]u8 = undefined;
     try std.testing.expectError(error.EndOfStream, sr.interface.readSliceAll(one[0..]));
 
-    group.cancel(io);
-    group.await(io) catch {};
 }
 
 test "unknown path returns 404 and keeps connection" {
@@ -964,8 +956,6 @@ test "unknown path returns 404 and keeps connection" {
     var one: [1]u8 = undefined;
     try std.testing.expectError(error.EndOfStream, sr.interface.readSliceAll(one[0..]));
 
-    group.cancel(io);
-    group.await(io) catch {};
 }
 
 test "not_found_handler can parse query headers and body" {
@@ -1064,8 +1054,6 @@ test "not_found_handler can parse query headers and body" {
     var one: [1]u8 = undefined;
     try std.testing.expectError(error.EndOfStream, sr.interface.readSliceAll(one[0..]));
 
-    group.cancel(io);
-    group.await(io) catch {};
 }
 
 test "HEAD response omits body" {
@@ -1123,8 +1111,6 @@ test "HEAD response omits body" {
     var one: [1]u8 = undefined;
     try std.testing.expectError(error.EndOfStream, sr.interface.readSliceAll(one[0..]));
 
-    group.cancel(io);
-    group.await(io) catch {};
 }
 
 test "bad request line returns 400" {
@@ -1183,8 +1169,6 @@ test "bad request line returns 400" {
     var one: [1]u8 = undefined;
     try std.testing.expectError(error.EndOfStream, sr.interface.readSliceAll(one[0..]));
 
-    group.cancel(io);
-    group.await(io) catch {};
 }
 
 test "custom error_handler handles handler errors only" {
@@ -1275,8 +1259,6 @@ test "custom error_handler handles handler errors only" {
         try std.testing.expectEqualStrings(resp, got[0..]);
     }
 
-    group.cancel(io);
-    group.await(io) catch {};
 }
 
 test "handler res.close closes socket" {
@@ -1337,8 +1319,6 @@ test "handler res.close closes socket" {
     var one: [1]u8 = undefined;
     try std.testing.expectError(error.EndOfStream, sr.interface.readSliceAll(one[0..]));
 
-    group.cancel(io);
-    group.await(io) catch {};
 }
 
 test "HTTP/1.0 request does not keep-alive" {
@@ -1398,13 +1378,10 @@ test "HTTP/1.0 request does not keep-alive" {
     var one: [1]u8 = undefined;
     try std.testing.expectError(error.EndOfStream, sr.interface.readSliceAll(one[0..]));
 
-    group.cancel(io);
-    group.await(io) catch {};
 }
 
 test "endpoint upgrade: 101 triggers upgrade callback and stream ownership" {
     const State = struct {
-        /// Stores `upgraded`.
         upgraded: bool = false,
     };
 
@@ -1483,8 +1460,6 @@ test "endpoint upgrade: 101 triggers upgrade callback and stream ownership" {
     try std.testing.expectError(error.EndOfStream, sr.interface.readSliceAll(one[0..]));
     try std.testing.expect(state.upgraded);
 
-    group.cancel(io);
-    group.await(io) catch {};
 }
 
 test "middleware static_context: per-route init and request access" {
@@ -1596,8 +1571,6 @@ test "middleware static_context: per-route init and request access" {
     var one: [1]u8 = undefined;
     try std.testing.expectError(error.EndOfStream, sr.interface.readSliceAll(one[0..]));
 
-    group.cancel(io);
-    group.await(io) catch {};
 }
 
 test "middleware static_context: init errors propagate from Server.init" {
@@ -1771,8 +1744,6 @@ test "ReqCtx.Server allows cross-route static context access" {
     var one: [1]u8 = undefined;
     try std.testing.expectError(error.EndOfStream, sr.interface.readSliceAll(one[0..]));
 
-    group.cancel(io);
-    group.await(io) catch {};
 }
 
 test "server variation: global middleware applies to route and not_found handler" {
@@ -1878,8 +1849,6 @@ test "server variation: global middleware applies to route and not_found handler
         try std.testing.expectEqualStrings(miss_resp, got_miss[0..]);
     }
 
-    group.cancel(io);
-    group.await(io) catch {};
 }
 
 test "server variation: operations.Cors generates runtime OPTIONS preflight route" {
@@ -1947,8 +1916,6 @@ test "server variation: operations.Cors generates runtime OPTIONS preflight rout
     try sr.interface.readSliceAll(got[0..]);
     try std.testing.expectEqualStrings(resp, got[0..]);
 
-    group.cancel(io);
-    group.await(io) catch {};
 }
 
 test "server variation: operations.Static generates runtime GET and HEAD mount routes" {
@@ -2037,8 +2004,6 @@ test "server variation: operations.Static generates runtime GET and HEAD mount r
         try std.testing.expectEqualStrings(get_resp, got_get[0..]);
     }
 
-    group.cancel(io);
-    group.await(io) catch {};
 }
 
 test "server variation: unbuffered writer config works" {
@@ -2096,8 +2061,6 @@ test "server variation: unbuffered writer config works" {
     try sr.interface.readSliceAll(got[0..]);
     try std.testing.expectEqualStrings(resp, got[0..]);
 
-    group.cancel(io);
-    group.await(io) catch {};
 }
 
 test "server adversarial malformed clients recover and keep serving" {
@@ -2211,8 +2174,6 @@ test "server adversarial malformed clients recover and keep serving" {
 
     try sendOneShotExpect(io, port, "GET /ok HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n", ok_close);
 
-    group.cancel(io);
-    group.await(io) catch {};
 }
 
 test "server soak: deterministic real-socket variety including malformed keepalive and upgrade flows" {
@@ -2343,8 +2304,6 @@ test "server soak: deterministic real-socket variety including malformed keepali
     while (extra_iter < extra_iterations) : (extra_iter += 1) {
         try runSoakVarietyCase(io, port, random, extra_iter % soak_case_count, &upgrade_cases, &malformed_cases, &keepalive_cases);
     }
-    group.cancel(io);
-    group.await(io) catch {};
 
     try std.testing.expect(upgrade_cases != 0);
     try std.testing.expect(malformed_cases != 0);
@@ -2599,7 +2558,5 @@ test "server websocket abuse: helper handshake and hostile frame mix" {
         }
     }
 
-    group.cancel(io);
-    group.await(io) catch {};
     try std.testing.expect(ctx.upgrades >= case_count);
 }

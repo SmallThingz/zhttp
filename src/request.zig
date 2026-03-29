@@ -46,20 +46,14 @@ pub const Body = union(enum) {
 };
 
 pub const Base = struct {
-    /// Stores `arena`.
     arena: Allocator,
-    /// Stores `reader`.
     reader: *Io.Reader,
-    /// Stores `writer`.
     writer: *Io.Writer,
 
-    /// Stores `version`.
     version: Version,
 
-    /// Stores `connection_close`.
     connection_close: bool = false,
 
-    /// Stores `body`.
     body: Body = .none,
 };
 
@@ -123,13 +117,9 @@ fn middlewareContextFieldType(comptime Ctx: type, comptime name: anytype) type {
 }
 
 pub const RequestLine = struct {
-    /// Stores `method`.
     method: []const u8,
-    /// Stores `version`.
     version: Version,
-    /// Stores `path`.
     path: []u8,
-    /// Stores `query`.
     query: []u8,
 };
 
@@ -322,17 +312,11 @@ pub fn RequestPWithPatternExt(
     return struct {
         pub const path: []const u8 = rd.pattern;
         pub const method: []const u8 = rd.method;
-        /// Stores internal `_base` state.
         _base: Base,
-        /// Stores internal `_server` state.
         _server: ServerPtr,
-        /// Stores internal `_mw_ctx` state.
         _mw_ctx: MwCtx,
-        /// Stores internal `_headers` state.
         _headers: Headers = parse.emptyStruct(Headers),
-        /// Stores internal `_query` state.
         _query: Query = parse.emptyStruct(Query),
-        /// Stores internal `_params` state.
         _params: ParamsEffective = parse.emptyStruct(ParamsEffective),
 
         const Self = @This();

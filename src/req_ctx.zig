@@ -6,9 +6,7 @@ comptime {
 }
 
 pub const ST = struct {
-    /// Stores `name`.
     name: []const u8,
-    /// Stores `T`.
     T: type,
 };
 
@@ -23,24 +21,15 @@ fn assertTupleWithReq(comptime ParamsT: type) usize {
 pub const ReqCtx = struct {
     const Self = @This();
 
-    /// Stores `handler`.
     handler: type,
-    /// Stores `middlewares`.
     middlewares: []const type,
-    /// Stores `path`.
     path: []const ST,
-    /// Stores `query`.
     query: []const ST,
-    /// Stores `headers`.
     headers: []const ST,
-    /// Stores `middleware_contexts`.
     middleware_contexts: []const ST,
-    /// Stores `idx`.
     idx: usize,
 
-    /// Stores internal `_base_req_type` state.
     _base_req_type: type,
-    /// Stores internal `_server_type` state.
     _server_type: type = void,
 
     fn payloadType(comptime ReturnT: type) type {
@@ -125,11 +114,8 @@ pub const ReqCtx = struct {
         const BaseReq = self._base_req_type;
         const Ctx = self;
         return struct {
-            /// Stores internal `_base` state.
             _base: *BaseReq,
-            /// Stores `path`.
             path: []const u8,
-            /// Stores `method`.
             method: []const u8,
 
             const ReqSelf = @This();

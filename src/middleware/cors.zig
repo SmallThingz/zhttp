@@ -117,11 +117,8 @@ pub fn Cors(comptime opts: CorsOptions) type {
     };
 
     const DataT = if (store) struct {
-        /// Stores `origin`.
         origin: []const u8 = "",
-        /// Stores `allowed`.
         allowed: bool = false,
-        /// Stores `preflight`.
         preflight: bool = false,
     } else struct {};
 
@@ -132,11 +129,8 @@ pub fn Cors(comptime opts: CorsOptions) type {
             .name = info_name,
             .data = if (store) DataT else null,
             .header = struct {
-                /// Stores `origin`.
                 origin: parse.Optional(parse.String),
-                /// Stores `access_control_request_method`.
                 access_control_request_method: parse.Optional(parse.String),
-                /// Stores `access_control_request_headers`.
                 access_control_request_headers: parse.Optional(parse.String),
             },
         };

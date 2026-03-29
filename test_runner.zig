@@ -134,6 +134,8 @@ pub fn main(init: std.process.Init) !void {
         }
     }
 
+    ignoreSigIo();
+
     if (child_test_name) |name| {
         defer init.gpa.free(name);
         runSingleTest(name, seed);

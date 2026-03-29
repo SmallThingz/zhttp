@@ -14,23 +14,15 @@ pub const EndpointInfo = struct {
 
 /// Fully resolved route declaration shape used across router/server/request.
 pub const RouteDecl = struct {
-    /// Stores `method`.
     method: []const u8,
-    /// Stores `pattern`.
     pattern: []const u8,
-    /// Stores endpoint type exposing `pub fn call(comptime rctx: ReqCtx, req: rctx.T()) !rctx.Response(Body)`.
-    ///
-    /// Supported `Body` types are `[]const u8`, `[][]const u8`, `void`, or a
-    /// custom struct with `pub fn body(self, comptime rctx, req: rctx.TReadOnly(), cw) !void`.
+    /// Endpoint type exposing `pub fn call(comptime rctx: ReqCtx, req: rctx.T()) !rctx.Response(Body)`.
+    /// Supported `Body` types are `[]const u8`, `[][]const u8`, `void`, or a custom
+    /// struct with `pub fn body(self, comptime rctx, req: rctx.TReadOnly(), cw) !void`.
     endpoint: type,
-    /// Stores `headers`.
     headers: type,
-    /// Stores `query`.
     query: type,
-    /// Stores `params`.
     params: type,
-    /// Stores `middlewares`.
     middlewares: []const type,
-    /// Stores `operations`.
     operations: []const type,
 };

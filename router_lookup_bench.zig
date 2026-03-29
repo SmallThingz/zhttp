@@ -231,7 +231,6 @@ const HashRouter = struct {
 };
 
 const max_path_segments = 16;
-const prefix_hash_seed: u64 = 0x517c_c1b7_2722_0a95;
 
 const DecodedPath = struct {
     path: []const u8,
@@ -239,7 +238,6 @@ const DecodedPath = struct {
     seg_count: u8,
     segs: [max_path_segments][]const u8,
     seg_hashes: [max_path_segments]u64,
-    prefix_hashes: [max_path_segments + 1]u64,
 };
 
 const FlatTable = struct {
@@ -268,114 +266,260 @@ const FlatTable = struct {
     }
 };
 
-const ExactHeadEntry = struct {
-    seg0: []const u8,
-    hash: u64,
-    route_index: u32,
-};
-
 const ExactPathEntry = struct {
     path: []const u8,
     hash: u64,
     route_index: u32,
 };
 
-const PrefixEntry = struct {
-    prefix: []const PatternSeg,
-    prefix_hash: u64,
-    prefix_count: u8,
+const TempPatternNode = struct {
+    end_route: ?u32 = null,
+    glob_route: ?u32 = null,
+    param_child: ?u32 = null,
+    lit_names: std.ArrayListUnmanaged([]const u8) = .empty,
+    lit_children: std.ArrayListUnmanaged(u32) = .empty,
+};
+
+const TempPatternBucket = struct {
+    nodes: std.ArrayListUnmanaged(TempPatternNode) = .empty,
+
+    fn init(a: Allocator) !TempPatternBucket {
+        var bucket: TempPatternBucket = .{};
+        try bucket.nodes.append(a, .{});
+        return bucket;
+    }
+
+    fn newNode(self: *TempPatternBucket, a: Allocator) !u32 {
+        const idx: u32 = @intCast(self.nodes.items.len);
+        try self.nodes.append(a, .{});
+        return idx;
+    }
+
+    fn findLiteralChild(self: *const TempPatternBucket, node_idx: u32, lit: []const u8) ?u32 {
+        const node = &self.nodes.items[node_idx];
+        for (node.lit_names.items, 0..) |name, i| {
+            if (std.mem.eql(u8, name, lit)) return node.lit_children.items[i];
+        }
+        return null;
+    }
+
+    fn setMin(slot: *?u32, value: u32) void {
+        if (slot.*) |existing| {
+            if (value < existing) slot.* = value;
+        } else {
+            slot.* = value;
+        }
+    }
+
+    fn insertRoute(self: *TempPatternBucket, a: Allocator, route: Route) !void {
+        var node_idx: u32 = 0;
+        for (route.pattern.segments) |seg| {
+            switch (seg.kind) {
+                .lit => {
+                    if (self.findLiteralChild(node_idx, seg.lit)) |child_idx| {
+                        node_idx = child_idx;
+                    } else {
+                        const child_idx = try self.newNode(a);
+                        var node = &self.nodes.items[node_idx];
+                        try node.lit_names.append(a, seg.lit);
+                        try node.lit_children.append(a, child_idx);
+                        node_idx = child_idx;
+                    }
+                },
+                .param => {
+                    var node = &self.nodes.items[node_idx];
+                    if (node.param_child) |child_idx| {
+                        node_idx = child_idx;
+                    } else {
+                        const child_idx = try self.newNode(a);
+                        node = &self.nodes.items[node_idx];
+                        node.param_child = child_idx;
+                        node_idx = child_idx;
+                    }
+                },
+                .glob => {
+                    setMin(&self.nodes.items[node_idx].glob_route, route.route_index);
+                    return;
+                },
+            }
+        }
+        setMin(&self.nodes.items[node_idx].end_route, route.route_index);
+    }
+};
+
+const PatternParamsEntry = struct {
+    param_count: u32,
+    next: u32,
+};
+
+const PatternParamsGlobEntry = struct {
+    param_count: u32,
     route_index: u32,
 };
 
-const FallbackBucket = struct {
-    route_indices: []u32 = &.{},
+const LiteLiteralEntry = struct {
+    key: []const u8,
+    hash: u64,
+    child: u32,
 };
 
-const PathHeadKind = enum(u8) {
-    root,
-    one,
-    two,
-    many,
+const LiteLiteralMap = struct {
+    entries: []LiteLiteralEntry = &.{},
+    slots: []u32 = &.{}, // 0 = empty, else entry_index + 1
+    mask: u64 = 0,
+
+    fn init(a: Allocator, names: []const []const u8, children: []const u32) !LiteLiteralMap {
+        var map: LiteLiteralMap = .{};
+        if (names.len == 0) return map;
+
+        map.entries = try a.alloc(LiteLiteralEntry, names.len);
+        for (names, children, 0..) |name, child, i| {
+            map.entries[i] = .{
+                .key = name,
+                .hash = util.fnv1a64(name),
+                .child = child,
+            };
+        }
+
+        const cap = nextPow2AtLeastRuntime(names.len * 2 + 1, 8);
+        map.slots = try a.alloc(u32, cap);
+        @memset(map.slots, 0);
+        map.mask = @intCast(cap - 1);
+
+        for (map.entries, 0..) |entry, i| {
+            var pos: u64 = entry.hash & map.mask;
+            while (true) : (pos = (pos + 1) & map.mask) {
+                const slot_idx: usize = @intCast(pos);
+                if (map.slots[slot_idx] == 0) {
+                    map.slots[slot_idx] = @intCast(i + 1);
+                    break;
+                }
+            }
+        }
+
+        return map;
+    }
+
+    fn get(self: *const LiteLiteralMap, key: []const u8, hash: u64) ?u32 {
+        if (self.entries.len == 0) return null;
+        var pos: u64 = hash & self.mask;
+        var probe: usize = 0;
+        while (probe < self.slots.len) : (probe += 1) {
+            const slot = self.slots[@intCast(pos)];
+            if (slot == 0) return null;
+            const entry = self.entries[slot - 1];
+            if (entry.hash == hash and std.mem.eql(u8, entry.key, key)) return entry.child;
+            pos = (pos + 1) & self.mask;
+        }
+        return null;
+    }
 };
 
-const PathHead = struct {
-    kind: PathHeadKind,
-    seg0: []const u8 = &.{},
-    seg0_hash: u64 = 0,
+const PatternNode = struct {
+    end_route: ?u32 = null,
+    glob_route: ?u32 = null,
+    params: []PatternParamsEntry = &.{},
+    params_glob: []PatternParamsGlobEntry = &.{},
+    literals: LiteLiteralMap = .{},
+};
+
+const PatternBucket = struct {
+    nodes: std.ArrayListUnmanaged(PatternNode) = .empty,
+
+    fn init(a: Allocator, routes: []Route, method: Method) !PatternBucket {
+        var temp = try TempPatternBucket.init(a);
+        for (routes) |route| {
+            if (route.method == method and route.exact_path == null) {
+                try temp.insertRoute(a, route);
+            }
+        }
+
+        var bucket: PatternBucket = .{};
+        _ = try bucket.compileNode(a, &temp, 0);
+        return bucket;
+    }
+
+    fn compileNode(self: *PatternBucket, a: Allocator, temp: *const TempPatternBucket, temp_idx: u32) !u32 {
+        const tnode = &temp.nodes.items[temp_idx];
+        const idx: u32 = @intCast(self.nodes.items.len);
+        try self.nodes.append(a, .{
+            .end_route = tnode.end_route,
+            .glob_route = tnode.glob_route,
+        });
+
+        if (tnode.param_child) |param_start| {
+            var params: std.ArrayListUnmanaged(PatternParamsEntry) = .empty;
+            var params_glob: std.ArrayListUnmanaged(PatternParamsGlobEntry) = .empty;
+
+            var count: u32 = 1;
+            var walk_idx = param_start;
+            while (true) {
+                const walk = &temp.nodes.items[walk_idx];
+                const pure_param_only = walk.end_route == null and
+                    walk.glob_route == null and
+                    walk.lit_names.items.len == 0 and
+                    walk.param_child != null;
+
+                if (pure_param_only) {
+                    count += 1;
+                    walk_idx = walk.param_child.?;
+                    continue;
+                }
+
+                if (walk.glob_route) |rid| {
+                    try params_glob.append(a, .{ .param_count = count, .route_index = rid });
+                }
+                if (walk.end_route != null or walk.lit_names.items.len != 0 or walk.param_child != null) {
+                    try params.append(a, .{
+                        .param_count = count,
+                        .next = try self.compileNode(a, temp, walk_idx),
+                    });
+                }
+                break;
+            }
+
+            self.nodes.items[idx].params = try params.toOwnedSlice(a);
+            self.nodes.items[idx].params_glob = try params_glob.toOwnedSlice(a);
+        }
+
+        if (tnode.lit_names.items.len != 0) {
+            const child_indices = try a.alloc(u32, tnode.lit_names.items.len);
+            for (tnode.lit_names.items, 0..) |_, i| {
+                child_indices[i] = try self.compileNode(a, temp, tnode.lit_children.items[i]);
+            }
+            self.nodes.items[idx].literals = try LiteLiteralMap.init(a, tnode.lit_names.items, child_indices);
+        }
+
+        return idx;
+    }
 };
 
 const HybridBucket = struct {
     exact_entries: []ExactPathEntry = &.{},
     exact_table: FlatTable = .{},
-
-    suffix_param_one_entries: []ExactHeadEntry = &.{},
-    suffix_param_one_table: FlatTable = .{},
-
-    suffix_glob_one_entries: []ExactHeadEntry = &.{},
-    suffix_glob_one_table: FlatTable = .{},
-
-    suffix_param_entries: []PrefixEntry = &.{},
-    suffix_param_table: FlatTable = .{},
-
-    suffix_glob_entries: []PrefixEntry = &.{},
-    suffix_glob_table: FlatTable = .{},
-
-    fallback: FallbackBucket = .{},
+    pattern: PatternBucket = .{},
 };
 
 const RadixHashRouter = struct {
-    routes: []Route,
     buckets: [method_count]HybridBucket,
 
     fn init(a: Allocator, routes: []Route) !RadixHashRouter {
         var exact_counts: [method_count]usize = .{0} ** method_count;
-        var suffix_param_one_counts: [method_count]usize = .{0} ** method_count;
-        var suffix_glob_one_counts: [method_count]usize = .{0} ** method_count;
-        var suffix_param_counts: [method_count]usize = .{0} ** method_count;
-        var suffix_glob_counts: [method_count]usize = .{0} ** method_count;
-        var fallback_counts: [method_count]usize = .{0} ** method_count;
 
         for (routes) |r| {
             const mi = @intFromEnum(r.method);
-            if (r.exact_path != null) {
-                exact_counts[mi] += 1;
-            } else if (isTrailingParamRoute(r.pattern)) {
-                if (r.pattern.segments.len == 2) {
-                    suffix_param_one_counts[mi] += 1;
-                } else {
-                    suffix_param_counts[mi] += 1;
-                }
-            } else if (isTrailingGlobRoute(r.pattern)) {
-                if (r.pattern.segments.len == 2) {
-                    suffix_glob_one_counts[mi] += 1;
-                } else {
-                    suffix_glob_counts[mi] += 1;
-                }
-            } else {
-                fallback_counts[mi] += 1;
-            }
+            if (r.exact_path != null) exact_counts[mi] += 1;
         }
 
         var buckets: [method_count]HybridBucket = undefined;
         for (0..method_count) |mi| {
             buckets[mi] = .{
                 .exact_entries = try a.alloc(ExactPathEntry, exact_counts[mi]),
-                .suffix_param_one_entries = try a.alloc(ExactHeadEntry, suffix_param_one_counts[mi]),
-                .suffix_glob_one_entries = try a.alloc(ExactHeadEntry, suffix_glob_one_counts[mi]),
-                .suffix_param_entries = try a.alloc(PrefixEntry, suffix_param_counts[mi]),
-                .suffix_glob_entries = try a.alloc(PrefixEntry, suffix_glob_counts[mi]),
-                .fallback = .{
-                    .route_indices = try a.alloc(u32, fallback_counts[mi]),
-                },
+                .pattern = try PatternBucket.init(a, routes, @enumFromInt(mi)),
             };
         }
 
         var exact_writes: [method_count]usize = .{0} ** method_count;
-        var suffix_param_one_writes: [method_count]usize = .{0} ** method_count;
-        var suffix_glob_one_writes: [method_count]usize = .{0} ** method_count;
-        var suffix_param_writes: [method_count]usize = .{0} ** method_count;
-        var suffix_glob_writes: [method_count]usize = .{0} ** method_count;
-        var fallback_writes: [method_count]usize = .{0} ** method_count;
 
         for (routes) |r| {
             const mi = @intFromEnum(r.method);
@@ -387,58 +531,7 @@ const RadixHashRouter = struct {
                     .route_index = r.route_index,
                 };
                 exact_writes[mi] = w + 1;
-                continue;
             }
-
-            if (isTrailingParamRoute(r.pattern)) {
-                if (r.pattern.segments.len == 2) {
-                    const w = suffix_param_one_writes[mi];
-                    buckets[mi].suffix_param_one_entries[w] = .{
-                        .seg0 = r.pattern.segments[0].lit,
-                        .hash = util.fnv1a64(r.pattern.segments[0].lit),
-                        .route_index = r.route_index,
-                    };
-                    suffix_param_one_writes[mi] = w + 1;
-                } else {
-                    const w = suffix_param_writes[mi];
-                    const prefix = r.pattern.segments[0 .. r.pattern.segments.len - 1];
-                    buckets[mi].suffix_param_entries[w] = .{
-                        .prefix = prefix,
-                        .prefix_hash = prefixHashForPattern(prefix),
-                        .prefix_count = @intCast(prefix.len),
-                        .route_index = r.route_index,
-                    };
-                    suffix_param_writes[mi] = w + 1;
-                }
-                continue;
-            }
-
-            if (isTrailingGlobRoute(r.pattern)) {
-                if (r.pattern.segments.len == 2) {
-                    const w = suffix_glob_one_writes[mi];
-                    buckets[mi].suffix_glob_one_entries[w] = .{
-                        .seg0 = r.pattern.segments[0].lit,
-                        .hash = util.fnv1a64(r.pattern.segments[0].lit),
-                        .route_index = r.route_index,
-                    };
-                    suffix_glob_one_writes[mi] = w + 1;
-                } else {
-                    const w = suffix_glob_writes[mi];
-                    const prefix = r.pattern.segments[0 .. r.pattern.segments.len - 1];
-                    buckets[mi].suffix_glob_entries[w] = .{
-                        .prefix = prefix,
-                        .prefix_hash = prefixHashForPattern(prefix),
-                        .prefix_count = @intCast(prefix.len),
-                        .route_index = r.route_index,
-                    };
-                    suffix_glob_writes[mi] = w + 1;
-                }
-                continue;
-            }
-
-            const w = fallback_writes[mi];
-            buckets[mi].fallback.route_indices[w] = r.route_index;
-            fallback_writes[mi] = w + 1;
         }
 
         for (0..method_count) |mi| {
@@ -448,30 +541,9 @@ const RadixHashRouter = struct {
             for (bucket.exact_entries, 0..) |entry, i| {
                 bucket.exact_table.insert(entry.hash, @intCast(i));
             }
-
-            bucket.suffix_param_one_table = try FlatTable.init(a, bucket.suffix_param_one_entries.len);
-            for (bucket.suffix_param_one_entries, 0..) |entry, i| {
-                bucket.suffix_param_one_table.insert(entry.hash, @intCast(i));
-            }
-
-            bucket.suffix_glob_one_table = try FlatTable.init(a, bucket.suffix_glob_one_entries.len);
-            for (bucket.suffix_glob_one_entries, 0..) |entry, i| {
-                bucket.suffix_glob_one_table.insert(entry.hash, @intCast(i));
-            }
-
-            bucket.suffix_param_table = try FlatTable.init(a, bucket.suffix_param_entries.len);
-            for (bucket.suffix_param_entries, 0..) |entry, i| {
-                bucket.suffix_param_table.insert(entry.prefix_hash, @intCast(i));
-            }
-
-            bucket.suffix_glob_table = try FlatTable.init(a, bucket.suffix_glob_entries.len);
-            for (bucket.suffix_glob_entries, 0..) |entry, i| {
-                bucket.suffix_glob_table.insert(entry.prefix_hash, @intCast(i));
-            }
         }
 
         return .{
-            .routes = routes,
             .buckets = buckets,
         };
     }
@@ -487,27 +559,15 @@ const RadixHashRouter = struct {
 
     fn matchInBucket(self: *const RadixHashRouter, method: Method, path: []const u8) ?u32 {
         const bucket = &self.buckets[@intFromEnum(method)];
-        if (findExactPath(bucket, path)) |rid| return rid;
-
-        const head = decodeHead(path) orelse return null;
-        switch (head.kind) {
-            .root => {},
-            .one => {
-                if (findOneSeg(bucket.suffix_glob_one_entries, &bucket.suffix_glob_one_table, head.seg0, head.seg0_hash)) |rid| return rid;
-            },
-            .two => {
-                if (findOneSeg(bucket.suffix_param_one_entries, &bucket.suffix_param_one_table, head.seg0, head.seg0_hash)) |rid| return rid;
-                if (findOneSeg(bucket.suffix_glob_one_entries, &bucket.suffix_glob_one_table, head.seg0, head.seg0_hash)) |rid| return rid;
-            },
-            .many => {
-                if (findOneSeg(bucket.suffix_glob_one_entries, &bucket.suffix_glob_one_table, head.seg0, head.seg0_hash)) |rid| return rid;
-            },
-        }
-
+        if (findExactPathRaw(bucket, path)) |rid| return rid;
         const decoded = decodePath(path) orelse return null;
-        if (findSuffixParam(bucket, &decoded)) |rid| return rid;
-        if (findSuffixGlob(bucket, &decoded)) |rid| return rid;
-        return findFallback(self.routes, &bucket.fallback, path);
+        return matchPatternBucket(&bucket.pattern, &decoded, 0, 0);
+    }
+
+    fn debugMatch(self: *const RadixHashRouter, method_token: []const u8, path: []const u8) void {
+        const method = parseMethod(method_token) orelse return;
+        const decoded = decodePath(path) orelse return;
+        debugPatternBucket(&self.buckets[@intFromEnum(method)].pattern, &decoded, 0, 0, 0);
     }
 };
 
@@ -597,35 +657,21 @@ fn parseMethod(token: []const u8) ?Method {
     return null;
 }
 
-fn prefixHashStep(prev: u64, seg_hash: u64) u64 {
-    var x = prev ^ seg_hash;
-    x *%= 0x9e37_79b9_7f4a_7c15;
-    x ^= x >> 29;
-    return x;
+fn minRoute(best: ?u32, candidate: ?u32) ?u32 {
+    if (candidate == null) return best;
+    if (best == null or candidate.? < best.?) return candidate;
+    return best;
 }
 
-fn prefixHashForPattern(prefix: []const PatternSeg) u64 {
-    var h = prefix_hash_seed;
-    for (prefix) |seg| {
-        h = prefixHashStep(h, util.fnv1a64(seg.lit));
-    }
-    return h;
-}
-
-fn isTrailingParamRoute(p: Pattern) bool {
-    if (p.segments.len == 0 or p.segments[p.segments.len - 1].kind != .param) return false;
-    for (p.segments[0 .. p.segments.len - 1]) |seg| {
-        if (seg.kind != .lit) return false;
-    }
-    return true;
-}
-
-fn isTrailingGlobRoute(p: Pattern) bool {
-    if (p.segments.len == 0 or p.segments[p.segments.len - 1].kind != .glob) return false;
-    for (p.segments[0 .. p.segments.len - 1]) |seg| {
-        if (seg.kind != .lit) return false;
-    }
-    return true;
+fn indent(depth: usize) []const u8 {
+    return switch (depth) {
+        0 => "",
+        1 => "  ",
+        2 => "    ",
+        3 => "      ",
+        4 => "        ",
+        else => "          ",
+    };
 }
 
 fn decodePath(path: []const u8) ?DecodedPath {
@@ -633,15 +679,21 @@ fn decodePath(path: []const u8) ?DecodedPath {
 
     var decoded: DecodedPath = .{
         .path = path,
-        .path_hash = util.fnv1a64(path),
+        .path_hash = 0,
         .seg_count = 0,
         .segs = undefined,
         .seg_hashes = undefined,
-        .prefix_hashes = undefined,
     };
-    decoded.prefix_hashes[0] = prefix_hash_seed;
 
-    if (path.len == 1) return decoded;
+    var path_hash: u64 = 0xcbf29ce484222325;
+    if (path.len == 1) {
+        for (path) |b| {
+            path_hash ^= b;
+            path_hash *%= 0x100000001b3;
+        }
+        decoded.path_hash = path_hash;
+        return decoded;
+    }
 
     var pos: usize = 1;
     while (pos < path.len) {
@@ -650,51 +702,43 @@ fn decodePath(path: []const u8) ?DecodedPath {
         const slash = std.mem.indexOfScalarPos(u8, path, pos, '/') orelse path.len;
         const part = path[pos..slash];
         if (part.len == 0) return null;
+        for (path[pos - 1 .. slash]) |b| {
+            path_hash ^= b;
+            path_hash *%= 0x100000001b3;
+        }
 
         const idx = decoded.seg_count;
         const part_hash = util.fnv1a64(part);
         decoded.segs[idx] = part;
         decoded.seg_hashes[idx] = part_hash;
         decoded.seg_count += 1;
-        decoded.prefix_hashes[decoded.seg_count] = prefixHashStep(decoded.prefix_hashes[decoded.seg_count - 1], part_hash);
 
         if (slash == path.len) break;
         if (slash + 1 == path.len) return null;
         pos = slash + 1;
     }
 
+    decoded.path_hash = path_hash;
     return decoded;
 }
 
-fn decodeHead(path: []const u8) ?PathHead {
-    if (path.len == 0 or path[0] != '/') return null;
-    if (path.len == 1) return .{ .kind = .root };
+fn findExactPath(bucket: *const HybridBucket, decoded: *const DecodedPath) ?u32 {
+    if (bucket.exact_entries.len == 0) return null;
 
-    const first_slash = std.mem.indexOfScalarPos(u8, path, 1, '/') orelse path.len;
-    const seg0 = path[1..first_slash];
-    if (seg0.len == 0) return null;
-
-    if (first_slash == path.len) {
-        return .{
-            .kind = .one,
-            .seg0 = seg0,
-            .seg0_hash = util.fnv1a64(seg0),
-        };
+    const path_hash = decoded.path_hash;
+    var pos: u64 = path_hash & bucket.exact_table.mask;
+    var probe: usize = 0;
+    while (probe < bucket.exact_table.slots.len) : (probe += 1) {
+        const slot = bucket.exact_table.slots[@intCast(pos)];
+        if (slot == 0) return null;
+        const entry = bucket.exact_entries[slot - 1];
+        if (entry.hash == path_hash and std.mem.eql(u8, entry.path, decoded.path)) return entry.route_index;
+        pos = (pos + 1) & bucket.exact_table.mask;
     }
-    if (first_slash + 1 == path.len) return null;
-
-    const second_slash = std.mem.indexOfScalarPos(u8, path, first_slash + 1, '/') orelse path.len;
-    const seg1 = path[first_slash + 1 .. second_slash];
-    if (seg1.len == 0) return null;
-
-    return .{
-        .kind = if (second_slash == path.len) .two else .many,
-        .seg0 = seg0,
-        .seg0_hash = util.fnv1a64(seg0),
-    };
+    return null;
 }
 
-fn findExactPath(bucket: *const HybridBucket, path: []const u8) ?u32 {
+fn findExactPathRaw(bucket: *const HybridBucket, path: []const u8) ?u32 {
     if (bucket.exact_entries.len == 0) return null;
 
     const path_hash = util.fnv1a64(path);
@@ -710,71 +754,58 @@ fn findExactPath(bucket: *const HybridBucket, path: []const u8) ?u32 {
     return null;
 }
 
-fn findOneSeg(entries: []const ExactHeadEntry, table: *const FlatTable, seg0: []const u8, seg0_hash: u64) ?u32 {
-    if (entries.len == 0) return null;
+fn matchPatternBucket(bucket: *const PatternBucket, decoded: *const DecodedPath, node_idx: u32, seg_idx: usize) ?u32 {
+    const node = &bucket.nodes.items[node_idx];
+    var best: ?u32 = null;
 
-    var pos: u64 = seg0_hash & table.mask;
-    var probe: usize = 0;
-    while (probe < table.slots.len) : (probe += 1) {
-        const slot = table.slots[@intCast(pos)];
-        if (slot == 0) return null;
-        const entry = entries[slot - 1];
-        if (entry.hash == seg0_hash and std.mem.eql(u8, entry.seg0, seg0)) return entry.route_index;
-        pos = (pos + 1) & table.mask;
-    }
-    return null;
-}
+    if (seg_idx == decoded.seg_count) {
+        best = minRoute(best, node.end_route);
+        best = minRoute(best, node.glob_route);
+    } else {
+        best = minRoute(best, node.glob_route);
 
-fn prefixMatches(decoded: *const DecodedPath, entry: PrefixEntry) bool {
-    if (entry.prefix_count > decoded.seg_count) return false;
-    var i: usize = 0;
-    while (i < @as(usize, entry.prefix_count)) : (i += 1) {
-        if (!std.mem.eql(u8, entry.prefix[i].lit, decoded.segs[i])) return false;
-    }
-    return true;
-}
-
-fn findPrefixEntry(entries: []const PrefixEntry, table: *const FlatTable, decoded: *const DecodedPath, prefix_count: usize) ?u32 {
-    if (entries.len == 0) return null;
-
-    const h = decoded.prefix_hashes[prefix_count];
-    var pos: u64 = h & table.mask;
-    var probe: usize = 0;
-    while (probe < table.slots.len) : (probe += 1) {
-        const slot = table.slots[@intCast(pos)];
-        if (slot == 0) return null;
-        const entry = entries[slot - 1];
-        if (entry.prefix_hash == h and entry.prefix_count == @as(u8, @intCast(prefix_count)) and prefixMatches(decoded, entry)) {
-            return entry.route_index;
+        if (node.literals.get(decoded.segs[seg_idx], decoded.seg_hashes[seg_idx])) |child_idx| {
+            best = minRoute(best, matchPatternBucket(bucket, decoded, child_idx, seg_idx + 1));
         }
-        pos = (pos + 1) & table.mask;
+
+        for (node.params_glob) |entry| {
+            if (seg_idx + entry.param_count <= decoded.seg_count) {
+                best = minRoute(best, entry.route_index);
+            }
+        }
+
+        for (node.params) |entry| {
+            if (seg_idx + entry.param_count <= decoded.seg_count) {
+                best = minRoute(best, matchPatternBucket(bucket, decoded, entry.next, seg_idx + entry.param_count));
+            }
+        }
     }
-    return null;
+
+    return best;
 }
 
-fn findSuffixParam(bucket: *const HybridBucket, decoded: *const DecodedPath) ?u32 {
-    if (decoded.seg_count == 0) return null;
-    const prefix_count = decoded.seg_count - 1;
-    return findPrefixEntry(bucket.suffix_param_entries, &bucket.suffix_param_table, decoded, prefix_count);
-}
-
-fn findSuffixGlob(bucket: *const HybridBucket, decoded: *const DecodedPath) ?u32 {
-    if (bucket.suffix_glob_entries.len == 0) return null;
-
-    var prefix_count: usize = decoded.seg_count;
-    while (true) {
-        if (findPrefixEntry(bucket.suffix_glob_entries, &bucket.suffix_glob_table, decoded, prefix_count)) |rid| return rid;
-        if (prefix_count == 0) break;
-        prefix_count -= 1;
+fn debugPatternBucket(bucket: *const PatternBucket, decoded: *const DecodedPath, node_idx: u32, seg_idx: usize, depth: usize) void {
+    const node = &bucket.nodes.items[node_idx];
+    std.debug.print(
+        "{s}node={d} seg_idx={d} end={any} glob={any} params={d} params_glob={d}\n",
+        .{ indent(depth), node_idx, seg_idx, node.end_route, node.glob_route, node.params.len, node.params_glob.len },
+    );
+    if (seg_idx < decoded.seg_count) {
+        std.debug.print("{s}seg={s}\n", .{ indent(depth), decoded.segs[seg_idx] });
+        if (node.literals.get(decoded.segs[seg_idx], decoded.seg_hashes[seg_idx])) |child_idx| {
+            std.debug.print("{s}literal -> {d}\n", .{ indent(depth), child_idx });
+            debugPatternBucket(bucket, decoded, child_idx, seg_idx + 1, depth + 1);
+        }
+        for (node.params_glob) |entry| {
+            std.debug.print("{s}params_glob count={d} route={d}\n", .{ indent(depth), entry.param_count, entry.route_index });
+        }
+        for (node.params) |entry| {
+            std.debug.print("{s}params count={d} next={d}\n", .{ indent(depth), entry.param_count, entry.next });
+            if (seg_idx + entry.param_count <= decoded.seg_count) {
+                debugPatternBucket(bucket, decoded, entry.next, seg_idx + entry.param_count, depth + 1);
+            }
+        }
     }
-    return null;
-}
-
-fn findFallback(routes: []const Route, fallback: *const FallbackBucket, path: []const u8) ?u32 {
-    for (fallback.route_indices) |route_index| {
-        if (matchPattern(routes[route_index].pattern, path)) return route_index;
-    }
-    return null;
 }
 
 fn methodToken(m: Method) []const u8 {
@@ -983,6 +1014,7 @@ fn verifyRouters(
                 "router mismatch at lookup {d}: {s} {s} -> current={any} hash={any} radix={any}\n",
                 .{ i, l.method, l.path, expected, got_hash, got_radix },
             );
+            radix.debugMatch(l.method, l.path);
             return error.RouterMismatch;
         }
     }

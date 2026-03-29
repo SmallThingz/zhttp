@@ -169,3 +169,39 @@ test "logger: invokes log function" {
     try std.testing.expectEqualStrings("/x", log_state.path);
     try std.testing.expectEqual(@as(u16, 201), log_state.status);
 }
+
+test "logger: named context stores elapsed and status" {
+    const Mw = Logger(.{ .name = "log" });
+    const MwCtx = struct {
+        log: Mw.Info.data.?,
+    };
+    const ReqT = @import("../request.zig").Request(struct {}, struct {}, &.{}, MwCtx);
+
+    const Next = struct {
+        pub const function = call;
+        pub fn call(comptime rctx: ReqCtx, _: rctx.T()) !Res {
+            return Res.text(204, "");
+        }
+    };
+
+    const gpa = std.testing.allocator;
+    const path_buf = "/".*;
+    const query_buf: [0]u8 = .{};
+    const line: @import("../request.zig").RequestLine = .{
+        .method = "GET",
+        .version = .http11,
+        .path = @constCast(path_buf[0..]),
+        .query = @constCast(query_buf[0..]),
+    };
+    const mw_ctx: MwCtx = .{ .log = .{} };
+    var reqv = ReqT.init(gpa, std.testing.io, line, mw_ctx);
+    defer reqv.deinit(gpa);
+
+    const res = try test_helpers.runMiddlewareTest(Mw, ReqT, Next, &reqv, line.method);
+    try std.testing.expectEqual(@as(u16, 204), @intFromEnum(res.status));
+
+    const data = reqv.middlewareDataConst(.log);
+    try std.testing.expectEqual(@as(u16, 204), data.status);
+    try std.testing.expect(data.elapsed.nanoseconds >= 0);
+    try std.testing.expect(data.start.nanoseconds != 0);
+}

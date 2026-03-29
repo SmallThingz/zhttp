@@ -581,3 +581,52 @@ test "middleware helpers: typeList and concatTypeLists support tuple/array input
         if (joined[2] != C) @compileError("concatTypeLists order changed");
     }
 }
+
+test "middleware helpers: info returns declared metadata and init handles error-union static context" {
+    const testing = std.testing;
+
+    const StaticCtx = struct {
+        method: []const u8,
+
+        pub fn init(_: std.Io, _: std.mem.Allocator, rd: StaticContextRouteDecl) !@This() {
+            return .{ .method = rd.method };
+        }
+    };
+
+    const Mw = struct {
+        pub const Info: MiddlewareInfo = .{
+            .name = "demo",
+            .data = struct { seen: bool = false },
+            .static_context = StaticCtx,
+            .header = struct { host: parse.Optional(parse.String) },
+            .query = struct { q: parse.Optional(parse.String) },
+            .path = struct { id: parse.Int(u32) },
+        };
+
+        pub fn call(_: anytype, _: anytype) !@import("response.zig").Res {
+            unreachable;
+        }
+    };
+
+    const mw_info = comptime info(Mw);
+    try testing.expectEqualStrings("demo", mw_info.name);
+    try testing.expect(mw_info.data.? == Mw.Info.data.?);
+    try testing.expect(mw_info.static_context.? == StaticCtx);
+    try testing.expect(mw_info.header.? == Mw.Info.header.?);
+    try testing.expect(mw_info.query.? == Mw.Info.query.?);
+    try testing.expect(mw_info.path.? == Mw.Info.path.?);
+
+    const StaticCtxT = staticContextType(.{Mw});
+    const rd: StaticContextRouteDecl = .{
+        .method = "POST",
+        .pattern = "/items/{id}",
+        .endpoint = struct {},
+        .headers = struct {},
+        .query = struct {},
+        .params = struct {},
+        .middlewares = &.{},
+        .operations = &.{},
+    };
+    const static_ctx = try initStaticContext(StaticCtxT, testing.io, testing.allocator, rd);
+    try testing.expectEqualStrings("POST", static_ctx.demo.method);
+}

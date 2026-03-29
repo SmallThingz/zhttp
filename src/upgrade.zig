@@ -66,6 +66,9 @@ fn websocketResponseFromOwnedAccept(
     accept: []u8,
     opts: WebSocketResponseOptions,
 ) !Res {
+    // `accept` is already allocator-owned on entry, so this helper only needs
+    // to splice it into the final header list and free it again if header
+    // allocation fails.
     errdefer allocator.free(accept);
 
     var header_count: usize = 3 + opts.extra_headers.len;
@@ -195,4 +198,15 @@ test "websocketResponseWithAccept: accepts precomputed value" {
 
 test "websocketResponseWithAccept: rejects empty accept value" {
     try std.testing.expectError(error.EmptyWebSocketAccept, websocketResponseWithAccept(std.testing.allocator, "", .{}));
+}
+
+test "websocketResponseWithAccept: omits optional websocket headers when absent" {
+    const res = try websocketResponseWithAccept(std.testing.allocator, "abc=", .{});
+    defer std.testing.allocator.free(res.headers);
+    defer std.testing.allocator.free(res.headers[2].value);
+
+    try std.testing.expectEqual(@as(usize, 3), res.headers.len);
+    try std.testing.expectEqualStrings("connection", res.headers[0].name);
+    try std.testing.expectEqualStrings("upgrade", res.headers[1].name);
+    try std.testing.expectEqualStrings("sec-websocket-accept", res.headers[2].name);
 }

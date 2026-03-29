@@ -63,3 +63,31 @@ test "RouteDecl: stores resolved route metadata" {
     try @import("std").testing.expectEqual(@as(usize, 1), route.middlewares.len);
     try @import("std").testing.expectEqual(@as(usize, 1), route.operations.len);
 }
+
+test "RouteDecl: preserves capture and endpoint types exactly" {
+    const std = @import("std");
+
+    const Headers = struct { host: []const u8 };
+    const Query = struct { page: u8 };
+    const Params = struct { id: u32 };
+    const Middleware = struct {};
+    const Operation = struct {};
+    const Endpoint = struct {};
+
+    const route: RouteDecl = .{
+        .method = "POST",
+        .pattern = "/items/{id}",
+        .endpoint = Endpoint,
+        .headers = Headers,
+        .query = Query,
+        .params = Params,
+        .middlewares = &.{Middleware},
+        .operations = &.{Operation},
+    };
+
+    try std.testing.expect(route.headers == Headers);
+    try std.testing.expect(route.query == Query);
+    try std.testing.expect(route.params == Params);
+    try std.testing.expect(route.middlewares[0] == Middleware);
+    try std.testing.expect(route.operations[0] == Operation);
+}

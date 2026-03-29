@@ -181,6 +181,33 @@ test "fuzz: corpus iterates all inputs in non-fuzz mode" {
     try std.testing.expectEqual(@as(usize, 3), ctx.total_bytes);
 }
 
+test "fuzz: propagates testOne error in non-fuzz mode" {
+    const Ctx = struct {
+        count: usize = 0,
+    };
+    const Helper = struct {
+        pub fn testOne(ctx: *Ctx, smith: *std.testing.Smith) !void {
+            _ = smith;
+            ctx.count += 1;
+            return error.Boom;
+        }
+    };
+
+    var ctx: Ctx = .{};
+    try std.testing.expectError(error.Boom, fuzz(&ctx, Helper.testOne, .{ .corpus = &.{ "x" } }));
+    try std.testing.expectEqual(@as(usize, 1), ctx.count);
+}
+
+test "root exports: top-level aliases point at canonical modules" {
+    try std.testing.expect(Res == response.Res);
+    try std.testing.expect(SegmentedRes == response.SegmentedRes);
+    try std.testing.expect(NoBodyRes == response.NoBodyRes);
+    try std.testing.expect(OperationCtx == operations.OperationCtx);
+    try std.testing.expect(route == router.route);
+    try std.testing.expect(get == router.get);
+    try std.testing.expect(ReqCtx == @import("req_ctx.zig").ReqCtx);
+}
+
 test {
     _ = @import("parse.zig");
     _ = @import("request.zig");

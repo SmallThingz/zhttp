@@ -116,3 +116,44 @@ test "timeout: immediate timeout" {
     const res = try test_helpers.runMiddlewareTest(Mw, ReqT, Next, &reqv, line.method);
     try std.testing.expectEqual(@as(u16, 504), @intFromEnum(res.status));
 }
+
+test "timeout: named context stores deadline, timeout, and elapsed without timing out" {
+    const Mw = Timeout(.{
+        .name = "to",
+        .duration = std.Io.Duration.fromMilliseconds(50),
+        .ms = -1,
+    });
+    const MwCtx = struct {
+        to: Mw.Info.data.?,
+    };
+    const ReqT = @import("../request.zig").Request(struct {}, struct {}, &.{}, MwCtx);
+
+    const Next = struct {
+        pub const function = call;
+        pub fn call(comptime rctx: ReqCtx, _: rctx.T()) !Res {
+            return Res.text(200, "ok");
+        }
+    };
+
+    const gpa = std.testing.allocator;
+    const path_buf = "/".*;
+    const query_buf: [0]u8 = .{};
+    const line: @import("../request.zig").RequestLine = .{
+        .method = "GET",
+        .version = .http11,
+        .path = @constCast(path_buf[0..]),
+        .query = @constCast(query_buf[0..]),
+    };
+    const mw_ctx: MwCtx = .{ .to = .{} };
+    var reqv = ReqT.init(gpa, std.testing.io, line, mw_ctx);
+    defer reqv.deinit(gpa);
+
+    const res = try test_helpers.runMiddlewareTest(Mw, ReqT, Next, &reqv, line.method);
+    try std.testing.expectEqual(@as(u16, 200), @intFromEnum(res.status));
+
+    const data = reqv.middlewareDataConst(.to);
+    try std.testing.expectEqual(std.Io.Duration.fromMilliseconds(50).nanoseconds, data.timeout.nanoseconds);
+    try std.testing.expect(data.deadline.nanoseconds >= data.timeout.nanoseconds);
+    try std.testing.expect(data.elapsed.nanoseconds >= 0);
+    try std.testing.expect(!data.timed_out);
+}

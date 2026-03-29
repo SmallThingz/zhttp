@@ -544,7 +544,7 @@ fn printTestOutput(name: []const u8, res: ChildResult) void {
     if (res.term) |term| {
         switch (term) {
             .exited => |code| if (code != 0) print(" | exit {d}", .{code}),
-            .signal => |sig| print(" | signal {d}", .{@intFromEnum(sig)}),
+            .signal => |sig| print(" | signal {d} ({s})", .{ @intFromEnum(sig), @tagName(sig) }),
             .stopped => |code| print(" | stopped {d}", .{code}),
             .unknown => |code| print(" | unknown {d}", .{code}),
         }
@@ -591,6 +591,9 @@ fn runSingleTest(name: []const u8, seed: ?u32) void {
         error.SkipZigTest => std.process.exit(2),
         else => {
             print("{s}\n", .{@errorName(err)});
+            if (@errorReturnTrace()) |trace| {
+                std.debug.dumpStackTrace(trace);
+            }
             std.process.exit(1);
         },
     }

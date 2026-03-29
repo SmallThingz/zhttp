@@ -576,6 +576,17 @@ fn sendAndCloseEarly(io: Io, port: u16, req_prefix: []const u8) !void {
     try sw.interface.flush();
 }
 
+fn stopServerTest(io: Io, group: *Io.Group, server: anytype) void {
+    group.cancel(io);
+    group.await(io) catch {};
+    server.deinit();
+}
+
+fn traceServerTest(tag: []const u8) void {
+    _ = std.c.write(std.posix.STDERR_FILENO, tag.ptr, tag.len);
+    _ = std.c.write(std.posix.STDERR_FILENO, "\n", 1);
+}
+
 fn randomAscii(random: std.Random, buf: []u8) void {
     for (buf) |*b| b.* = 'a' + random.uintLessThan(u8, 26);
 }
@@ -853,14 +864,13 @@ test "Connection: close header closes socket" {
     });
 
     const addr0: Io.net.IpAddress = .{ .ip4 = Io.net.Ip4Address.loopback(0) };
+    var group: Io.Group = .init;
     var server = try SrvT.init(std.testing.allocator, io, addr0, {});
-    defer server.deinit();
+    defer stopServerTest(io, &group, &server);
 
     const port: u16 = server.listener.socket.address.getPort();
     try std.testing.expect(port != 0);
 
-    var group: Io.Group = .init;
-    defer group.cancel(io);
     try group.concurrent(io, SrvT.run, .{&server});
 
     const addr: Io.net.IpAddress = .{ .ip4 = Io.net.Ip4Address.loopback(port) };
@@ -921,12 +931,11 @@ test "unknown path returns 404 and keeps connection" {
     });
 
     const addr0: Io.net.IpAddress = .{ .ip4 = Io.net.Ip4Address.loopback(0) };
+    var group: Io.Group = .init;
     var server = try SrvT.init(std.testing.allocator, io, addr0, {});
-    defer server.deinit();
+    defer stopServerTest(io, &group, &server);
     const port: u16 = server.listener.socket.address.getPort();
 
-    var group: Io.Group = .init;
-    defer group.cancel(io);
     try group.concurrent(io, SrvT.run, .{&server});
 
     const addr: Io.net.IpAddress = .{ .ip4 = Io.net.Ip4Address.loopback(port) };
@@ -1012,12 +1021,11 @@ test "not_found_handler can parse query headers and body" {
     });
 
     const addr0: Io.net.IpAddress = .{ .ip4 = Io.net.Ip4Address.loopback(0) };
+    var group: Io.Group = .init;
     var server = try SrvT.init(std.testing.allocator, io, addr0, {});
-    defer server.deinit();
+    defer stopServerTest(io, &group, &server);
     const port: u16 = server.listener.socket.address.getPort();
 
-    var group: Io.Group = .init;
-    defer group.cancel(io);
     try group.concurrent(io, SrvT.run, .{&server});
 
     const addr: Io.net.IpAddress = .{ .ip4 = Io.net.Ip4Address.loopback(port) };
@@ -1088,12 +1096,11 @@ test "HEAD response omits body" {
     });
 
     const addr0: Io.net.IpAddress = .{ .ip4 = Io.net.Ip4Address.loopback(0) };
+    var group: Io.Group = .init;
     var server = try SrvT.init(std.testing.allocator, io, addr0, {});
-    defer server.deinit();
+    defer stopServerTest(io, &group, &server);
     const port: u16 = server.listener.socket.address.getPort();
 
-    var group: Io.Group = .init;
-    defer group.cancel(io);
     try group.concurrent(io, SrvT.run, .{&server});
 
     const addr: Io.net.IpAddress = .{ .ip4 = Io.net.Ip4Address.loopback(port) };
@@ -1144,12 +1151,11 @@ test "bad request line returns 400" {
     });
 
     const addr0: Io.net.IpAddress = .{ .ip4 = Io.net.Ip4Address.loopback(0) };
+    var group: Io.Group = .init;
     var server = try SrvT.init(std.testing.allocator, io, addr0, {});
-    defer server.deinit();
+    defer stopServerTest(io, &group, &server);
     const port: u16 = server.listener.socket.address.getPort();
 
-    var group: Io.Group = .init;
-    defer group.cancel(io);
     try group.concurrent(io, SrvT.run, .{&server});
 
     const addr: Io.net.IpAddress = .{ .ip4 = Io.net.Ip4Address.loopback(port) };
@@ -1209,12 +1215,11 @@ test "custom error_handler handles handler errors only" {
     });
 
     const addr0: Io.net.IpAddress = .{ .ip4 = Io.net.Ip4Address.loopback(0) };
+    var group: Io.Group = .init;
     var server = try SrvT.init(std.testing.allocator, io, addr0, {});
-    defer server.deinit();
+    defer stopServerTest(io, &group, &server);
     const port: u16 = server.listener.socket.address.getPort();
 
-    var group: Io.Group = .init;
-    defer group.cancel(io);
     try group.concurrent(io, SrvT.run, .{&server});
 
     const addr: Io.net.IpAddress = .{ .ip4 = Io.net.Ip4Address.loopback(port) };
@@ -1292,12 +1297,11 @@ test "handler res.close closes socket" {
     });
 
     const addr0: Io.net.IpAddress = .{ .ip4 = Io.net.Ip4Address.loopback(0) };
+    var group: Io.Group = .init;
     var server = try SrvT.init(std.testing.allocator, io, addr0, {});
-    defer server.deinit();
+    defer stopServerTest(io, &group, &server);
     const port: u16 = server.listener.socket.address.getPort();
 
-    var group: Io.Group = .init;
-    defer group.cancel(io);
     try group.concurrent(io, SrvT.run, .{&server});
 
     const addr: Io.net.IpAddress = .{ .ip4 = Io.net.Ip4Address.loopback(port) };
@@ -1350,12 +1354,11 @@ test "HTTP/1.0 request does not keep-alive" {
     });
 
     const addr0: Io.net.IpAddress = .{ .ip4 = Io.net.Ip4Address.loopback(0) };
+    var group: Io.Group = .init;
     var server = try SrvT.init(std.testing.allocator, io, addr0, {});
-    defer server.deinit();
+    defer stopServerTest(io, &group, &server);
     const port: u16 = server.listener.socket.address.getPort();
 
-    var group: Io.Group = .init;
-    defer group.cancel(io);
     try group.concurrent(io, SrvT.run, .{&server});
 
     const addr: Io.net.IpAddress = .{ .ip4 = Io.net.Ip4Address.loopback(port) };
@@ -1428,12 +1431,11 @@ test "endpoint upgrade: 101 triggers upgrade callback and stream ownership" {
     });
 
     const addr0: Io.net.IpAddress = .{ .ip4 = Io.net.Ip4Address.loopback(0) };
+    var group: Io.Group = .init;
     var server = try SrvT.init(std.testing.allocator, io, addr0, &state);
-    defer server.deinit();
+    defer stopServerTest(io, &group, &server);
     const port: u16 = server.listener.socket.address.getPort();
 
-    var group: Io.Group = .init;
-    defer group.cancel(io);
     try group.concurrent(io, SrvT.run, .{&server});
 
     const addr: Io.net.IpAddress = .{ .ip4 = Io.net.Ip4Address.loopback(port) };
@@ -1528,12 +1530,11 @@ test "middleware static_context: per-route init and request access" {
     });
 
     const addr0: Io.net.IpAddress = .{ .ip4 = Io.net.Ip4Address.loopback(0) };
+    var group: Io.Group = .init;
     var server = try SrvT.init(std.testing.allocator, io, addr0, {});
-    defer server.deinit();
+    defer stopServerTest(io, &group, &server);
     const port: u16 = server.listener.socket.address.getPort();
 
-    var group: Io.Group = .init;
-    defer group.cancel(io);
     try group.concurrent(io, SrvT.run, .{&server});
 
     const addr: Io.net.IpAddress = .{ .ip4 = Io.net.Ip4Address.loopback(port) };
@@ -1690,12 +1691,11 @@ test "ReqCtx.Server allows cross-route static context access" {
     });
 
     const addr0: Io.net.IpAddress = .{ .ip4 = Io.net.Ip4Address.loopback(0) };
+    var group: Io.Group = .init;
     var server = try SrvT.init(std.testing.allocator, io, addr0, {});
-    defer server.deinit();
+    defer stopServerTest(io, &group, &server);
     const port: u16 = server.listener.socket.address.getPort();
 
-    var group: Io.Group = .init;
-    defer group.cancel(io);
     try group.concurrent(io, SrvT.run, .{&server});
 
     var stream = try Io.net.IpAddress.connect(&.{ .ip4 = Io.net.Ip4Address.loopback(port) }, io, .{ .mode = .stream });
@@ -1791,12 +1791,11 @@ test "server variation: global middleware applies to route and not_found handler
     });
 
     const addr0: Io.net.IpAddress = .{ .ip4 = Io.net.Ip4Address.loopback(0) };
+    var group: Io.Group = .init;
     var server = try SrvT.init(std.testing.allocator, io, addr0, {});
-    defer server.deinit();
+    defer stopServerTest(io, &group, &server);
     const port: u16 = server.listener.socket.address.getPort();
 
-    var group: Io.Group = .init;
-    defer group.cancel(io);
     try group.concurrent(io, SrvT.run, .{&server});
 
     const addr: Io.net.IpAddress = .{ .ip4 = Io.net.Ip4Address.loopback(port) };
@@ -1879,12 +1878,11 @@ test "server variation: operations.Cors generates runtime OPTIONS preflight rout
     });
 
     const addr0: Io.net.IpAddress = .{ .ip4 = Io.net.Ip4Address.loopback(0) };
+    var group: Io.Group = .init;
     var server = try SrvT.init(std.testing.allocator, io, addr0, {});
-    defer server.deinit();
+    defer stopServerTest(io, &group, &server);
     const port: u16 = server.listener.socket.address.getPort();
 
-    var group: Io.Group = .init;
-    defer group.cancel(io);
     try group.concurrent(io, SrvT.run, .{&server});
 
     var stream = try Io.net.IpAddress.connect(&.{ .ip4 = Io.net.Ip4Address.loopback(port) }, io, .{ .mode = .stream });
@@ -1916,6 +1914,7 @@ test "server variation: operations.Cors generates runtime OPTIONS preflight rout
     var got: [resp.len]u8 = undefined;
     try sr.interface.readSliceAll(got[0..]);
     try std.testing.expectEqualStrings(resp, got[0..]);
+    try expectClosed(&sr.interface);
 }
 
 test "server variation: operations.Static generates runtime GET and HEAD mount routes" {
@@ -1949,12 +1948,11 @@ test "server variation: operations.Static generates runtime GET and HEAD mount r
     });
 
     const addr0: Io.net.IpAddress = .{ .ip4 = Io.net.Ip4Address.loopback(0) };
+    var group: Io.Group = .init;
     var server = try SrvT.init(std.testing.allocator, io, addr0, {});
-    defer server.deinit();
+    defer stopServerTest(io, &group, &server);
     const port: u16 = server.listener.socket.address.getPort();
 
-    var group: Io.Group = .init;
-    defer group.cancel(io);
     try group.concurrent(io, SrvT.run, .{&server});
 
     {
@@ -2030,12 +2028,11 @@ test "server variation: unbuffered writer config works" {
     });
 
     const addr0: Io.net.IpAddress = .{ .ip4 = Io.net.Ip4Address.loopback(0) };
+    var group: Io.Group = .init;
     var server = try SrvT.init(std.testing.allocator, io, addr0, {});
-    defer server.deinit();
+    defer stopServerTest(io, &group, &server);
     const port: u16 = server.listener.socket.address.getPort();
 
-    var group: Io.Group = .init;
-    defer group.cancel(io);
     try group.concurrent(io, SrvT.run, .{&server});
 
     var stream = try Io.net.IpAddress.connect(&.{ .ip4 = Io.net.Ip4Address.loopback(port) }, io, .{ .mode = .stream });
@@ -2059,6 +2056,7 @@ test "server variation: unbuffered writer config works" {
     var got: [resp.len]u8 = undefined;
     try sr.interface.readSliceAll(got[0..]);
     try std.testing.expectEqualStrings(resp, got[0..]);
+    try expectClosed(&sr.interface);
 }
 
 test "server adversarial malformed clients recover and keep serving" {
@@ -2121,12 +2119,11 @@ test "server adversarial malformed clients recover and keep serving" {
     });
 
     const addr0: Io.net.IpAddress = .{ .ip4 = Io.net.Ip4Address.loopback(0) };
+    var group: Io.Group = .init;
     var server = try SrvT.init(std.testing.allocator, io, addr0, {});
-    defer server.deinit();
+    defer stopServerTest(io, &group, &server);
     const port: u16 = server.listener.socket.address.getPort();
 
-    var group: Io.Group = .init;
-    defer group.cancel(io);
     try group.concurrent(io, SrvT.run, .{&server});
 
     var bad_400_buf: [256]u8 = undefined;
@@ -2277,12 +2274,11 @@ test "server soak: deterministic real-socket variety including malformed keepali
     });
 
     const addr0: Io.net.IpAddress = .{ .ip4 = Io.net.Ip4Address.loopback(0) };
+    var group: Io.Group = .init;
     var server = try SrvT.init(std.testing.allocator, io, addr0, &ctx);
-    defer server.deinit();
+    defer stopServerTest(io, &group, &server);
     const port: u16 = server.listener.socket.address.getPort();
 
-    var group: Io.Group = .init;
-    defer group.cancel(io);
     try group.concurrent(io, SrvT.run, .{&server});
 
     var prng = std.Random.DefaultPrng.init(0x5eed_cafe_1234_5678);
@@ -2309,6 +2305,7 @@ test "server soak: deterministic real-socket variety including malformed keepali
 }
 
 test "server websocket abuse: helper handshake and hostile frame mix" {
+    traceServerTest("ws-abuse:start");
     const Ctx = struct {
         upgrades: usize = 0,
     };
@@ -2412,18 +2409,18 @@ test "server websocket abuse: helper handshake and hostile frame mix" {
     });
 
     const addr0: Io.net.IpAddress = .{ .ip4 = Io.net.Ip4Address.loopback(0) };
+    var group: Io.Group = .init;
     var server = try SrvT.init(std.testing.allocator, io, addr0, &ctx);
-    defer server.deinit();
+    defer stopServerTest(io, &group, &server);
     const port: u16 = server.listener.socket.address.getPort();
 
-    var group: Io.Group = .init;
-    defer group.cancel(io);
     try group.concurrent(io, SrvT.run, .{&server});
 
     var exercised: usize = 0;
 
     // Baseline round-trip for normal websocket traffic.
     {
+        traceServerTest("ws-abuse:baseline-connect");
         var stream = try Io.net.IpAddress.connect(&.{ .ip4 = Io.net.Ip4Address.loopback(port) }, io, .{ .mode = .stream });
         defer stream.close(io);
 
@@ -2431,12 +2428,15 @@ test "server websocket abuse: helper handshake and hostile frame mix" {
         var wb: [8 * 1024]u8 = undefined;
         var sr = stream.reader(io, &rb);
         var sw = stream.writer(io, &wb);
+        traceServerTest("ws-abuse:baseline-handshake");
         try performWebSocketHandshake(&sr.interface, &sw.interface, "/ws");
         var client = zws.ClientConn.init(&sr.interface, &sw.interface, .{});
         var msg_buf: [256]u8 = undefined;
 
+        traceServerTest("ws-abuse:baseline-write");
         try client.writeText("hello");
         try sw.interface.flush();
+        traceServerTest("ws-abuse:baseline-read");
         const msg = try client.readMessage(msg_buf[0..]);
         try std.testing.expectEqual(zws.MessageOpcode.text, msg.opcode);
         try std.testing.expectEqualStrings("hello", msg.payload);
@@ -2445,6 +2445,7 @@ test "server websocket abuse: helper handshake and hostile frame mix" {
 
     // Control frame path should respond with pong.
     {
+        traceServerTest("ws-abuse:ping-connect");
         var stream = try Io.net.IpAddress.connect(&.{ .ip4 = Io.net.Ip4Address.loopback(port) }, io, .{ .mode = .stream });
         defer stream.close(io);
 
@@ -2452,17 +2453,19 @@ test "server websocket abuse: helper handshake and hostile frame mix" {
         var wb: [8 * 1024]u8 = undefined;
         var sr = stream.reader(io, &rb);
         var sw = stream.writer(io, &wb);
+        traceServerTest("ws-abuse:ping-handshake");
         try performWebSocketHandshake(&sr.interface, &sw.interface, "/ws");
         var client = zws.ClientConn.init(&sr.interface, &sw.interface, .{});
 
+        traceServerTest("ws-abuse:ping-write");
         try client.writePing("zz");
         try sw.interface.flush();
         exercised += 1;
     }
 
-    // Hostile frames: we only assert the server does not hang/crash; avoid
-    // close-wait reads that can block indefinitely under scheduler jitter.
+    // Invalid unmasked client frame should fail the upgraded connection.
     {
+        traceServerTest("ws-abuse:unmasked-connect");
         var stream = try Io.net.IpAddress.connect(&.{ .ip4 = Io.net.Ip4Address.loopback(port) }, io, .{ .mode = .stream });
         defer stream.close(io);
 
@@ -2470,20 +2473,51 @@ test "server websocket abuse: helper handshake and hostile frame mix" {
         var wb: [8 * 1024]u8 = undefined;
         var sr = stream.reader(io, &rb);
         var sw = stream.writer(io, &wb);
+        traceServerTest("ws-abuse:unmasked-handshake");
         try performWebSocketHandshake(&sr.interface, &sw.interface, "/ws");
-        var msg_buf: [256]u8 = undefined;
+        var client = zws.ClientConn.init(&sr.interface, &sw.interface, .{});
+        var frame_buf: [256]u8 = undefined;
 
-        const bad_unmasked = try appendClientFrame(msg_buf[0..], 0x1, "bad", true, false, false);
+        traceServerTest("ws-abuse:unmasked-write");
+        const bad_unmasked = try appendClientFrame(frame_buf[0..], 0x1, "bad", true, false, false);
         try sw.interface.writeAll(bad_unmasked);
         try sw.interface.flush();
-
-        var payload: [80]u8 = .{'x'} ** 80;
-        const too_big = try appendClientFrame(msg_buf[0..], 0x2, payload[0..], true, true, false);
-        try sw.interface.writeAll(too_big);
-        try sw.interface.flush();
+        traceServerTest("ws-abuse:unmasked-read");
+        const close_frame = try client.readFrame(frame_buf[0..]);
+        try std.testing.expectEqual(zws.Opcode.close, close_frame.header.opcode);
+        traceServerTest("ws-abuse:unmasked-eof");
+        try expectClosed(&sr.interface);
         exercised += 1;
     }
 
-    try std.testing.expectEqual(@as(usize, 3), exercised);
+    // Oversized payload should also fail the upgraded connection.
+    {
+        traceServerTest("ws-abuse:big-connect");
+        var stream = try Io.net.IpAddress.connect(&.{ .ip4 = Io.net.Ip4Address.loopback(port) }, io, .{ .mode = .stream });
+        defer stream.close(io);
+
+        var rb: [8 * 1024]u8 = undefined;
+        var wb: [8 * 1024]u8 = undefined;
+        var sr = stream.reader(io, &rb);
+        var sw = stream.writer(io, &wb);
+        traceServerTest("ws-abuse:big-handshake");
+        try performWebSocketHandshake(&sr.interface, &sw.interface, "/ws");
+        var client = zws.ClientConn.init(&sr.interface, &sw.interface, .{});
+        var frame_buf: [256]u8 = undefined;
+        var payload: [80]u8 = .{'x'} ** 80;
+        traceServerTest("ws-abuse:big-write");
+        const too_big = try appendClientFrame(frame_buf[0..], 0x2, payload[0..], true, true, false);
+        try sw.interface.writeAll(too_big);
+        try sw.interface.flush();
+        traceServerTest("ws-abuse:big-read");
+        const close_frame = try client.readFrame(frame_buf[0..]);
+        try std.testing.expectEqual(zws.Opcode.close, close_frame.header.opcode);
+        traceServerTest("ws-abuse:big-eof");
+        try expectClosed(&sr.interface);
+        exercised += 1;
+    }
+
+    traceServerTest("ws-abuse:done");
+    try std.testing.expectEqual(@as(usize, 4), exercised);
     try std.testing.expect(ctx.upgrades >= exercised);
 }

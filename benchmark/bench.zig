@@ -51,6 +51,17 @@ const ConnState = struct {
     result: ConnResult = .{},
 };
 
+fn outPrint(comptime fmt: []const u8, args: anytype) void {
+    var buf: [1024]u8 = undefined;
+    const msg = std.fmt.bufPrint(&buf, fmt, args) catch return;
+    var rest = msg;
+    while (rest.len != 0) {
+        const wrote = std.posix.system.write(std.posix.STDOUT_FILENO, rest.ptr, rest.len);
+        if (wrote <= 0) return;
+        rest = rest[@as(usize, @intCast(wrote))..];
+    }
+}
+
 fn setTcpNoDelay(stream: *const std.Io.net.Stream) void {
     if (builtin.os.tag != .linux) return;
     const linux = std.os.linux;
@@ -64,7 +75,7 @@ fn setTcpNoDelay(stream: *const std.Io.net.Stream) void {
 }
 
 fn usage() void {
-    std.debug.print(
+    outPrint(
         \\zhttp-bench
         \\
         \\Usage:
@@ -280,13 +291,13 @@ fn runBenchmark(init: std.process.Init, address: std.Io.net.IpAddress, request_b
         "";
 
     if (!cfg.quiet) {
-        std.debug.print("{s}conns={d} iters={d} warmup={d} fixed_bytes={d}\n", .{ prefix, cfg.conns, cfg.iters, cfg.warmup, fixed_bytes });
-        std.debug.print("{s}ok={d} elapsed_ns={d}\n", .{ prefix, total_ok, elapsed_ns });
-        std.debug.print("{s}req/s={d:.2} ns/req={d:.1} MiB/s={d:.2}\n", .{ prefix, rps, ns_per_req, mib_per_s });
-        if (first_err) |e| std.debug.print("first_error={s}\n", .{@errorName(e)});
+        outPrint("{s}conns={d} iters={d} warmup={d} fixed_bytes={d}\n", .{ prefix, cfg.conns, cfg.iters, cfg.warmup, fixed_bytes });
+        outPrint("{s}ok={d} elapsed_ns={d}\n", .{ prefix, total_ok, elapsed_ns });
+        outPrint("{s}req/s={d:.2} ns/req={d:.1} MiB/s={d:.2}\n", .{ prefix, rps, ns_per_req, mib_per_s });
+        if (first_err) |e| outPrint("first_error={s}\n", .{@errorName(e)});
     } else {
-        std.debug.print("{s}ok={d} elapsed_ns={d} fixed_bytes={d} req/s={d:.2} ns/req={d:.1} MiB/s={d:.2}\n", .{ prefix, total_ok, elapsed_ns, fixed_bytes, rps, ns_per_req, mib_per_s });
-        if (first_err) |e| std.debug.print("first_error={s}\n", .{@errorName(e)});
+        outPrint("{s}ok={d} elapsed_ns={d} fixed_bytes={d} req/s={d:.2} ns/req={d:.1} MiB/s={d:.2}\n", .{ prefix, total_ok, elapsed_ns, fixed_bytes, rps, ns_per_req, mib_per_s });
+        if (first_err) |e| outPrint("first_error={s}\n", .{@errorName(e)});
     }
 }
 
@@ -412,10 +423,7 @@ pub fn main(init: std.process.Init) !void {
     if (cfg.mode == .external and cfg.port == 0) return error.BadPort;
 
     if (!cfg.quiet and cfg.mode == .zhttp) {
-        var buffer: [128]u8 = undefined;
-        const stdout_file = std.Io.File.stdout();
-        var stdout = stdout_file.writer(init.io, &buffer);
-        try stdout.interface.writeAll("== zhttp ==\n");
+        outPrint("== zhttp ==\n", .{});
     }
 
     switch (cfg.mode) {

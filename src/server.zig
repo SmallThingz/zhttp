@@ -115,21 +115,17 @@ pub fn Server(comptime def: anytype) type {
         io: Io,
         gpa: Allocator,
         listener: std.Io.net.Server,
-        listener_open: std.atomic.Value(bool),
-        stop_requested: std.atomic.Value(bool),
-        active_conn_mu: std.atomic.Mutex = .unlocked,
-        active_conn_head: ?*ConnNode = null,
+        lifecycle: std.atomic.Value(Lifecycle),
         group: Io.Group = .init,
         ctx: if (Context == void) void else *Context,
         route_static_ctx: RouteStaticCtxTuple,
 
         const Self = @This();
         pub const config = Conf;
-        const ConnNode = struct {
-            prev: ?*ConnNode = null,
-            next: ?*ConnNode = null,
-            stream: std.Io.net.Stream,
-            linked: bool = false,
+        const Lifecycle = enum(u8) {
+            running,
+            stopping,
+            closed,
         };
         const Action = router.Action;
         const RouteFn = *const fn (
@@ -206,11 +202,17 @@ pub fn Server(comptime def: anytype) type {
         }
 
         /// Returns pointer to a route static context by compile-time index.
+        ///
+        /// This accessor is lock-free: synchronization is the caller's
+        /// responsibility.
         pub fn routeStatic(self: *Self, comptime route_index: usize) *RouteStaticType(route_index) {
             return &@field(self.route_static_ctx, routeFieldName(route_index));
         }
 
         /// Returns const pointer to a route static context by compile-time index.
+        ///
+        /// This accessor is lock-free: synchronization is the caller's
+        /// responsibility.
         pub fn routeStaticConst(self: *const Self, comptime route_index: usize) *const RouteStaticType(route_index) {
             return &@field(self.route_static_ctx, routeFieldName(route_index));
         }
@@ -239,39 +241,27 @@ pub fn Server(comptime def: anytype) type {
                 .io = io,
                 .gpa = gpa,
                 .listener = listener,
-                .listener_open = std.atomic.Value(bool).init(true),
-                .stop_requested = std.atomic.Value(bool).init(false),
+                .lifecycle = std.atomic.Value(Lifecycle).init(.running),
                 .ctx = ctx,
                 .route_static_ctx = route_static_ctx,
             };
         }
 
-        /// Stops accepting new connections and cancels active connection tasks.
+        /// Stops accepting new connections.
         pub fn stop(self: *Self) void {
-            if (self.listener_open.load(.acquire) and self.stop_requested.cmpxchgStrong(false, true, .acq_rel, .acquire) == null) {
-                var wake = std.Io.net.IpAddress.connect(&self.listener.socket.address, self.io, .{ .mode = .stream }) catch null;
-                if (wake) |*stream| stream.close(self.io);
+            if (self.lifecycle.cmpxchgStrong(.running, .stopping, .acq_rel, .acquire) != null) return;
 
-                // Let near-finished handlers unlink themselves before we force
-                // shutdown on remaining active sockets.
-                var waits: usize = 0;
-                while (waits < 200_000) : (waits += 1) {
-                    if (!self.hasActiveConnections()) break;
-                    std.Thread.yield() catch {};
-                }
-
-                if (self.hasActiveConnections()) self.shutdownActiveConnections();
-            }
+            var wake = std.Io.net.IpAddress.connect(&self.listener.socket.address, self.io, .{ .mode = .stream }) catch null;
+            if (wake) |*stream| stream.close(self.io);
         }
 
         /// Releases resources held by this value.
         pub fn deinit(self: *Self) void {
             self.stop();
             self.group.await(self.io) catch {};
-            std.debug.assert(self.active_conn_head == null);
-            if (self.listener_open.load(.acquire)) {
+            // std.Io Group/Server resources must be released exactly once.
+            if (self.lifecycle.swap(.closed, .acq_rel) != .closed) {
                 self.listener.deinit(self.io);
-                self.listener_open.store(false, .release);
             }
         }
 
@@ -286,7 +276,7 @@ pub fn Server(comptime def: anytype) type {
                     error.WouldBlock => return,
                     error.Unexpected => return,
                 };
-                if (self.stop_requested.load(.acquire)) {
+                if (self.lifecycle.load(.acquire) != .running) {
                     stream.close(self.io);
                     return;
                 }
@@ -353,10 +343,6 @@ pub fn Server(comptime def: anytype) type {
         fn handleConn(self: *Self, stream: std.Io.net.Stream) Io.Cancelable!void {
             if (Conf.tcp_nodelay) setTcpNoDelay(&stream);
 
-            var conn_node: ConnNode = .{ .stream = stream };
-            self.registerConn(&conn_node);
-            var conn_registered = true;
-            defer if (conn_registered) self.unregisterConn(&conn_node);
             var close_stream = true;
             defer if (close_stream) stream.close(self.io);
 
@@ -400,13 +386,11 @@ pub fn Server(comptime def: anytype) type {
                     } else notFoundAction()(self, &sr.interface, &sw.interface, &stream, line, a) catch |err| self.handleDispatchServerError(&sw.interface, err));
                 },
                 .close => {
-                    self.unregisterConn(&conn_node);
-                    conn_registered = false;
+                    return;
                 },
                 .upgraded => {
-                    self.unregisterConn(&conn_node);
-                    conn_registered = false;
                     close_stream = false;
+                    return;
                 },
             }
         }
@@ -465,56 +449,6 @@ pub fn Server(comptime def: anytype) type {
             }.call;
         }
 
-        fn registerConn(self: *Self, node: *ConnNode) void {
-            while (!self.active_conn_mu.tryLock()) std.atomic.spinLoopHint();
-            defer self.active_conn_mu.unlock();
-
-            node.prev = null;
-            node.next = self.active_conn_head;
-            if (self.active_conn_head) |head| head.prev = node;
-            self.active_conn_head = node;
-            node.linked = true;
-        }
-
-        fn unregisterConn(self: *Self, node: *ConnNode) void {
-            while (!self.active_conn_mu.tryLock()) std.atomic.spinLoopHint();
-            defer self.active_conn_mu.unlock();
-
-            if (!node.linked) return;
-
-            if (node.prev) |prev| {
-                prev.next = node.next;
-            } else {
-                std.debug.assert(self.active_conn_head == node);
-                self.active_conn_head = node.next;
-            }
-            if (node.next) |next| next.prev = node.prev;
-            node.prev = null;
-            node.next = null;
-            node.linked = false;
-        }
-
-        fn hasActiveConnections(self: *Self) bool {
-            while (!self.active_conn_mu.tryLock()) std.atomic.spinLoopHint();
-            defer self.active_conn_mu.unlock();
-            return self.active_conn_head != null;
-        }
-
-        fn shutdownActiveConnections(self: *Self) void {
-            while (!self.active_conn_mu.tryLock()) std.atomic.spinLoopHint();
-            defer self.active_conn_mu.unlock();
-
-            var node = self.active_conn_head;
-            self.active_conn_head = null;
-            while (node) |conn| {
-                const next = conn.next;
-                conn.prev = null;
-                conn.next = null;
-                conn.linked = false;
-                conn.stream.shutdown(self.io, .both) catch {};
-                node = next;
-            }
-        }
     };
 }
 
@@ -928,6 +862,28 @@ test "Server config: arena_reset_limit override is applied" {
     try std.testing.expectEqual(@as(usize, 12345), SrvT.config.arena_reset_limit);
 }
 
+test "Server stop: stop after deinit is a no-op" {
+    primeSocketBackend();
+    const io = std.testing.io;
+
+    const SrvT = Server(.{
+        .routes = .{
+            router.get("/", struct {
+                pub const Info: router.EndpointInfo = .{};
+                pub fn call(comptime rctx: ReqCtx, req: rctx.T()) !response.Res {
+                    _ = req;
+                    return response.Res.text(200, "ok");
+                }
+            }),
+        },
+    });
+
+    const addr0: Io.net.IpAddress = .{ .ip4 = Io.net.Ip4Address.loopback(0) };
+    var server = try SrvT.init(std.testing.allocator, io, addr0, {});
+    server.deinit();
+    server.stop();
+}
+
 test "Server stop: blocked accept loop shuts down cleanly" {
     primeSocketBackend();
     const io = std.testing.io;
@@ -982,7 +938,7 @@ test "Server stop: blocked accept loop shuts down cleanly" {
     }
 }
 
-test "Server stop: idle keepalive keep-alive connection shuts down cleanly" {
+test "Server stop: idle keepalive peer-close then shutdown is clean" {
     primeSocketBackend();
     const io = std.testing.io;
 
@@ -1025,8 +981,8 @@ test "Server stop: idle keepalive keep-alive connection shuts down cleanly" {
         try sr.interface.readSliceAll(got[0..]);
         try std.testing.expectEqualStrings(resp, got[0..]);
 
-        stopServerTest(io, &group, &server);
         stream.close(io);
+        stopServerTest(io, &group, &server);
     }
 }
 

@@ -368,10 +368,12 @@ pub fn RequestPWithPatternExt(
         }
 
         pub fn ctx(self: *Self) CtxPtr {
+            // Lock-free passthrough. Callers synchronize shared context access.
             return self._server.ctx;
         }
 
         pub fn ctxConst(self: *const Self) CtxPtr {
+            // Lock-free passthrough. Callers synchronize shared context access.
             return self._server.ctx;
         }
 
@@ -421,10 +423,12 @@ pub fn RequestPWithPatternExt(
         }
 
         pub fn mwStaticCtxMut(self: *Self) *MwStaticCtx {
+            // Lock-free passthrough. Callers synchronize shared context access.
             return self._server.routeStatic(route_index);
         }
 
         pub fn mwStaticCtxConst(self: *const Self) *const MwStaticCtx {
+            // Lock-free passthrough. Callers synchronize shared context access.
             return self._server.routeStaticConst(route_index);
         }
 
@@ -1929,14 +1933,22 @@ test "RequestPWithPatternExt: accessors, setters, middleware data, and typed cap
 
     try std.testing.expect(reqv.server() == &server);
     try std.testing.expect(reqv.gpa().ptr == gpa.ptr);
+    try std.testing.expect(reqv.ctx() == &app_ctx);
+    try std.testing.expect(reqv.ctxConst() == &app_ctx);
     try std.testing.expectEqual(@as(u8, 3), reqv.ctx().value);
     try std.testing.expectEqual(@as(u8, 3), reqv.ctxConst().value);
+    try std.testing.expect(reqv.server().routeStatic(0) == &server.route_static_ctx);
+    try std.testing.expect(reqv.server().routeStaticConst(0) == &server.route_static_ctx);
+    try std.testing.expect(reqv.mwStaticCtxMut() == &server.route_static_ctx);
+    try std.testing.expect(reqv.mwStaticCtxConst() == &server.route_static_ctx);
     reqv.mwCtxMut().auth.value = 6;
     try std.testing.expectEqual(@as(u8, 6), reqv.mwCtxConst().auth.value);
     reqv.middlewareData(.auth).value = 7;
     try std.testing.expectEqual(@as(u8, 7), reqv.middlewareDataConst("auth").value);
     reqv.mwStaticCtxMut().value = 10;
     try std.testing.expectEqual(@as(u8, 10), reqv.mwStaticCtxConst().value);
+    try std.testing.expect(reqv.middlewareStatic(.value) == &server.route_static_ctx.value);
+    try std.testing.expect(reqv.middlewareStaticConst("value") == &server.route_static_ctx.value);
     reqv.middlewareStatic(.value).* = 11;
     try std.testing.expectEqual(@as(u8, 11), reqv.middlewareStaticConst("value").*);
 

@@ -224,6 +224,7 @@ pub fn runCheckedEnv(
 }
 
 const CapturedRun = struct {
+    term: std.process.Child.Term,
     stdout: []u8,
     stderr: []u8,
 };
@@ -243,14 +244,46 @@ fn runCapturedEnv(
         .stdout_limit = .limited(2 * 1024 * 1024),
         .stderr_limit = .limited(2 * 1024 * 1024),
     });
-    switch (result.term) {
-        .exited => |code| if (code != 0) return error.ProcessFailed,
-        else => return error.ProcessFailed,
-    }
     return .{
+        .term = result.term,
         .stdout = result.stdout,
         .stderr = result.stderr,
     };
+}
+
+fn deinitCapturedRun(allocator: std.mem.Allocator, run: CapturedRun) void {
+    allocator.free(run.stdout);
+    allocator.free(run.stderr);
+}
+
+fn runCapturedBenchWithRetries(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    argv: []const []const u8,
+    cwd: ?[]const u8,
+    env_map: ?*const std.process.Environ.Map,
+) !CapturedRun {
+    const max_attempts: usize = 3;
+    var attempt: usize = 0;
+    while (attempt < max_attempts) : (attempt += 1) {
+        const captured = try runCapturedEnv(io, allocator, argv, cwd, env_map);
+        const ok = switch (captured.term) {
+            .exited => |code| code == 0,
+            else => false,
+        };
+        if (ok) return captured;
+
+        if (attempt + 1 == max_attempts) {
+            if (captured.stdout.len != 0) try writeStdout(io, captured.stdout);
+            if (captured.stderr.len != 0) try writeStderr(io, captured.stderr);
+            deinitCapturedRun(allocator, captured);
+            return error.ProcessFailed;
+        }
+
+        deinitCapturedRun(allocator, captured);
+        try std.Io.sleep(io, std.Io.Duration.fromMilliseconds(200), .awake);
+    }
+    return error.ProcessFailed;
 }
 
 fn writeStdout(io: std.Io, text: []const u8) !void {
@@ -554,7 +587,7 @@ pub fn runZhttpExternal(
     var env = try std.process.Environ.createMap(environ, allocator);
     defer env.deinit();
     try env.put("BENCH_LABEL", "zhttp ");
-    const captured = try runCapturedEnv(io, allocator, bench_args.items, root, &env);
+    const captured = try runCapturedBenchWithRetries(io, allocator, bench_args.items, root, &env);
     defer allocator.free(captured.stdout);
     defer allocator.free(captured.stderr);
     if (captured.stdout.len != 0) try writeStdout(io, captured.stdout);
@@ -1103,7 +1136,7 @@ pub fn runFaf(
     const fixed_arg = try std.fmt.bufPrint(&fixed_buf, "--fixed-bytes={d}", .{fixed_bytes});
     try bench_args.append(allocator, fixed_arg);
     try env.put("BENCH_LABEL", "faf ");
-    const captured = try runCapturedEnv(io, allocator, bench_args.items, root, &env);
+    const captured = try runCapturedBenchWithRetries(io, allocator, bench_args.items, root, &env);
     defer allocator.free(captured.stdout);
     defer allocator.free(captured.stderr);
     if (captured.stdout.len != 0) try writeStdout(io, captured.stdout);

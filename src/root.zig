@@ -112,7 +112,6 @@ fn fuzzBuiltin(
 
     const Wrapper = struct {
         var ctx: Ctx = undefined;
-        /// Implements test one c.
         pub fn testOneC() callconv(.c) void {
             var smith: Smith = .{ .in = null };
             testOne(ctx, &smith) catch {};
@@ -202,6 +201,7 @@ test "fuzz: propagates testOne error in non-fuzz mode" {
 test {
     _ = @import("parse.zig");
     _ = @import("request.zig");
+    _ = @import("req_ctx.zig");
     _ = @import("response.zig");
     _ = @import("route_decl.zig");
     _ = @import("upgrade.zig");
@@ -209,9 +209,12 @@ test {
     _ = @import("server.zig");
     _ = @import("middleware.zig");
     _ = @import("operations.zig");
+    _ = @import("operations/context.zig");
     _ = @import("operations/cors.zig");
     _ = @import("operations/static.zig");
+    _ = @import("util.zig");
     _ = @import("middleware/util.zig");
+    _ = @import("middleware/test_helpers.zig");
     _ = @import("middleware/compression.zig");
     _ = @import("middleware/cors.zig");
     _ = @import("middleware/etag.zig");

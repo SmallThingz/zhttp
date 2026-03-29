@@ -57,7 +57,6 @@ pub const ReqCtx = struct {
         return @field(Handler, "function");
     }
 
-    /// Implements with idx.
     pub fn withIdx(comptime self: Self, comptime next_idx: usize) Self {
         return .{
             .handler = self.handler,
@@ -120,102 +119,82 @@ pub const ReqCtx = struct {
 
             const ReqSelf = @This();
 
-            /// Implements raw.
             pub fn raw(self2: ReqSelf) *BaseReq {
                 return self2._base;
             }
 
-            /// Implements allocator.
             pub fn allocator(self2: ReqSelf) std.mem.Allocator {
                 return if (read_only) self2._base.allocator() else Ctx.call(std.mem.Allocator, "allocator", .{self2});
             }
 
-            /// Implements io.
             pub fn io(self2: ReqSelf) std.Io {
                 return if (read_only) self2._base.io() else Ctx.call(std.Io, "io", .{self2});
             }
 
-            /// Implements base.
             pub fn base(self2: ReqSelf) *const @TypeOf(self2._base.baseConst().*) {
                 return if (read_only) self2._base.baseConst() else Ctx.call(*const @TypeOf(self2._base.baseConst().*), "baseConst", .{self2});
             }
 
-            /// Implements base const.
             pub fn baseConst(self2: ReqSelf) *const @TypeOf(self2._base.baseConst().*) {
                 return if (read_only) self2._base.baseConst() else Ctx.call(*const @TypeOf(self2._base.baseConst().*), "baseConst", .{self2});
             }
 
-            /// Implements base mut.
             pub fn baseMut(self2: ReqSelf) *@TypeOf(self2._base.base().*) {
                 return if (read_only) self2._base.base() else Ctx.call(*@TypeOf(self2._base.base().*), "base", .{self2});
             }
 
-            /// Implements ctx.
             pub fn ctx(self2: ReqSelf) @TypeOf(self2._base.ctx()) {
                 return if (read_only) self2._base.ctx() else Ctx.call(@TypeOf(self2._base.ctx()), "ctx", .{self2});
             }
 
-            /// Implements ctx const.
             pub fn ctxConst(self2: ReqSelf) @TypeOf(self2._base.ctxConst()) {
                 return if (read_only) self2._base.ctxConst() else Ctx.call(@TypeOf(self2._base.ctxConst()), "ctxConst", .{self2});
             }
 
-            /// Implements mw ctx mut.
             pub fn mwCtxMut(self2: ReqSelf) *@TypeOf(self2._base.mwCtxMut().*) {
                 return if (read_only) self2._base.mwCtxMut() else Ctx.call(*@TypeOf(self2._base.mwCtxMut().*), "mwCtxMut", .{self2});
             }
 
-            /// Implements mw ctx const.
             pub fn mwCtxConst(self2: ReqSelf) *const @TypeOf(self2._base.mwCtxConst().*) {
                 return if (read_only) self2._base.mwCtxConst() else Ctx.call(*const @TypeOf(self2._base.mwCtxConst().*), "mwCtxConst", .{self2});
             }
 
-            /// Implements mw static ctx mut.
             pub fn mwStaticCtxMut(self2: ReqSelf) *@TypeOf(self2._base.mwStaticCtxMut().*) {
                 return if (read_only) self2._base.mwStaticCtxMut() else Ctx.call(*@TypeOf(self2._base.mwStaticCtxMut().*), "mwStaticCtxMut", .{self2});
             }
 
-            /// Implements mw static ctx const.
             pub fn mwStaticCtxConst(self2: ReqSelf) *const @TypeOf(self2._base.mwStaticCtxConst().*) {
                 return if (read_only) self2._base.mwStaticCtxConst() else Ctx.call(*const @TypeOf(self2._base.mwStaticCtxConst().*), "mwStaticCtxConst", .{self2});
             }
 
-            /// Implements keep alive.
             pub fn keepAlive(self2: ReqSelf) bool {
                 return if (read_only) self2._base.keepAlive() else Ctx.call(bool, "keepAlive", .{self2});
             }
 
-            /// Implements header.
             pub fn header(self2: ReqSelf, comptime field: @EnumLiteral()) @TypeOf(self2._base.header(field)) {
                 return if (read_only) self2._base.header(field) else Ctx.call(@TypeOf(self2._base.header(field)), "header", .{ self2, field });
             }
 
-            /// Implements query param.
             pub fn queryParam(self2: ReqSelf, comptime field: @EnumLiteral()) @TypeOf(self2._base.queryParam(field)) {
                 return if (read_only) self2._base.queryParam(field) else Ctx.call(@TypeOf(self2._base.queryParam(field)), "queryParam", .{ self2, field });
             }
 
-            /// Implements param value.
             pub fn paramValue(self2: ReqSelf, comptime field: @EnumLiteral()) @TypeOf(self2._base.paramValue(field)) {
                 return if (read_only) self2._base.paramValue(field) else Ctx.call(@TypeOf(self2._base.paramValue(field)), "paramValue", .{ self2, field });
             }
 
-            /// Implements middleware data.
             pub fn middlewareData(self2: ReqSelf, comptime name: anytype) @TypeOf(self2._base.middlewareData(name)) {
                 return if (read_only) self2._base.middlewareData(name) else Ctx.call(@TypeOf(self2._base.middlewareData(name)), "middlewareData", .{ self2, name });
             }
 
-            /// Implements middleware data const.
             pub fn middlewareDataConst(self2: ReqSelf, comptime name: anytype) @TypeOf(self2._base.middlewareDataConst(name)) {
                 return if (read_only) self2._base.middlewareDataConst(name) else Ctx.call(@TypeOf(self2._base.middlewareDataConst(name)), "middlewareDataConst", .{ self2, name });
             }
 
-            /// Implements middleware static.
             pub fn middlewareStatic(self2: ReqSelf, comptime name: anytype) @TypeOf(self2._base.middlewareStatic(name)) {
                 return if (read_only) self2._base.middlewareStatic(name) else Ctx.call(@TypeOf(self2._base.middlewareStatic(name)), "middlewareStatic", .{ self2, name });
             }
 
-            /// Implements middleware static const.
             pub fn middlewareStaticConst(self2: ReqSelf, comptime name: anytype) @TypeOf(self2._base.middlewareStaticConst(name)) {
                 return if (read_only) self2._base.middlewareStaticConst(name) else Ctx.call(@TypeOf(self2._base.middlewareStaticConst(name)), "middlewareStaticConst", .{ self2, name });
             }
@@ -232,7 +211,6 @@ pub const ReqCtx = struct {
                 return @as(*const Ctx.Server(), self2.server());
             }
 
-            /// Implements body all.
             pub fn bodyAll(self2: ReqSelf, max_bytes: usize) @TypeOf(self2._base.bodyAll(max_bytes)) {
                 return if (read_only) self2._base.bodyAll(max_bytes) else Ctx.call(@TypeOf(self2._base.bodyAll(max_bytes)), "bodyAll", .{ self2, max_bytes });
             }
@@ -250,7 +228,6 @@ pub const ReqCtx = struct {
                 return if (read_only) self2._base.bodyReader() else Ctx.call(@TypeOf(self2._base.bodyReader()), "bodyReader", .{self2});
             }
 
-            /// Implements discard unread body.
             pub fn discardUnreadBody(self2: ReqSelf) @TypeOf(self2._base.discardUnreadBody()) {
                 return if (read_only) self2._base.discardUnreadBody() else Ctx.call(@TypeOf(self2._base.discardUnreadBody()), "discardUnreadBody", .{self2});
             }

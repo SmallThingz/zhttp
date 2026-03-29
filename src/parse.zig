@@ -22,7 +22,6 @@ fn isStructType(comptime T: type) bool {
     };
 }
 
-/// Implements struct fields.
 pub fn structFields(comptime T: type) []const std.builtin.Type.StructField {
     const info = @typeInfo(T);
     return switch (info) {
@@ -31,7 +30,6 @@ pub fn structFields(comptime T: type) []const std.builtin.Type.StructField {
     };
 }
 
-/// Implements empty struct.
 pub fn emptyStruct(comptime T: type) T {
     var out: T = undefined;
     const fields = comptime structFields(T);
@@ -43,7 +41,6 @@ pub fn emptyStruct(comptime T: type) T {
     return out;
 }
 
-/// Implements destroy struct.
 pub fn destroyStruct(value: anytype, allocator: Allocator) void {
     const T = @TypeOf(value.*);
     const fields = comptime structFields(T);
@@ -54,7 +51,6 @@ pub fn destroyStruct(value: anytype, allocator: Allocator) void {
     }
 }
 
-/// Implements done parsing struct.
 pub fn doneParsingStruct(value: anytype, present: []const bool) !void {
     const T = @TypeOf(value.*);
     const fields = comptime structFields(T);
@@ -97,7 +93,6 @@ fn headerFieldNamesClash(a: []const u8, b: []const u8) bool {
 
 pub const LookupKind = enum { header, query };
 
-/// Implements lookup.
 pub fn Lookup(comptime T: type, comptime kind: LookupKind) type {
     if (!isStructType(T)) @compileError("expected struct type, got " ++ @typeName(T));
     const fields = structFields(T);
@@ -160,7 +155,6 @@ pub fn Lookup(comptime T: type, comptime kind: LookupKind) type {
         pub const hash_list: [fields.len]u64 = hashes;
         pub const table_list: [table_cap]u16 = table;
 
-        /// Implements find.
         pub fn find(name: []const u8) ?u16 {
             if (count == 0) return null;
             const h = switch (kind) {
@@ -189,7 +183,6 @@ pub fn Lookup(comptime T: type, comptime kind: LookupKind) type {
     };
 }
 
-/// Implements merge structs.
 pub fn mergeStructs(comptime A: type, comptime B: type) type {
     if (!isStructType(A) or !isStructType(B)) @compileError("mergeStructs expects struct types");
     const fa = structFields(A);
@@ -253,7 +246,6 @@ pub fn mergeStructs(comptime A: type, comptime B: type) type {
     return @Struct(.auto, null, names[0..], &types, &attrs);
 }
 
-/// Implements merge header structs.
 pub fn mergeHeaderStructs(comptime A: type, comptime B: type) type {
     if (!isStructType(A) or !isStructType(B)) @compileError("mergeHeaderStructs expects struct types");
     const fa = structFields(A);
@@ -319,7 +311,6 @@ pub fn mergeHeaderStructs(comptime A: type, comptime B: type) type {
     return @Struct(.auto, null, merged.names[0..], &merged.types, &merged.attrs);
 }
 
-/// Implements merge structs many.
 pub fn mergeStructsMany(comptime types_tuple: anytype) type {
     const Ti = @TypeOf(types_tuple);
     const info = @typeInfo(Ti);
@@ -344,7 +335,6 @@ pub const String = struct {
 
     pub const empty: String = .{ .value = "", .owned = null };
 
-    /// Implements parse.
     pub fn parse(self: *String, allocator: Allocator, raw: []const u8) !void {
         const dup = try allocator.dupe(u8, raw);
         if (self.owned) |old| allocator.free(old);
@@ -352,24 +342,20 @@ pub const String = struct {
         self.owned = dup;
     }
 
-    /// Implements done parsing.
     pub fn doneParsing(_: *String, was_present: bool) !void {
         if (!was_present) return error.MissingRequired;
     }
 
-    /// Implements get.
     pub fn get(self: *const String) []const u8 {
         return self.value;
     }
 
-    /// Implements destroy.
     pub fn destroy(self: *String, allocator: Allocator) void {
         if (self.owned) |buf| allocator.free(buf);
         self.* = .{ .value = "", .owned = null };
     }
 };
 
-/// Implements optional.
 pub fn Optional(comptime P: type) type {
     return struct {
         present: bool = false,
@@ -377,23 +363,19 @@ pub fn Optional(comptime P: type) type {
 
         pub const empty: @This() = .{};
 
-        /// Implements parse.
         pub fn parse(self: *@This(), allocator: Allocator, raw: []const u8) !void {
             try self.inner.parse(allocator, raw);
         }
 
-        /// Implements done parsing.
         pub fn doneParsing(self: *@This(), was_present: bool) !void {
             self.present = was_present;
             if (was_present) try self.inner.doneParsing(true);
         }
 
-        /// Implements get.
         pub fn get(self: *const @This()) ?ParserValueType(P) {
             return if (!self.present) null else self.inner.get();
         }
 
-        /// Implements destroy.
         pub fn destroy(self: *@This(), allocator: Allocator) void {
             self.present = false;
             self.inner.destroy(allocator);
@@ -401,56 +383,46 @@ pub fn Optional(comptime P: type) type {
     };
 }
 
-/// Implements int.
 pub fn Int(comptime T: type) type {
     return struct {
         value: T = undefined,
         pub const empty: @This() = .{};
 
-        /// Implements parse.
         pub fn parse(self: *@This(), _: Allocator, raw: []const u8) !void {
             self.value = std.fmt.parseInt(T, raw, 10) catch return error.BadValue;
         }
 
-        /// Implements done parsing.
         pub fn doneParsing(_: *@This(), was_present: bool) !void {
             if (!was_present) return error.MissingRequired;
         }
 
-        /// Implements get.
         pub fn get(self: *const @This()) T {
             return self.value;
         }
 
-        /// Implements destroy.
         pub fn destroy(self: *@This(), _: Allocator) void {
             self.* = .{};
         }
     };
 }
 
-/// Implements float.
 pub fn Float(comptime T: type) type {
     return struct {
         value: T = undefined,
         pub const empty: @This() = .{};
 
-        /// Implements parse.
         pub fn parse(self: *@This(), _: Allocator, raw: []const u8) !void {
             self.value = std.fmt.parseFloat(T, raw) catch return error.BadValue;
         }
 
-        /// Implements done parsing.
         pub fn doneParsing(_: *@This(), was_present: bool) !void {
             if (!was_present) return error.MissingRequired;
         }
 
-        /// Implements get.
         pub fn get(self: *const @This()) T {
             return self.value;
         }
 
-        /// Implements destroy.
         pub fn destroy(self: *@This(), _: Allocator) void {
             self.* = .{};
         }
@@ -461,7 +433,6 @@ pub const Bool = struct {
     value: bool = undefined,
     pub const empty: Bool = .{};
 
-    /// Implements parse.
     pub fn parse(self: *Bool, _: Allocator, raw: []const u8) !void {
         self.value = try switch (raw.len) {
             1 => switch (raw[0]) {
@@ -475,57 +446,47 @@ pub const Bool = struct {
         };
     }
 
-    /// Implements done parsing.
     pub fn doneParsing(_: *Bool, was_present: bool) !void {
         if (!was_present) return error.MissingRequired;
     }
 
-    /// Implements get.
     pub fn get(self: *const Bool) bool {
         return self.value;
     }
 
-    /// Implements destroy.
     pub fn destroy(self: *Bool, _: Allocator) void {
         self.* = .{};
     }
 };
 
-/// Implements enum.
 pub fn Enum(comptime E: type) type {
     return struct {
         value: E = undefined,
         pub const empty: @This() = .{};
 
-        /// Implements parse.
         pub fn parse(self: *@This(), _: Allocator, raw: []const u8) !void {
             self.value = std.meta.stringToEnum(E, raw) orelse return error.BadValue;
         }
 
-        /// Implements done parsing.
         pub fn doneParsing(_: *@This(), was_present: bool) !void {
             if (!was_present) return error.MissingRequired;
         }
 
-        /// Implements get.
         pub fn get(self: *const @This()) E {
             return self.value;
         }
 
-        /// Implements destroy.
         pub fn destroy(self: *@This(), _: Allocator) void {
             self.* = undefined;
         }
     };
 }
 
-/// Implements slice of.
 pub fn SliceOf(comptime P: type) type {
     return struct {
         list: std.ArrayListUnmanaged(P) = .empty,
         pub const empty: @This() = .{};
 
-        /// Implements parse.
         pub fn parse(self: *@This(), allocator: Allocator, raw: []const u8) !void {
             var tmp: P = P.empty;
             try tmp.parse(allocator, raw);
@@ -533,18 +494,15 @@ pub fn SliceOf(comptime P: type) type {
             try self.list.append(allocator, tmp);
         }
 
-        /// Implements done parsing.
         pub fn doneParsing(self: *@This(), was_present: bool) !void {
             _ = self;
             _ = was_present;
         }
 
-        /// Implements get.
         pub fn get(self: *const @This()) []const P {
             return self.list.items;
         }
 
-        /// Implements destroy.
         pub fn destroy(self: *@This(), allocator: Allocator) void {
             for (self.list.items) |*v| v.destroy(allocator);
             self.list.deinit(allocator);

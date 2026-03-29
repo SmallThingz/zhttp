@@ -101,3 +101,63 @@ test "etag: check_then_add skips if already set" {
     try std.testing.expectEqualStrings("\"user\"", res.headers[0].value);
     try std.testing.expectEqualStrings("hello", res.body);
 }
+
+test "etag: weak mode emits weak tags and empty bodies stay untouched" {
+    const WeakMw = Etag(.{ .weak = true });
+    const ReqT = @import("../request.zig").Request(
+        struct { if_none_match: parse.Optional(parse.String) },
+        struct {},
+        &.{},
+        struct {},
+    );
+
+    const WeakNext = struct {
+        pub const function = call;
+        pub fn call(comptime rctx: ReqCtx, _: rctx.T()) !Res {
+            return .{
+                .status = .ok,
+                .headers = &.{},
+                .body = "hello",
+            };
+        }
+    };
+
+    const EmptyNext = struct {
+        pub const function = call;
+        pub fn call(comptime rctx: ReqCtx, _: rctx.T()) !Res {
+            return .{
+                .status = .ok,
+                .headers = &.{},
+                .body = "",
+            };
+        }
+    };
+
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    const path_buf = "/".*;
+    const query_buf: [0]u8 = .{};
+    const line: @import("../request.zig").RequestLine = .{
+        .method = "GET",
+        .version = .http11,
+        .path = @constCast(path_buf[0..]),
+        .query = @constCast(query_buf[0..]),
+    };
+
+    {
+        var reqv = ReqT.init(a, std.testing.io, line, .{});
+        defer reqv.deinit(a);
+        const res = try test_helpers.runMiddlewareTest(WeakMw, ReqT, WeakNext, &reqv, line.method);
+        try std.testing.expectEqual(@as(usize, 1), res.headers.len);
+        try std.testing.expect(std.mem.startsWith(u8, res.headers[0].value, "W/\""));
+    }
+
+    {
+        var reqv = ReqT.init(a, std.testing.io, line, .{});
+        defer reqv.deinit(a);
+        const res = try test_helpers.runMiddlewareTest(WeakMw, ReqT, EmptyNext, &reqv, line.method);
+        try std.testing.expectEqual(@as(usize, 0), res.headers.len);
+        try std.testing.expectEqualStrings("", res.body);
+    }
+}

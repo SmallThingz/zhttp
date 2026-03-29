@@ -328,7 +328,6 @@ pub fn RequestPWithPatternExt(
 
         pub const ParamNames: []const []const u8 = param_names;
 
-        /// Implements init with server.
         pub fn initWithServer(
             init_arena: Allocator,
             line: RequestLine,
@@ -347,7 +346,6 @@ pub fn RequestPWithPatternExt(
             };
         }
 
-        /// Implements init with ctx.
         pub fn initWithCtx(
             init_arena: Allocator,
             init_io: Io,
@@ -369,22 +367,14 @@ pub fn RequestPWithPatternExt(
             return initWithCtx(init_arena, init_io, line, mw_ctx, {});
         }
 
-        /// Implements ctx.
         pub fn ctx(self: *Self) CtxPtr {
             return self._server.ctx;
         }
 
-        /// Implements ctx const.
         pub fn ctxConst(self: *const Self) CtxPtr {
             return self._server.ctx;
         }
 
-        /// Implements set ctx.
-        pub fn setCtx(self: *Self, value: CtxPtr) void {
-            self._server.ctx = value;
-        }
-
-        /// Implements allocator.
         pub fn allocator(self: *const Self) Allocator {
             return self._base.arena;
         }
@@ -397,59 +387,24 @@ pub fn RequestPWithPatternExt(
             return self._server.gpa;
         }
 
-        /// Implements base.
         pub fn base(self: *Self) *Base {
             return &self._base;
         }
 
-        /// Implements base const.
         pub fn baseConst(self: *const Self) *const Base {
             return &self._base;
         }
 
-        /// Implements set base.
-        pub fn setBase(self: *Self, value: Base) void {
-            self._base = value;
-        }
-
-        /// Implements io.
         pub fn io(self: *const Self) Io {
             return self._server.io;
         }
 
-        /// Implements set io.
-        pub fn setIo(self: *Self, value: Io) void {
-            self._server.io = value;
-        }
-
-        /// Implements arena.
-        pub fn arena(self: *const Self) Allocator {
-            return self._base.arena;
-        }
-
-        /// Implements set arena.
-        pub fn setArena(self: *Self, value: Allocator) void {
-            self._base.arena = value;
-        }
-
-        /// Implements reader.
         pub fn reader(self: *const Self) *Io.Reader {
             return self._base.reader;
         }
 
-        /// Implements set reader.
-        pub fn setReader(self: *Self, value: *Io.Reader) void {
-            self._base.reader = value;
-        }
-
-        /// Implements writer.
         pub fn writer(self: *const Self) *Io.Writer {
             return self._base.writer;
-        }
-
-        /// Implements set writer.
-        pub fn setWriter(self: *Self, value: *Io.Writer) void {
-            self._base.writer = value;
         }
 
         /// Returns the owning server pointer for this request.
@@ -457,79 +412,44 @@ pub fn RequestPWithPatternExt(
             return self._server;
         }
 
-        /// Sets the owning server pointer for this request.
-        pub fn setServer(self: *Self, value: ServerPtr) void {
-            self._server = value;
-        }
-
-        /// Implements mw ctx mut.
         pub fn mwCtxMut(self: *Self) *MwCtx {
             return &self._mw_ctx;
         }
 
-        /// Implements mw ctx const.
         pub fn mwCtxConst(self: *const Self) *const MwCtx {
             return &self._mw_ctx;
         }
 
-        /// Implements set mw ctx.
-        pub fn setMwCtx(self: *Self, value: MwCtx) void {
-            self._mw_ctx = value;
-        }
-
-        /// Implements mw static ctx mut.
         pub fn mwStaticCtxMut(self: *Self) *MwStaticCtx {
             return self._server.routeStatic(route_index);
         }
 
-        /// Implements mw static ctx const.
         pub fn mwStaticCtxConst(self: *const Self) *const MwStaticCtx {
             return self._server.routeStaticConst(route_index);
         }
 
-        /// Implements headers mut.
         pub fn headersMut(self: *Self) *Headers {
             return &self._headers;
         }
 
-        /// Implements headers const.
         pub fn headersConst(self: *const Self) *const Headers {
             return &self._headers;
         }
 
-        /// Implements set headers.
-        pub fn setHeaders(self: *Self, value: Headers) void {
-            self._headers = value;
-        }
-
-        /// Implements query mut.
         pub fn queryMut(self: *Self) *Query {
             return &self._query;
         }
 
-        /// Implements query const.
         pub fn queryConst(self: *const Self) *const Query {
             return &self._query;
         }
 
-        /// Implements set query.
-        pub fn setQuery(self: *Self, value: Query) void {
-            self._query = value;
-        }
-
-        /// Implements params mut.
         pub fn paramsMut(self: *Self) *ParamsEffective {
             return &self._params;
         }
 
-        /// Implements params const.
         pub fn paramsConst(self: *const Self) *const ParamsEffective {
             return &self._params;
-        }
-
-        /// Implements set params.
-        pub fn setParams(self: *Self, value: ParamsEffective) void {
-            self._params = value;
         }
 
         fn framingForContentLength(len: usize) BodyFraming {
@@ -617,12 +537,10 @@ pub fn RequestPWithPatternExt(
             return &@field(self.mwStaticCtxConst().*, middlewareContextFieldName(MwStaticCtx, name));
         }
 
-        /// Implements keep alive.
         pub fn keepAlive(self: *const Self) bool {
             return self._base.version == .http11 and !self._base.connection_close;
         }
 
-        /// Implements parse params.
         pub fn parseParams(self: *Self, a: Allocator, params_in: []const []u8) !void {
             if (param_names.len == 0) return;
             std.debug.assert(params_in.len == param_names.len);
@@ -635,7 +553,6 @@ pub fn RequestPWithPatternExt(
             try parse.doneParsingStruct(&self._params, &([_]bool{true} ** param_names.len));
         }
 
-        /// Implements parse query.
         pub fn parseQuery(self: *Self, a: Allocator, query_raw: []u8) !void {
             if (QueryLookup.count == 0) return;
             // reset captures each request
@@ -670,7 +587,6 @@ pub fn RequestPWithPatternExt(
             try parse.doneParsingStruct(&self._query, present[0..]);
         }
 
-        /// Implements parse headers.
         pub fn parseHeaders(self: *Self, a: Allocator, r: *Io.Reader, max_header_bytes: usize) ParseHeadersError!void {
             return self.parseHeadersWithLimits(a, r, max_header_bytes, max_header_bytes);
         }
@@ -1063,7 +979,6 @@ fn syntheticPatternFromParamNames(comptime param_names: []const []const u8) []co
     return out;
 }
 
-/// Implements request.
 pub fn Request(comptime Headers: type, comptime Query: type, comptime param_names: []const []const u8, comptime MwCtx: type) type {
     const route_pattern = syntheticPatternFromParamNames(param_names);
     const rd: route_decl.RouteDecl = .{
@@ -1518,7 +1433,7 @@ test "bodyAll: does not emit interim 100-continue by itself" {
     try reqv.parseHeaders(gpa, &r, 8 * 1024);
     var out: [128]u8 = undefined;
     var w = Io.Writer.fixed(out[0..]);
-    reqv.setWriter(&w);
+    reqv.base().writer = &w;
 
     const body = try reqv.bodyAll(16);
     try std.testing.expectEqualStrings("hello", body);
@@ -1562,7 +1477,7 @@ test "discardUnreadBody: does not emit interim 100-continue by itself" {
     try reqv.parseHeaders(gpa, &r, 8 * 1024);
     var out: [128]u8 = undefined;
     var w = Io.Writer.fixed(out[0..]);
-    reqv.setWriter(&w);
+    reqv.base().writer = &w;
 
     try reqv.discardUnreadBody();
     try std.testing.expectEqual(@as(usize, 0), w.end);
@@ -1980,8 +1895,8 @@ test "RequestPWithPatternExt: accessors, setters, middleware data, and typed cap
     var r = Io.Reader.fixed("Content-Length: 5\r\n\r\nhello");
     var out_buf: [64]u8 = undefined;
     var w = Io.Writer.fixed(out_buf[0..]);
-    reqv.setReader(&r);
-    reqv.setWriter(&w);
+    reqv.base().reader = &r;
+    reqv.base().writer = &w;
     try std.testing.expect(reqv.reader() == &r);
     try std.testing.expect(reqv.writer() == &w);
     try std.testing.expectEqual(Version.http11, reqv.baseConst().version);
@@ -1994,17 +1909,16 @@ test "RequestPWithPatternExt: accessors, setters, middleware data, and typed cap
         .writer = &w,
         .version = .http11,
     };
-    reqv.setBase(alt_base);
-    reqv.setArena(gpa);
+    reqv._base = alt_base;
+    reqv._base.arena = gpa;
     try std.testing.expectEqual(Version.http11, reqv.baseConst().version);
     _ = reqv.allocator();
-    _ = reqv.arena();
     _ = reqv.io();
 
     var app_ctx2: AppCtx = .{ .value = 8 };
-    reqv.setCtx(&app_ctx2);
+    reqv._server.ctx = &app_ctx2;
     try std.testing.expectEqual(@as(u8, 8), reqv.ctx().value);
-    reqv.setMwCtx(.{ .auth = .{ .value = 12 } });
+    reqv._mw_ctx = .{ .auth = .{ .value = 12 } };
     try std.testing.expectEqual(@as(u8, 12), reqv.mwCtxConst().auth.value);
     reqv.headersMut().content_length.present = false;
     reqv.queryMut().page.present = false;
@@ -2026,9 +1940,9 @@ test "RequestPWithPatternExt: accessors, setters, middleware data, and typed cap
     const headers_copy = reqv.headersConst().*;
     const query_copy = reqv.queryConst().*;
     const params_copy = reqv.paramsConst().*;
-    reqv.setHeaders(headers_copy);
-    reqv.setQuery(query_copy);
-    reqv.setParams(params_copy);
+    reqv._headers = headers_copy;
+    reqv._query = query_copy;
+    reqv._params = params_copy;
     try std.testing.expectEqual(@as(usize, 5), reqv.header(.content_length).?);
     try std.testing.expectEqual(@as(u16, 42), reqv.queryParam(.page).?);
     try std.testing.expectEqual(@as(u32, 7), reqv.paramValue(.id));
@@ -2037,10 +1951,10 @@ test "RequestPWithPatternExt: accessors, setters, middleware data, and typed cap
     try std.testing.expectEqualStrings("hello", body);
 
     var server2: Server = .{ .io = std.testing.io, .gpa = gpa, .ctx = &app_ctx2 };
-    reqv.setServer(&server2);
+    reqv._server = &server2;
     try std.testing.expect(reqv.server() == &server2);
     try std.testing.expect(reqv.gpa().ptr == gpa.ptr);
-    reqv.setIo(std.testing.io);
+    reqv._server.io = std.testing.io;
 
     var reqv2 = ReqT.initWithCtx(gpa, std.testing.io, line, .{ .auth = .{ .value = 2 } }, &app_ctx2);
     defer reqv2.deinit(gpa);

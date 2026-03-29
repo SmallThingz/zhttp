@@ -185,6 +185,10 @@ Fairness notes: both targets use the same benchmark client settings (host/path/c
 
 ```bash
 zig build test
+zig build test-flake -- --iterations=100 --jobs=1
+zig build test-flake -- --iterations=200 --jobs=1 --retries=5 --test-filter="Server stop"
 zig build examples
 zig build examples-check
 ```
+
+`test-flake` sweeps deterministic seeds, extracts failing test names, and prints both full-suite and single-test repro commands. It only flags a seed when reruns reproduce the failure. Add `--verbose` to dump full failing logs.

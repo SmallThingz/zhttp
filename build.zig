@@ -58,10 +58,13 @@ fn discoverExamples(b: *std.Build, allocator: std.mem.Allocator) ![]Example {
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
+    const sanitize_thread = b.option(bool, "sanitize_thread", "Enable ThreadSanitizer instrumentation") orelse false;
     const static_libc = b.option(bool, "static_libc", "Link libc statically (default: true)") orelse true;
+    const effective_static_libc = if (sanitize_thread) false else static_libc;
     const mod = b.addModule("zhttp", .{
         .root_source_file = b.path("src/root.zig"),
         .target = target,
+        .sanitize_thread = sanitize_thread,
     });
     const zws_dep = b.dependency("zwebsocket", .{
         .target = target,
@@ -70,12 +73,12 @@ pub fn build(b: *std.Build) void {
     const zstd_dep = b.dependency("libzstd", .{
         .target = target,
         .optimize = optimize,
-        .static_libc = static_libc,
+        .static_libc = effective_static_libc,
     });
     const brotli_dep = b.dependency("libbrotli", .{
         .target = target,
         .optimize = optimize,
-        .static_libc = static_libc,
+        .static_libc = effective_static_libc,
     });
 
     const zstd_mod = zstd_dep.module("libzstd");
@@ -89,6 +92,7 @@ pub fn build(b: *std.Build) void {
         .root_module = b.createModule(.{
             .root_source_file = b.path("test_root.zig"),
             .target = target,
+            .sanitize_thread = sanitize_thread,
         }),
         .test_runner = .{ .path = b.path("test_runner.zig"), .mode = .simple },
     });
@@ -96,12 +100,29 @@ pub fn build(b: *std.Build) void {
     mod_tests.root_module.addImport("libzstd", zstd_mod);
     mod_tests.root_module.addImport("libbrotli", brotli_mod);
     const run_mod_tests = b.addRunArtifact(mod_tests);
-    run_mod_tests.addArgs(&.{ "--exclude-filter", "loopback listen preflight" });
+    run_mod_tests.addArgs(&.{"--zhttp-skip=loopback listen preflight"});
     if (b.args) |args| {
         run_mod_tests.addArgs(args);
     }
     const test_step = b.step("test", "Run tests");
     test_step.dependOn(&run_mod_tests.step);
+
+    const test_flake_exe = b.addExecutable(.{
+        .name = "zhttp-test-flake",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("benchmark/run_test_flake.zig"),
+            .target = target,
+            .optimize = optimize,
+            .sanitize_thread = sanitize_thread,
+        }),
+    });
+    const test_flake_run = b.addRunArtifact(test_flake_exe);
+    test_flake_run.addPrefixedArtifactArg("--test-bin=", mod_tests);
+    if (b.args) |args| {
+        test_flake_run.addArgs(args);
+    }
+    const test_flake_step = b.step("test-flake", "Hunt flaky tests deterministically with seeded runs");
+    test_flake_step.dependOn(&test_flake_run.step);
 
     const bench_exe = b.addExecutable(.{
         .name = "zhttp-bench",
@@ -109,6 +130,7 @@ pub fn build(b: *std.Build) void {
             .root_source_file = b.path("benchmark/bench.zig"),
             .target = target,
             .optimize = optimize,
+            .sanitize_thread = sanitize_thread,
             .imports = &.{
                 .{ .name = "zhttp", .module = mod },
             },
@@ -122,6 +144,7 @@ pub fn build(b: *std.Build) void {
             .root_source_file = b.path("benchmark/run_zhttp_external.zig"),
             .target = target,
             .optimize = optimize,
+            .sanitize_thread = sanitize_thread,
         }),
     });
     const bench_zhttp_run = b.addRunArtifact(bench_zhttp_exe);
@@ -137,6 +160,7 @@ pub fn build(b: *std.Build) void {
             .root_source_file = b.path("benchmark/run_compare.zig"),
             .target = target,
             .optimize = optimize,
+            .sanitize_thread = sanitize_thread,
         }),
     });
     const bench_compare_run = b.addRunArtifact(bench_compare_exe);
@@ -162,6 +186,8 @@ pub fn build(b: *std.Build) void {
         b.allocator.free(examples);
     }
 
+    var prev_examples_check_step: ?*std.Build.Step = null;
+
     for (examples) |ex| {
         const exe = b.addExecutable(.{
             .name = b.fmt("zhttp-example-{s}", .{ex.name}),
@@ -169,6 +195,7 @@ pub fn build(b: *std.Build) void {
                 .root_source_file = b.path(ex.path),
                 .target = target,
                 .optimize = optimize,
+                .sanitize_thread = sanitize_thread,
             }),
         });
         exe.root_module.addImport("zhttp", mod);
@@ -179,6 +206,10 @@ pub fn build(b: *std.Build) void {
 
         const run = b.addRunArtifact(exe);
         run.addArg("--smoke");
+        if (prev_examples_check_step) |prev| {
+            run.step.dependOn(prev);
+        }
         examples_check_step.dependOn(&run.step);
+        prev_examples_check_step = &run.step;
     }
 }

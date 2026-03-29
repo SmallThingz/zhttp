@@ -59,7 +59,6 @@ fn endpointType(comptime endpoint: type) struct { endpoint: type, info: Endpoint
     };
 }
 
-/// Implements route.
 pub fn route(
     /// HTTP method enum literal, e.g. `.GET`.
     comptime method_lit: @EnumLiteral(),
@@ -80,31 +79,24 @@ pub fn route(
     };
 }
 
-/// Implements get.
 pub fn get(comptime pattern: []const u8, comptime endpoint: type) RouteDecl {
     return route(.GET, pattern, endpoint);
 }
-/// Implements post.
 pub fn post(comptime pattern: []const u8, comptime endpoint: type) RouteDecl {
     return route(.POST, pattern, endpoint);
 }
-/// Implements put.
 pub fn put(comptime pattern: []const u8, comptime endpoint: type) RouteDecl {
     return route(.PUT, pattern, endpoint);
 }
-/// Implements delete.
 pub fn delete(comptime pattern: []const u8, comptime endpoint: type) RouteDecl {
     return route(.DELETE, pattern, endpoint);
 }
-/// Implements patch.
 pub fn patch(comptime pattern: []const u8, comptime endpoint: type) RouteDecl {
     return route(.PATCH, pattern, endpoint);
 }
-/// Implements head.
 pub fn head(comptime pattern: []const u8, comptime endpoint: type) RouteDecl {
     return route(.HEAD, pattern, endpoint);
 }
-/// Implements options.
 pub fn options(comptime pattern: []const u8, comptime endpoint: type) RouteDecl {
     return route(.OPTIONS, pattern, endpoint);
 }
@@ -376,7 +368,6 @@ fn ExactMap(comptime entries: anytype, comptime n: usize) type {
     };
 }
 
-/// Implements compiled.
 pub fn Compiled(
     comptime _: type,
     comptime routes: anytype,
@@ -676,7 +667,6 @@ pub fn Compiled(
             return null;
         }
 
-        /// Implements match.
         pub fn match(method_token: []const u8, path: []u8) ?u16 {
             if (single_exact) {
                 if (eqLiteral(method_token, "HEAD")) {
@@ -768,11 +758,15 @@ pub fn Compiled(
             if (res.status != .switching_protocols) return null;
             try response.writeUpgrade(w, res);
             if (w.buffered().len != 0) try w.flush();
-            callUpgradeHandler(Endpoint, server, stream, r, w, line, res);
+            // After `101`, protocol handlers should not inherit the HTTP
+            // response buffer because websocket control frames must be
+            // write-visible immediately.
+            var upgrade_write_buf: [0]u8 = undefined;
+            var upgrade_w = stream.writer(server.io, &upgrade_write_buf);
+            callUpgradeHandler(Endpoint, server, stream, r, &upgrade_w.interface, line, res);
             return .upgraded;
         }
 
-        /// Implements dispatch.
         pub fn dispatch(
             server: anytype,
             allocator: Allocator,
@@ -825,8 +819,8 @@ pub fn Compiled(
                         ._server_type = @TypeOf(server.*),
                     };
                     var reqv = ReqT.initWithServer(allocator, line, mw_ctx, server);
-                    reqv.setReader(r);
-                    reqv.setWriter(w);
+                    reqv.base().reader = r;
+                    reqv.base().writer = w;
                     defer reqv.deinit(allocator);
                     errdefer reqv.discardUnreadBody() catch {};
                     if (p.param_names.len != 0) {
@@ -1885,7 +1879,6 @@ test "dispatch: handler error uses callback" {
             return &self.route_static_ctx;
         }
 
-        /// Implements handle handler error.
         pub fn handleHandlerError(self: *@This(), _: *Io.Writer, comptime _: type, _: anytype) Action {
             self.called.* = true;
             return .close;
@@ -2125,7 +2118,6 @@ test "dispatch: endpoint upgrade handles 101 and returns upgraded action" {
             return &self.route_static_ctx;
         }
 
-        /// Implements handle handler error.
         pub fn handleHandlerError(_: *@This(), _: *Io.Writer, comptime _: type, _: anytype) Action {
             unreachable;
         }

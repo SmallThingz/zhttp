@@ -1,6 +1,11 @@
 const std = @import("std");
 const builtin = @import("builtin");
 
+pub const std_options: std.Options = .{
+    .enable_segfault_handler = true,
+    .signal_stack_size = 64 * 1024,
+};
+
 pub const panic = std.debug.FullPanic(panicHandler);
 
 const default_job_cap: usize = 16;
@@ -84,6 +89,8 @@ fn fuzzBuiltin(
 
 /// Starts this executable.
 pub fn main(init: std.process.Init) !void {
+    std.debug.attachSegfaultHandler();
+
     const threaded = std.Io.Threaded.init(init.gpa, .{
         .argv0 = .init(init.minimal.args),
         .environ = init.minimal.environ,
@@ -111,13 +118,23 @@ pub fn main(init: std.process.Init) !void {
 
     while (arg_it.next()) |arg_z| {
         const arg = arg_z[0..arg_z.len];
+        if (std.mem.startsWith(u8, arg, "--zhttp-match=")) {
+            const idx = std.mem.indexOfScalar(u8, arg, '=') orelse unreachable;
+            filter = try init.gpa.dupe(u8, arg[idx + 1 ..]);
+            continue;
+        }
+        if (std.mem.startsWith(u8, arg, "--zhttp-skip=")) {
+            const idx = std.mem.indexOfScalar(u8, arg, '=') orelse unreachable;
+            try exclude_filters.append(init.gpa, try init.gpa.dupe(u8, arg[idx + 1 ..]));
+            continue;
+        }
         if (std.mem.eql(u8, arg, "--zhttp-run-test")) {
             const name_z = arg_it.next() orelse return error.MissingTestName;
             child_test_name = try init.gpa.dupe(u8, name_z[0..name_z.len]);
-        } else if (std.mem.eql(u8, arg, "--test-filter")) {
+        } else if (std.mem.eql(u8, arg, "--zhttp-match")) {
             const f_z = arg_it.next() orelse return error.MissingFilter;
             filter = try init.gpa.dupe(u8, f_z[0..f_z.len]);
-        } else if (std.mem.eql(u8, arg, "--exclude-filter")) {
+        } else if (std.mem.eql(u8, arg, "--zhttp-skip")) {
             const f_z = arg_it.next() orelse return error.MissingFilter;
             try exclude_filters.append(init.gpa, try init.gpa.dupe(u8, f_z[0..f_z.len]));
         } else if (std.mem.eql(u8, arg, "--jobs")) {
@@ -136,8 +153,8 @@ pub fn main(init: std.process.Init) !void {
 
     if (child_test_name) |name| {
         defer init.gpa.free(name);
-        runSingleTest(name, seed);
-        return;
+        const code = runSingleTest(name, seed);
+        std.process.exit(code);
     }
 
     if (filter) |f| {
@@ -160,7 +177,8 @@ fn parseU32(s: []const u8) !u32 {
 
 fn printHelp() void {
     print(
-        "Usage: test-runner [--test-filter <str>] [--jobs <n>] [--seed <n>]\n",
+        "Usage: test-runner [--zhttp-match <str>] [--zhttp-skip <str>] [--jobs <n>] [--seed <n>]\n" ++
+            "  --seed also controls deterministic test ordering in parent mode.\n",
         .{},
     );
 }
@@ -280,6 +298,15 @@ fn runAllTests(
         try buckets.items[found.?].items.append(gpa, t);
     }
 
+    if (seed) |s| {
+        var prng = std.Random.DefaultPrng.init(@as(u64, s));
+        var random = prng.random();
+        shuffleSlice(GroupBucket, &random, buckets.items);
+        for (buckets.items) |*bucket| {
+            shuffleSlice(TestInfo, &random, bucket.items.items);
+        }
+    }
+
     var reordered: std.ArrayList(TestInfo) = .empty;
     defer reordered.deinit(gpa);
     try reordered.ensureTotalCapacity(gpa, tests.items.len);
@@ -371,6 +398,15 @@ fn runAllTests(
 
     if (summary.fail != 0 or summary.crash != 0 or summary.leak != 0) {
         std.process.exit(1);
+    }
+}
+
+fn shuffleSlice(comptime T: type, random: *std.Random, items: []T) void {
+    if (items.len <= 1) return;
+    var i: usize = items.len - 1;
+    while (i != 0) : (i -= 1) {
+        const j = random.uintLessThan(usize, i + 1);
+        std.mem.swap(T, &items[i], &items[j]);
     }
 }
 
@@ -568,12 +604,12 @@ fn deinitChildResult(gpa: std.mem.Allocator, res: ChildResult) void {
     gpa.free(res.stderr);
 }
 
-fn runSingleTest(name: []const u8, seed: ?u32) void {
+fn runSingleTest(name: []const u8, seed: ?u32) u8 {
     if (seed) |s| std.testing.random_seed = s;
 
     const test_fn = findTest(name) orelse {
         print("unknown test: {s}\n", .{name});
-        std.process.exit(1);
+        return 1;
     };
 
     std.testing.allocator_instance = .{};
@@ -582,21 +618,32 @@ fn runSingleTest(name: []const u8, seed: ?u32) void {
 
     if (leak_status == .leak) {
         print("memory leak\n", .{});
-        std.process.exit(3);
+        return 3;
     }
 
     if (result) |_| {
-        std.process.exit(0);
+        return 0;
     } else |err| switch (err) {
-        error.SkipZigTest => std.process.exit(2),
+        error.SkipZigTest => return 2,
         else => {
             print("{s}\n", .{@errorName(err)});
-            if (@errorReturnTrace()) |trace| {
-                std.debug.dumpStackTrace(trace);
-            }
-            std.process.exit(1);
+            printErrorReturnTrace();
+            return 1;
         },
     }
+}
+
+fn printErrorReturnTrace() void {
+    const trace = @errorReturnTrace() orelse return;
+
+    var buf: [4096]u8 = undefined;
+    const stderr_file = std.Io.File.stderr();
+    var stderr_writer = stderr_file.writer(std.Options.debug_io, &buf);
+    std.debug.writeStackTrace(trace, .{
+        .writer = &stderr_writer.interface,
+        .mode = .no_color,
+    }) catch {};
+    stderr_writer.interface.flush() catch {};
 }
 
 const TestFn = std.meta.Elem(@TypeOf(builtin.test_functions));

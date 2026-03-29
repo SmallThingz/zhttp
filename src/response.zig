@@ -59,7 +59,6 @@ pub fn Response(comptime Body: type) type {
         format_send_body: bool = true,
         format_body_len_override: ?usize = null,
 
-        /// Implements text.
         pub fn text(status: u16, body_bytes: []const u8) Res {
             if (Body != []const u8) @compileError("text() is only available on response.Response([]const u8)");
             return .{
@@ -123,7 +122,6 @@ pub fn digits2(value: u8) [2]u8 {
     }
 }
 
-/// Implements write.
 pub fn write(
     w: *std.Io.Writer,
     res: Res,
@@ -194,7 +192,6 @@ pub fn writeAny(
     try cw.finish();
 }
 
-/// Implements write upgrade.
 pub fn writeUpgrade(w: *std.Io.Writer, res: anytype) !void {
     try writeStatusLine(w, res.status);
     for (res.headers) |h| {

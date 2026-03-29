@@ -348,6 +348,9 @@ pub fn contextST(comptime mws: anytype) []const req_ctx.ST {
             const prev_info = info(Prev);
             if (prev_info.data == null) continue;
             if (comptime std.mem.eql(u8, prev_info.name, mw_info.name)) {
+                if (prev_info.data.? != Data) {
+                    @compileError("middleware data field '" ++ mw_info.name ++ "' has conflicting Data types");
+                }
                 seen = true;
                 break;
             }
@@ -369,6 +372,9 @@ pub fn contextST(comptime mws: anytype) []const req_ctx.ST {
                 const prev_info = info(Prev);
                 if (prev_info.data == null) continue;
                 if (std.mem.eql(u8, prev_info.name, mw_info.name)) {
+                    if (prev_info.data.? != Data) {
+                        @compileError("middleware data field '" ++ mw_info.name ++ "' has conflicting Data types");
+                    }
                     seen = true;
                     break;
                 }
@@ -629,4 +635,37 @@ test "middleware helpers: info returns declared metadata and init handles error-
     };
     const static_ctx = try initStaticContext(StaticCtxT, testing.io, testing.allocator, rd);
     try testing.expectEqualStrings("POST", static_ctx.demo.method);
+}
+
+test "middleware helpers: zero-sized data is omitted from stored middleware context" {
+    const MwStored = struct {
+        pub const Info: MiddlewareInfo = .{
+            .name = "stored",
+            .data = struct { count: u8 },
+        };
+
+        pub fn call(_: anytype, _: anytype) !@import("response.zig").Res {
+            unreachable;
+        }
+    };
+
+    const MwEmpty = struct {
+        pub const Info: MiddlewareInfo = .{
+            .name = "empty",
+            .data = struct {},
+        };
+
+        pub fn call(_: anytype, _: anytype) !@import("response.zig").Res {
+            unreachable;
+        }
+    };
+
+    const Ctx = contextType(.{ MwStored, MwEmpty });
+    try std.testing.expect(@hasField(Ctx, "stored"));
+    try std.testing.expect(!@hasField(Ctx, "empty"));
+
+    const st = comptime contextST(.{ MwStored, MwEmpty });
+    try std.testing.expectEqual(@as(usize, 1), st.len);
+    try std.testing.expectEqualStrings("stored", st[0].name);
+    try std.testing.expect(st[0].T == MwStored.Info.data.?);
 }

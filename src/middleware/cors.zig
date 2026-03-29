@@ -72,7 +72,6 @@ pub const CorsOptions = struct {
     vary_behavior: util.HeaderSetBehavior = .assert_absent,
 };
 
-/// Implements CORS preflight handling and simple-response header injection.
 ///
 /// Use this middleware when browsers access your API from different origins.
 pub fn Cors(comptime opts: CorsOptions) type {
@@ -425,4 +424,80 @@ test "cors: check_then_add skips existing response headers" {
     const res = try test_helpers.runMiddlewareTest(Mw, ReqT, Next, &reqv, line.method);
     try std.testing.expectEqual(@as(usize, 1), test_helpers.countHeader(res.headers, "access-control-allow-origin"));
     try std.testing.expectEqual(@as(usize, 1), test_helpers.countHeader(res.headers, "vary"));
+}
+
+test "cors helpers: parseHeaderList trims empties and matching is case-insensitive" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+
+    const parsed = try parseHeaderList(" x-a , ,X-B\t,  x-c  ", a);
+    try std.testing.expectEqual(@as(usize, 3), parsed.len);
+    try std.testing.expectEqualStrings("x-a", parsed[0]);
+    try std.testing.expectEqualStrings("X-B", parsed[1]);
+    try std.testing.expectEqualStrings("x-c", parsed[2]);
+
+    try std.testing.expect(listContainsIgnoreCase(parsed, "X-A"));
+    try std.testing.expect(listContainsIgnoreCase(parsed, "x-b"));
+    try std.testing.expect(!listContainsIgnoreCase(parsed, "x-d"));
+}
+
+test "cors: reflective preflight echoes requested headers and custom predicate can allow origins" {
+    const allow_local = struct {
+        fn call(origin: []const u8) bool {
+            return std.mem.startsWith(u8, origin, "https://local.");
+        }
+    }.call;
+
+    const Mw = Cors(.{
+        .origin_is_allowed = allow_local,
+        .headers = null,
+        .credentials = true,
+        .max_age = 60,
+    });
+    const MwCtx = struct {};
+    const ReqT = @import("../request.zig").Request(
+        struct {
+            origin: parse.Optional(parse.String),
+            access_control_request_method: parse.Optional(parse.String),
+            access_control_request_headers: parse.Optional(parse.String),
+        },
+        struct {},
+        &.{},
+        MwCtx,
+    );
+
+    const Next = struct {
+        pub const function = call;
+        pub fn call(comptime rctx: ReqCtx, _: rctx.T()) !Res {
+            return Res.text(200, "ok");
+        }
+    };
+
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    const path_buf = "/preflight".*;
+    const query_buf: [0]u8 = .{};
+    const line: @import("../request.zig").RequestLine = .{
+        .method = "OPTIONS",
+        .version = .http11,
+        .path = @constCast(path_buf[0..]),
+        .query = @constCast(query_buf[0..]),
+    };
+    var reqv = ReqT.init(a, std.testing.io, line, .{});
+    defer reqv.deinit(a);
+    var r = std.Io.Reader.fixed(
+        "Origin: https://local.example\r\n" ++
+            "Access-Control-Request-Method: PATCH\r\n" ++
+            "Access-Control-Request-Headers: X-One, x-two\r\n\r\n",
+    );
+    try reqv.parseHeaders(a, &r, 1024);
+
+    const res = try test_helpers.runMiddlewareTest(Mw, ReqT, Next, &reqv, line.method);
+    try std.testing.expectEqual(@as(u16, 204), @intFromEnum(res.status));
+    try std.testing.expectEqualStrings("https://local.example", test_helpers.headerValue(res.headers, "access-control-allow-origin").?);
+    try std.testing.expectEqualStrings("X-One, x-two", test_helpers.headerValue(res.headers, "access-control-allow-headers").?);
+    try std.testing.expectEqualStrings("true", test_helpers.headerValue(res.headers, "access-control-allow-credentials").?);
+    try std.testing.expectEqualStrings("60", test_helpers.headerValue(res.headers, "access-control-max-age").?);
 }

@@ -115,12 +115,22 @@ pub fn Server(comptime def: anytype) type {
         io: Io,
         gpa: Allocator,
         listener: std.Io.net.Server,
+        listener_open: std.atomic.Value(bool),
+        stop_requested: std.atomic.Value(bool),
+        active_conn_mu: std.atomic.Mutex = .unlocked,
+        active_conn_head: ?*ConnNode = null,
         group: Io.Group = .init,
         ctx: if (Context == void) void else *Context,
         route_static_ctx: RouteStaticCtxTuple,
 
         const Self = @This();
         pub const config = Conf;
+        const ConnNode = struct {
+            prev: ?*ConnNode = null,
+            next: ?*ConnNode = null,
+            stream: std.Io.net.Stream,
+            linked: bool = false,
+        };
         const Action = router.Action;
         const RouteFn = *const fn (
             server: *Self,
@@ -229,17 +239,40 @@ pub fn Server(comptime def: anytype) type {
                 .io = io,
                 .gpa = gpa,
                 .listener = listener,
+                .listener_open = std.atomic.Value(bool).init(true),
+                .stop_requested = std.atomic.Value(bool).init(false),
                 .ctx = ctx,
                 .route_static_ctx = route_static_ctx,
             };
         }
 
+        /// Stops accepting new connections and cancels active connection tasks.
+        pub fn stop(self: *Self) void {
+            if (self.listener_open.load(.acquire) and self.stop_requested.cmpxchgStrong(false, true, .acq_rel, .acquire) == null) {
+                var wake = std.Io.net.IpAddress.connect(&self.listener.socket.address, self.io, .{ .mode = .stream }) catch null;
+                if (wake) |*stream| stream.close(self.io);
+
+                // Let near-finished handlers unlink themselves before we force
+                // shutdown on remaining active sockets.
+                var waits: usize = 0;
+                while (waits < 200_000) : (waits += 1) {
+                    if (!self.hasActiveConnections()) break;
+                    std.Thread.yield() catch {};
+                }
+
+                if (self.hasActiveConnections()) self.shutdownActiveConnections();
+            }
+        }
+
         /// Releases resources held by this value.
         pub fn deinit(self: *Self) void {
-            self.listener.deinit(self.io);
-            self.group.cancel(self.io);
+            self.stop();
             self.group.await(self.io) catch {};
-            self.* = undefined;
+            std.debug.assert(self.active_conn_head == null);
+            if (self.listener_open.load(.acquire)) {
+                self.listener.deinit(self.io);
+                self.listener_open.store(false, .release);
+            }
         }
 
         /// Runs this component.
@@ -253,6 +286,10 @@ pub fn Server(comptime def: anytype) type {
                     error.WouldBlock => return,
                     error.Unexpected => return,
                 };
+                if (self.stop_requested.load(.acquire)) {
+                    stream.close(self.io);
+                    return;
+                }
                 self.group.concurrent(self.io, handleConn, .{ self, stream }) catch {
                     stream.close(self.io);
                 };
@@ -282,7 +319,6 @@ pub fn Server(comptime def: anytype) type {
             return @call(.auto, ErrorHandler, .{ self, w, ErrorSet, err });
         }
 
-        /// Implements handle handler error.
         pub fn handleHandlerError(self: *Self, w: *Io.Writer, comptime ErrorSet: type, err: ErrorSet) Action {
             return self.callErrorHandler(w, ErrorSet, err);
         }
@@ -316,6 +352,13 @@ pub fn Server(comptime def: anytype) type {
 
         fn handleConn(self: *Self, stream: std.Io.net.Stream) Io.Cancelable!void {
             if (Conf.tcp_nodelay) setTcpNoDelay(&stream);
+
+            var conn_node: ConnNode = .{ .stream = stream };
+            self.registerConn(&conn_node);
+            var conn_registered = true;
+            defer if (conn_registered) self.unregisterConn(&conn_node);
+            var close_stream = true;
+            defer if (close_stream) stream.close(self.io);
 
             var read_buf: [Conf.read_buffer]u8 = undefined;
             var write_buf: [Conf.write_buffer]u8 = undefined;
@@ -356,8 +399,15 @@ pub fn Server(comptime def: anytype) type {
                         else => unreachable,
                     } else notFoundAction()(self, &sr.interface, &sw.interface, &stream, line, a) catch |err| self.handleDispatchServerError(&sw.interface, err));
                 },
-                .close => stream.close(self.io),
-                .upgraded => {},
+                .close => {
+                    self.unregisterConn(&conn_node);
+                    conn_registered = false;
+                },
+                .upgraded => {
+                    self.unregisterConn(&conn_node);
+                    conn_registered = false;
+                    close_stream = false;
+                },
             }
         }
 
@@ -413,6 +463,57 @@ pub fn Server(comptime def: anytype) type {
                     );
                 }
             }.call;
+        }
+
+        fn registerConn(self: *Self, node: *ConnNode) void {
+            while (!self.active_conn_mu.tryLock()) std.atomic.spinLoopHint();
+            defer self.active_conn_mu.unlock();
+
+            node.prev = null;
+            node.next = self.active_conn_head;
+            if (self.active_conn_head) |head| head.prev = node;
+            self.active_conn_head = node;
+            node.linked = true;
+        }
+
+        fn unregisterConn(self: *Self, node: *ConnNode) void {
+            while (!self.active_conn_mu.tryLock()) std.atomic.spinLoopHint();
+            defer self.active_conn_mu.unlock();
+
+            if (!node.linked) return;
+
+            if (node.prev) |prev| {
+                prev.next = node.next;
+            } else {
+                std.debug.assert(self.active_conn_head == node);
+                self.active_conn_head = node.next;
+            }
+            if (node.next) |next| next.prev = node.prev;
+            node.prev = null;
+            node.next = null;
+            node.linked = false;
+        }
+
+        fn hasActiveConnections(self: *Self) bool {
+            while (!self.active_conn_mu.tryLock()) std.atomic.spinLoopHint();
+            defer self.active_conn_mu.unlock();
+            return self.active_conn_head != null;
+        }
+
+        fn shutdownActiveConnections(self: *Self) void {
+            while (!self.active_conn_mu.tryLock()) std.atomic.spinLoopHint();
+            defer self.active_conn_mu.unlock();
+
+            var node = self.active_conn_head;
+            self.active_conn_head = null;
+            while (node) |conn| {
+                const next = conn.next;
+                conn.prev = null;
+                conn.next = null;
+                conn.linked = false;
+                conn.stream.shutdown(self.io, .both) catch {};
+                node = next;
+            }
         }
     };
 }
@@ -577,14 +678,9 @@ fn sendAndCloseEarly(io: Io, port: u16, req_prefix: []const u8) !void {
 }
 
 fn stopServerTest(io: Io, group: *Io.Group, server: anytype) void {
-    group.cancel(io);
+    server.stop();
     group.await(io) catch {};
     server.deinit();
-}
-
-fn traceServerTest(tag: []const u8) void {
-    _ = std.c.write(std.posix.STDERR_FILENO, tag.ptr, tag.len);
-    _ = std.c.write(std.posix.STDERR_FILENO, "\n", 1);
 }
 
 fn randomAscii(random: std.Random, buf: []u8) void {
@@ -807,6 +903,8 @@ fn runSoakVarietyCase(
                 .{ .name = "upgrade", .value = "testproto" },
             }, expected_buf[0..]);
             try expectReadEquals(&sr.interface, expected);
+            try stream.shutdown(io, .send);
+            try expectClosed(&sr.interface);
         },
         else => unreachable,
     }
@@ -828,6 +926,171 @@ test "Server config: arena_reset_limit override is applied" {
         },
     });
     try std.testing.expectEqual(@as(usize, 12345), SrvT.config.arena_reset_limit);
+}
+
+test "Server stop: blocked accept loop shuts down cleanly" {
+    primeSocketBackend();
+
+    const SrvT = Server(.{
+        .routes = .{
+            router.get("/", struct {
+                pub const Info: router.EndpointInfo = .{};
+                pub fn call(comptime rctx: ReqCtx, req: rctx.T()) !response.Res {
+                    _ = req;
+                    return response.Res.text(200, "ok");
+                }
+            }),
+        },
+    });
+
+    for (0..64) |_| {
+        {
+            var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+            defer threaded.deinit();
+            const io = threaded.io();
+
+            const addr0: Io.net.IpAddress = .{ .ip4 = Io.net.Ip4Address.loopback(0) };
+            var group: Io.Group = .init;
+            var server = try SrvT.init(std.testing.allocator, io, addr0, {});
+            const port: u16 = server.listener.socket.address.getPort();
+            try std.testing.expect(port != 0);
+
+            try group.concurrent(io, SrvT.run, .{&server});
+
+            // Drive one full request so the accept loop returns to its steady-state
+            // blocking-accept path before shutdown, without leaving a connection
+            // task mid-read.
+            var stream = try Io.net.IpAddress.connect(&.{ .ip4 = Io.net.Ip4Address.loopback(port) }, io, .{ .mode = .stream });
+
+            var rb: [1024]u8 = undefined;
+            var wb: [256]u8 = undefined;
+            var sr = stream.reader(io, &rb);
+            var sw = stream.writer(io, &wb);
+            try sw.interface.writeAll("GET / HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n");
+            try sw.interface.flush();
+
+            const resp =
+                "HTTP/1.1 200 OK\r\n" ++
+                "connection: close\r\n" ++
+                "content-type: text/plain; charset=utf-8\r\n" ++
+                "content-length: 2\r\n" ++
+                "\r\n" ++
+                "ok";
+            var got: [resp.len]u8 = undefined;
+            try sr.interface.readSliceAll(got[0..]);
+            try std.testing.expectEqualStrings(resp, got[0..]);
+            try expectClosed(&sr.interface);
+            stream.close(io);
+
+            stopServerTest(io, &group, &server);
+        }
+    }
+}
+
+test "Server stop: active body read cancels cleanly" {
+    primeSocketBackend();
+
+    const State = struct {
+        entered: std.atomic.Value(u32) = std.atomic.Value(u32).init(0),
+    };
+
+    const SrvT = Server(.{
+        .Context = State,
+        .routes = .{
+            router.post("/", struct {
+                pub const Info: router.EndpointInfo = .{};
+
+                pub fn call(comptime rctx: ReqCtx, req: rctx.T()) !response.Res {
+                    req.ctx().entered.store(1, .release);
+                    _ = try req.bodyAll(1024);
+                    return response.Res.text(200, "ok");
+                }
+            }),
+        },
+    });
+
+    for (0..16) |_| {
+        {
+            var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+            defer threaded.deinit();
+            const io = threaded.io();
+
+            var state: State = .{};
+            const addr0: Io.net.IpAddress = .{ .ip4 = Io.net.Ip4Address.loopback(0) };
+            var group: Io.Group = .init;
+            var server = try SrvT.init(std.testing.allocator, io, addr0, &state);
+            const port: u16 = server.listener.socket.address.getPort();
+            try std.testing.expect(port != 0);
+
+            try group.concurrent(io, SrvT.run, .{&server});
+
+            var stream = try Io.net.IpAddress.connect(&.{ .ip4 = Io.net.Ip4Address.loopback(port) }, io, .{ .mode = .stream });
+            defer stream.close(io);
+
+            var rb: [1024]u8 = undefined;
+            var wb: [256]u8 = undefined;
+            var sr = stream.reader(io, &rb);
+            var sw = stream.writer(io, &wb);
+            try sw.interface.writeAll(
+                "POST / HTTP/1.1\r\n" ++
+                    "Host: x\r\n" ++
+                    "Content-Length: 8\r\n" ++
+                    "\r\n",
+            );
+            try sw.interface.flush();
+
+            var spins: usize = 0;
+            while (state.entered.load(.acquire) == 0 and spins < 10_000) : (spins += 1) {
+                std.Thread.yield() catch {};
+            }
+            try std.testing.expectEqual(@as(u32, 1), state.entered.load(.acquire));
+
+            stopServerTest(io, &group, &server);
+            try expectClosed(&sr.interface);
+        }
+    }
+}
+
+test "Server stop: concurrent stop calls are race-free and idempotent" {
+    primeSocketBackend();
+
+    const SrvT = Server(.{
+        .routes = .{
+            router.get("/", struct {
+                pub const Info: router.EndpointInfo = .{};
+                pub fn call(comptime rctx: ReqCtx, req: rctx.T()) !response.Res {
+                    _ = req;
+                    return response.Res.text(200, "ok");
+                }
+            }),
+        },
+    });
+
+    const StopCtx = struct {
+        server: *SrvT,
+
+        fn run(self: *@This()) void {
+            var i: usize = 0;
+            while (i < 64) : (i += 1) self.server.stop();
+        }
+    };
+
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const addr0: Io.net.IpAddress = .{ .ip4 = Io.net.Ip4Address.loopback(0) };
+    var group: Io.Group = .init;
+    var server = try SrvT.init(std.testing.allocator, io, addr0, {});
+    try group.concurrent(io, SrvT.run, .{&server});
+
+    var stop_ctx = StopCtx{ .server = &server };
+    const t1 = try std.Thread.spawn(.{}, StopCtx.run, .{&stop_ctx});
+    const t2 = try std.Thread.spawn(.{}, StopCtx.run, .{&stop_ctx});
+    t1.join();
+    t2.join();
+
+    stopServerTest(io, &group, &server);
 }
 
 test "Connection: close header closes socket" {
@@ -2305,7 +2568,6 @@ test "server soak: deterministic real-socket variety including malformed keepali
 }
 
 test "server websocket abuse: helper handshake and hostile frame mix" {
-    traceServerTest("ws-abuse:start");
     const Ctx = struct {
         upgrades: usize = 0,
     };
@@ -2339,12 +2601,12 @@ test "server websocket abuse: helper handshake and hostile frame mix" {
                         => return,
                         error.InvalidUtf8 => {
                             conn.writeClose(1007, "") catch {};
-                            w.flush() catch {};
+                            conn.flush() catch {};
                             return;
                         },
                         error.FrameTooLarge, error.MessageTooLarge => {
                             conn.writeClose(1009, "") catch {};
-                            w.flush() catch {};
+                            conn.flush() catch {};
                             return;
                         },
                         error.Timeout,
@@ -2354,7 +2616,7 @@ test "server websocket abuse: helper handshake and hostile frame mix" {
                         error.UnexpectedContinuationWrite,
                         => {
                             conn.writeClose(1011, "") catch {};
-                            w.flush() catch {};
+                            conn.flush() catch {};
                             return;
                         },
                         error.InvalidCompressedMessage,
@@ -2370,22 +2632,26 @@ test "server websocket abuse: helper handshake and hostile frame mix" {
                         error.ControlFrameTooLarge,
                         => {
                             conn.writeClose(1002, "") catch {};
-                            w.flush() catch {};
+                            conn.flush() catch {};
                             return;
                         },
                         error.OutOfMemory => {
                             conn.writeClose(1011, "") catch {};
-                            w.flush() catch {};
+                            conn.flush() catch {};
                             return;
                         },
                     }
                 };
 
                 switch (msg.opcode) {
-                    .text => conn.writeText(msg.payload) catch return,
-                    .binary => conn.writeBinary(msg.payload) catch return,
+                    .text => {
+                        conn.writeText(msg.payload) catch return;
+                    },
+                    .binary => {
+                        conn.writeBinary(msg.payload) catch return;
+                    },
                 }
-                w.flush() catch return;
+                conn.flush() catch return;
             }
         }
     };
@@ -2420,7 +2686,6 @@ test "server websocket abuse: helper handshake and hostile frame mix" {
 
     // Baseline round-trip for normal websocket traffic.
     {
-        traceServerTest("ws-abuse:baseline-connect");
         var stream = try Io.net.IpAddress.connect(&.{ .ip4 = Io.net.Ip4Address.loopback(port) }, io, .{ .mode = .stream });
         defer stream.close(io);
 
@@ -2428,24 +2693,23 @@ test "server websocket abuse: helper handshake and hostile frame mix" {
         var wb: [8 * 1024]u8 = undefined;
         var sr = stream.reader(io, &rb);
         var sw = stream.writer(io, &wb);
-        traceServerTest("ws-abuse:baseline-handshake");
         try performWebSocketHandshake(&sr.interface, &sw.interface, "/ws");
         var client = zws.ClientConn.init(&sr.interface, &sw.interface, .{});
         var msg_buf: [256]u8 = undefined;
 
-        traceServerTest("ws-abuse:baseline-write");
         try client.writeText("hello");
         try sw.interface.flush();
-        traceServerTest("ws-abuse:baseline-read");
         const msg = try client.readMessage(msg_buf[0..]);
         try std.testing.expectEqual(zws.MessageOpcode.text, msg.opcode);
         try std.testing.expectEqualStrings("hello", msg.payload);
+        try client.writeClose(null, "");
+        try sw.interface.flush();
+        _ = client.readMessage(msg_buf[0..]) catch {};
         exercised += 1;
     }
 
     // Control frame path should respond with pong.
     {
-        traceServerTest("ws-abuse:ping-connect");
         var stream = try Io.net.IpAddress.connect(&.{ .ip4 = Io.net.Ip4Address.loopback(port) }, io, .{ .mode = .stream });
         defer stream.close(io);
 
@@ -2453,19 +2717,22 @@ test "server websocket abuse: helper handshake and hostile frame mix" {
         var wb: [8 * 1024]u8 = undefined;
         var sr = stream.reader(io, &rb);
         var sw = stream.writer(io, &wb);
-        traceServerTest("ws-abuse:ping-handshake");
         try performWebSocketHandshake(&sr.interface, &sw.interface, "/ws");
         var client = zws.ClientConn.init(&sr.interface, &sw.interface, .{});
-
-        traceServerTest("ws-abuse:ping-write");
+        var msg_buf: [256]u8 = undefined;
         try client.writePing("zz");
         try sw.interface.flush();
+        const pong = try client.readFrame(msg_buf[0..]);
+        try std.testing.expectEqual(zws.Opcode.pong, pong.header.opcode);
+        try std.testing.expectEqualStrings("zz", pong.payload);
+        try client.writeClose(null, "");
+        try sw.interface.flush();
+        _ = client.readMessage(msg_buf[0..]) catch {};
         exercised += 1;
     }
 
     // Invalid unmasked client frame should fail the upgraded connection.
     {
-        traceServerTest("ws-abuse:unmasked-connect");
         var stream = try Io.net.IpAddress.connect(&.{ .ip4 = Io.net.Ip4Address.loopback(port) }, io, .{ .mode = .stream });
         defer stream.close(io);
 
@@ -2473,26 +2740,21 @@ test "server websocket abuse: helper handshake and hostile frame mix" {
         var wb: [8 * 1024]u8 = undefined;
         var sr = stream.reader(io, &rb);
         var sw = stream.writer(io, &wb);
-        traceServerTest("ws-abuse:unmasked-handshake");
         try performWebSocketHandshake(&sr.interface, &sw.interface, "/ws");
         var client = zws.ClientConn.init(&sr.interface, &sw.interface, .{});
         var frame_buf: [256]u8 = undefined;
 
-        traceServerTest("ws-abuse:unmasked-write");
         const bad_unmasked = try appendClientFrame(frame_buf[0..], 0x1, "bad", true, false, false);
         try sw.interface.writeAll(bad_unmasked);
         try sw.interface.flush();
-        traceServerTest("ws-abuse:unmasked-read");
         const close_frame = try client.readFrame(frame_buf[0..]);
         try std.testing.expectEqual(zws.Opcode.close, close_frame.header.opcode);
-        traceServerTest("ws-abuse:unmasked-eof");
         try expectClosed(&sr.interface);
         exercised += 1;
     }
 
     // Oversized payload should also fail the upgraded connection.
     {
-        traceServerTest("ws-abuse:big-connect");
         var stream = try Io.net.IpAddress.connect(&.{ .ip4 = Io.net.Ip4Address.loopback(port) }, io, .{ .mode = .stream });
         defer stream.close(io);
 
@@ -2500,24 +2762,19 @@ test "server websocket abuse: helper handshake and hostile frame mix" {
         var wb: [8 * 1024]u8 = undefined;
         var sr = stream.reader(io, &rb);
         var sw = stream.writer(io, &wb);
-        traceServerTest("ws-abuse:big-handshake");
         try performWebSocketHandshake(&sr.interface, &sw.interface, "/ws");
         var client = zws.ClientConn.init(&sr.interface, &sw.interface, .{});
         var frame_buf: [256]u8 = undefined;
         var payload: [80]u8 = .{'x'} ** 80;
-        traceServerTest("ws-abuse:big-write");
         const too_big = try appendClientFrame(frame_buf[0..], 0x2, payload[0..], true, true, false);
         try sw.interface.writeAll(too_big);
         try sw.interface.flush();
-        traceServerTest("ws-abuse:big-read");
         const close_frame = try client.readFrame(frame_buf[0..]);
         try std.testing.expectEqual(zws.Opcode.close, close_frame.header.opcode);
-        traceServerTest("ws-abuse:big-eof");
         try expectClosed(&sr.interface);
         exercised += 1;
     }
 
-    traceServerTest("ws-abuse:done");
     try std.testing.expectEqual(@as(usize, 4), exercised);
     try std.testing.expect(ctx.upgrades >= exercised);
 }

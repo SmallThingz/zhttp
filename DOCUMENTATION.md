@@ -386,7 +386,11 @@ Recommended validation commands:
 
 ```sh
 zig build test
+zig build test-flake -- --iterations=100 --jobs=1
+zig build test-flake -- --iterations=200 --jobs=1 --retries=5 --test-filter="Server stop"
 zig build examples-check
 zig build -Doptimize=ReleaseFast test
 zig build -Doptimize=ReleaseFast examples-check
 ```
+
+`test-flake` runs the test runner across a deterministic seed sweep and, on failure, extracts failing test lines, prints single-test repro commands (`--zhttp-run-test` + `--seed`), and reports rerun reproducibility for that seed. It only returns failure for seeds that reproduce on rerun(s). Pass `--verbose` to include full failing logs.

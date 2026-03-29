@@ -268,6 +268,11 @@ pub const ReqCtx = struct {
                 return Ctx.call(@TypeOf(self2._base.bodyAll(max_bytes)), "bodyAll", .{ self2, max_bytes });
             }
 
+            /// Starts streaming the request body.
+            pub fn bodyReader(self2: ReqSelf) @TypeOf(self2._base.bodyReader()) {
+                return Ctx.call(@TypeOf(self2._base.bodyReader()), "bodyReader", .{self2});
+            }
+
             /// Implements discard unread body.
             pub fn discardUnreadBody(self2: ReqSelf) @TypeOf(self2._base.discardUnreadBody()) {
                 return Ctx.call(@TypeOf(self2._base.discardUnreadBody()), "discardUnreadBody", .{self2});
@@ -456,6 +461,18 @@ test "ReqCtx: run/next/override chain and server access work" {
         pub fn bodyAll(self: *@This(), _: usize) error{Dummy}![]const u8 {
             self.override_seen = false;
             return "base";
+        }
+        pub const DummyBodyReader = struct {
+            pub fn read(_: *@This(), _: []u8) error{Dummy}!usize {
+                return 0;
+            }
+            pub fn readAll(_: *@This(), _: std.mem.Allocator, _: usize) error{Dummy}![]const u8 {
+                return "";
+            }
+            pub fn discardRemaining(_: *@This()) error{Dummy}!void {}
+        };
+        pub fn bodyReader(_: *@This()) error{Dummy}!DummyBodyReader {
+            return .{};
         }
         pub fn discardUnreadBody(_: *@This()) error{Dummy}!void {}
     };
@@ -647,6 +664,19 @@ test "ReqCtx: request wrapper forwards accessors and const forms" {
         pub fn bodyAll(self: *@This(), _: usize) error{Dummy}![]const u8 {
             self.body_reads += 1;
             return "body";
+        }
+        pub const DummyBodyReader = struct {
+            pub fn read(_: *@This(), _: []u8) error{Dummy}!usize {
+                return 0;
+            }
+            pub fn readAll(_: *@This(), _: std.mem.Allocator, _: usize) error{Dummy}![]const u8 {
+                return "";
+            }
+            pub fn discardRemaining(_: *@This()) error{Dummy}!void {}
+        };
+        pub fn bodyReader(self: *@This()) error{Dummy}!DummyBodyReader {
+            self.body_reads += 1;
+            return .{};
         }
         pub fn discardUnreadBody(self: *@This()) error{Dummy}!void {
             self.discarded = true;

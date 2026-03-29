@@ -576,6 +576,7 @@ pub fn Compiled(
             ReadFailed,
             WriteFailed,
             HeadersTooLarge,
+            PayloadTooLarge,
             MissingRequired,
             BadValue,
             InvalidPercentEncoding,
@@ -1238,7 +1239,7 @@ test "dispatch: expect middleware rejects unsupported expectation with 417" {
     try std.testing.expect(std.mem.endsWith(u8, got, "\r\n\r\nexpectation failed\n"));
 }
 
-test "dispatch: expect middleware rejects 100-continue when content-length is zero" {
+test "dispatch: expect middleware accepts 100-continue when content-length is zero" {
     const ExpectMw = @import("middleware/expect.zig").Expect(.{});
     const S = Compiled(void, .{
         post("/x", struct {
@@ -1264,9 +1265,9 @@ test "dispatch: expect middleware rejects 100-continue when content-length is ze
     const line = try request.parseRequestLineBorrowed(&r, 8 * 1024);
     var out: [512]u8 = undefined;
     const res = try dispatchForTest(S, {}, a, &r, line, out[0..]);
-    try std.testing.expectEqual(.close, res.action);
+    try std.testing.expectEqual(.@"continue", res.action);
     const got = out[0..res.len];
-    try std.testing.expect(std.mem.startsWith(u8, got, "HTTP/1.1 417 Expectation Failed\r\n"));
+    try std.testing.expect(std.mem.startsWith(u8, got, "HTTP/1.1 200 OK\r\n"));
     try std.testing.expect(std.mem.indexOf(u8, got, "100 Continue") == null);
 }
 

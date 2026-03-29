@@ -107,8 +107,6 @@ pub fn Server(comptime def: anytype) type {
     const NotFoundHandler = if (@hasField(DefT, "not_found_handler")) def.not_found_handler else DefaultNotFound;
     const NotFoundRoute = router.get("/", NotFoundHandler);
     const NotFoundCompiled = router.Compiled(Context, .{NotFoundRoute}, Middlewares);
-    const NotFoundMwList = middleware.concatTypeLists(GlobalMwList, NotFoundRoute.middlewares);
-    const NotFoundStaticCtx = middleware.staticContextType(NotFoundMwList);
 
     return struct {
         /// Stores `io`.
@@ -123,8 +121,6 @@ pub fn Server(comptime def: anytype) type {
         ctx: if (Context == void) void else *Context,
         /// Stores per-route middleware static contexts.
         route_static_ctx: RouteStaticCtxTuple,
-        /// Stores not-found middleware static context.
-        not_found_static_ctx: NotFoundStaticCtx,
 
         const Self = @This();
         pub const config = Conf;
@@ -232,14 +228,12 @@ pub fn Server(comptime def: anytype) type {
             var listener = try std.Io.net.IpAddress.listen(&address, io, .{ .reuse_address = true });
             errdefer listener.deinit(io);
             const route_static_ctx = try initRouteStaticContexts(io, gpa);
-            const not_found_static_ctx = try middleware.initStaticContext(NotFoundStaticCtx, io, gpa, NotFoundRoute);
             return .{
                 .io = io,
                 .gpa = gpa,
                 .listener = listener,
                 .ctx = ctx,
                 .route_static_ctx = route_static_ctx,
-                .not_found_static_ctx = not_found_static_ctx,
             };
         }
 
@@ -300,6 +294,10 @@ pub fn Server(comptime def: anytype) type {
                 error.EndOfStream, error.ReadFailed, error.WriteFailed => .close,
                 error.HeadersTooLarge => blk2: {
                     self.writeSimple(w, 431, "bad request");
+                    break :blk2 .close;
+                },
+                error.PayloadTooLarge => blk2: {
+                    self.writeSimple(w, 413, "bad request");
                     break :blk2 .close;
                 },
                 error.MissingRequired,

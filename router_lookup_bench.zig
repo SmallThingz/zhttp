@@ -230,153 +230,243 @@ const HashRouter = struct {
     }
 };
 
-const CuckooExactEntry = struct {
+const max_path_segments = 16;
+const prefix_hash_seed: u64 = 0x517c_c1b7_2722_0a95;
+
+const DecodedPath = struct {
     path: []const u8,
-    h1: u64,
-    h2: u64,
+    path_hash: u64,
+    seg_count: u8,
+    segs: [max_path_segments][]const u8,
+    seg_hashes: [max_path_segments]u64,
+    prefix_hashes: [max_path_segments + 1]u64,
+};
+
+const FlatTable = struct {
+    slots: []u32 = &.{}, // 0 = empty, else entry_index + 1
+    mask: u64 = 0,
+
+    fn init(a: Allocator, count: usize) !FlatTable {
+        const cap = nextPow2AtLeastRuntime(count * 2 + 1, 8);
+        const slots = try a.alloc(u32, cap);
+        @memset(slots, 0);
+        return .{
+            .slots = slots,
+            .mask = @intCast(cap - 1),
+        };
+    }
+
+    fn insert(self: *FlatTable, hash: u64, entry_index: u32) void {
+        var pos: u64 = hash & self.mask;
+        while (true) : (pos = (pos + 1) & self.mask) {
+            const slot_idx: usize = @intCast(pos);
+            if (self.slots[slot_idx] == 0) {
+                self.slots[slot_idx] = entry_index + 1;
+                return;
+            }
+        }
+    }
+};
+
+const ExactHeadEntry = struct {
+    seg0: []const u8,
+    hash: u64,
     route_index: u32,
 };
 
-const CuckooBucket = struct {
-    exact_entries: []CuckooExactEntry = &.{},
-    exact_table: []u32 = &.{}, // 0 = empty, else entry_index + 1
-    exact_mask: u64 = 0,
-    overflow_entry_indices: []u32 = &.{},
-    overflow_len: usize = 0,
-    pattern_route_indices: []u32 = &.{},
-
-    fn insertCuckoo(self: *CuckooBucket, entry_index: u32, max_kicks: usize) bool {
-        const e = self.exact_entries[entry_index];
-        const pos1: usize = @intCast(e.h1 & self.exact_mask);
-        if (self.exact_table[pos1] == 0) {
-            self.exact_table[pos1] = entry_index + 1;
-            return true;
-        }
-
-        const pos2: usize = @intCast(e.h2 & self.exact_mask);
-        if (self.exact_table[pos2] == 0) {
-            self.exact_table[pos2] = entry_index + 1;
-            return true;
-        }
-
-        var cur = entry_index;
-        var pos = pos1;
-        var kick: usize = 0;
-        while (kick < max_kicks) : (kick += 1) {
-            const displaced = self.exact_table[pos];
-            self.exact_table[pos] = cur + 1;
-            cur = displaced - 1;
-
-            const d = self.exact_entries[cur];
-            const d_pos1: usize = @intCast(d.h1 & self.exact_mask);
-            const d_pos2: usize = @intCast(d.h2 & self.exact_mask);
-            const alt = if (pos == d_pos1) d_pos2 else d_pos1;
-            if (self.exact_table[alt] == 0) {
-                self.exact_table[alt] = cur + 1;
-                return true;
-            }
-            pos = alt;
-        }
-        return false;
-    }
-
-    fn slotMatch(self: *const CuckooBucket, path: []const u8, hash: u64, slot_pos: usize) ?u32 {
-        const slot = self.exact_table[slot_pos];
-        if (slot == 0) return null;
-        const e = self.exact_entries[slot - 1];
-        if (e.h1 == hash and std.mem.eql(u8, e.path, path)) return e.route_index;
-        return null;
-    }
-
-    fn findExact(self: *const CuckooBucket, path: []const u8) ?u32 {
-        if (self.exact_entries.len == 0) return null;
-
-        const h1 = util.fnv1a64(path);
-        const h2 = cuckooSecondaryHash(h1);
-
-        const p1: usize = @intCast(h1 & self.exact_mask);
-        if (self.slotMatch(path, h1, p1)) |rid| return rid;
-
-        const p2: usize = @intCast(h2 & self.exact_mask);
-        if (p2 != p1) {
-            const slot = self.exact_table[p2];
-            if (slot != 0) {
-                const e = self.exact_entries[slot - 1];
-                if (e.h2 == h2 and std.mem.eql(u8, e.path, path)) return e.route_index;
-            }
-        }
-
-        for (self.overflow_entry_indices[0..self.overflow_len]) |i| {
-            const e = self.exact_entries[i];
-            if (e.h1 == h1 and std.mem.eql(u8, e.path, path)) return e.route_index;
-        }
-        return null;
-    }
+const ExactPathEntry = struct {
+    path: []const u8,
+    hash: u64,
+    route_index: u32,
 };
 
-const CuckooRouter = struct {
-    routes: []Route,
-    buckets: [method_count]CuckooBucket,
+const PrefixEntry = struct {
+    prefix: []const PatternSeg,
+    prefix_hash: u64,
+    prefix_count: u8,
+    route_index: u32,
+};
 
-    fn init(a: Allocator, routes: []Route) !CuckooRouter {
+const FallbackBucket = struct {
+    route_indices: []u32 = &.{},
+};
+
+const PathHeadKind = enum(u8) {
+    root,
+    one,
+    two,
+    many,
+};
+
+const PathHead = struct {
+    kind: PathHeadKind,
+    seg0: []const u8 = &.{},
+    seg0_hash: u64 = 0,
+};
+
+const HybridBucket = struct {
+    exact_entries: []ExactPathEntry = &.{},
+    exact_table: FlatTable = .{},
+
+    suffix_param_one_entries: []ExactHeadEntry = &.{},
+    suffix_param_one_table: FlatTable = .{},
+
+    suffix_glob_one_entries: []ExactHeadEntry = &.{},
+    suffix_glob_one_table: FlatTable = .{},
+
+    suffix_param_entries: []PrefixEntry = &.{},
+    suffix_param_table: FlatTable = .{},
+
+    suffix_glob_entries: []PrefixEntry = &.{},
+    suffix_glob_table: FlatTable = .{},
+
+    fallback: FallbackBucket = .{},
+};
+
+const RadixHashRouter = struct {
+    routes: []Route,
+    buckets: [method_count]HybridBucket,
+
+    fn init(a: Allocator, routes: []Route) !RadixHashRouter {
         var exact_counts: [method_count]usize = .{0} ** method_count;
-        var pattern_counts: [method_count]usize = .{0} ** method_count;
+        var suffix_param_one_counts: [method_count]usize = .{0} ** method_count;
+        var suffix_glob_one_counts: [method_count]usize = .{0} ** method_count;
+        var suffix_param_counts: [method_count]usize = .{0} ** method_count;
+        var suffix_glob_counts: [method_count]usize = .{0} ** method_count;
+        var fallback_counts: [method_count]usize = .{0} ** method_count;
 
         for (routes) |r| {
             const mi = @intFromEnum(r.method);
             if (r.exact_path != null) {
                 exact_counts[mi] += 1;
+            } else if (isTrailingParamRoute(r.pattern)) {
+                if (r.pattern.segments.len == 2) {
+                    suffix_param_one_counts[mi] += 1;
+                } else {
+                    suffix_param_counts[mi] += 1;
+                }
+            } else if (isTrailingGlobRoute(r.pattern)) {
+                if (r.pattern.segments.len == 2) {
+                    suffix_glob_one_counts[mi] += 1;
+                } else {
+                    suffix_glob_counts[mi] += 1;
+                }
             } else {
-                pattern_counts[mi] += 1;
+                fallback_counts[mi] += 1;
             }
         }
 
-        var buckets: [method_count]CuckooBucket = undefined;
+        var buckets: [method_count]HybridBucket = undefined;
         for (0..method_count) |mi| {
             buckets[mi] = .{
-                .exact_entries = try a.alloc(CuckooExactEntry, exact_counts[mi]),
-                .overflow_entry_indices = try a.alloc(u32, exact_counts[mi]),
-                .pattern_route_indices = try a.alloc(u32, pattern_counts[mi]),
+                .exact_entries = try a.alloc(ExactPathEntry, exact_counts[mi]),
+                .suffix_param_one_entries = try a.alloc(ExactHeadEntry, suffix_param_one_counts[mi]),
+                .suffix_glob_one_entries = try a.alloc(ExactHeadEntry, suffix_glob_one_counts[mi]),
+                .suffix_param_entries = try a.alloc(PrefixEntry, suffix_param_counts[mi]),
+                .suffix_glob_entries = try a.alloc(PrefixEntry, suffix_glob_counts[mi]),
+                .fallback = .{
+                    .route_indices = try a.alloc(u32, fallback_counts[mi]),
+                },
             };
         }
 
         var exact_writes: [method_count]usize = .{0} ** method_count;
-        var pattern_writes: [method_count]usize = .{0} ** method_count;
+        var suffix_param_one_writes: [method_count]usize = .{0} ** method_count;
+        var suffix_glob_one_writes: [method_count]usize = .{0} ** method_count;
+        var suffix_param_writes: [method_count]usize = .{0} ** method_count;
+        var suffix_glob_writes: [method_count]usize = .{0} ** method_count;
+        var fallback_writes: [method_count]usize = .{0} ** method_count;
 
         for (routes) |r| {
             const mi = @intFromEnum(r.method);
-            if (r.exact_path) |p| {
+            if (r.exact_path) |path| {
                 const w = exact_writes[mi];
-                const h1 = util.fnv1a64(p);
                 buckets[mi].exact_entries[w] = .{
-                    .path = p,
-                    .h1 = h1,
-                    .h2 = cuckooSecondaryHash(h1),
+                    .path = path,
+                    .hash = util.fnv1a64(path),
                     .route_index = r.route_index,
                 };
                 exact_writes[mi] = w + 1;
-            } else {
-                const w = pattern_writes[mi];
-                buckets[mi].pattern_route_indices[w] = r.route_index;
-                pattern_writes[mi] = w + 1;
+                continue;
             }
+
+            if (isTrailingParamRoute(r.pattern)) {
+                if (r.pattern.segments.len == 2) {
+                    const w = suffix_param_one_writes[mi];
+                    buckets[mi].suffix_param_one_entries[w] = .{
+                        .seg0 = r.pattern.segments[0].lit,
+                        .hash = util.fnv1a64(r.pattern.segments[0].lit),
+                        .route_index = r.route_index,
+                    };
+                    suffix_param_one_writes[mi] = w + 1;
+                } else {
+                    const w = suffix_param_writes[mi];
+                    const prefix = r.pattern.segments[0 .. r.pattern.segments.len - 1];
+                    buckets[mi].suffix_param_entries[w] = .{
+                        .prefix = prefix,
+                        .prefix_hash = prefixHashForPattern(prefix),
+                        .prefix_count = @intCast(prefix.len),
+                        .route_index = r.route_index,
+                    };
+                    suffix_param_writes[mi] = w + 1;
+                }
+                continue;
+            }
+
+            if (isTrailingGlobRoute(r.pattern)) {
+                if (r.pattern.segments.len == 2) {
+                    const w = suffix_glob_one_writes[mi];
+                    buckets[mi].suffix_glob_one_entries[w] = .{
+                        .seg0 = r.pattern.segments[0].lit,
+                        .hash = util.fnv1a64(r.pattern.segments[0].lit),
+                        .route_index = r.route_index,
+                    };
+                    suffix_glob_one_writes[mi] = w + 1;
+                } else {
+                    const w = suffix_glob_writes[mi];
+                    const prefix = r.pattern.segments[0 .. r.pattern.segments.len - 1];
+                    buckets[mi].suffix_glob_entries[w] = .{
+                        .prefix = prefix,
+                        .prefix_hash = prefixHashForPattern(prefix),
+                        .prefix_count = @intCast(prefix.len),
+                        .route_index = r.route_index,
+                    };
+                    suffix_glob_writes[mi] = w + 1;
+                }
+                continue;
+            }
+
+            const w = fallback_writes[mi];
+            buckets[mi].fallback.route_indices[w] = r.route_index;
+            fallback_writes[mi] = w + 1;
         }
 
         for (0..method_count) |mi| {
-            const b = &buckets[mi];
-            if (b.exact_entries.len == 0) continue;
+            var bucket = &buckets[mi];
 
-            const cap = nextPow2AtLeastRuntime(b.exact_entries.len * 2 + 1, 8);
-            b.exact_table = try a.alloc(u32, cap);
-            @memset(b.exact_table, 0);
-            b.exact_mask = @intCast(cap - 1);
+            bucket.exact_table = try FlatTable.init(a, bucket.exact_entries.len);
+            for (bucket.exact_entries, 0..) |entry, i| {
+                bucket.exact_table.insert(entry.hash, @intCast(i));
+            }
 
-            for (0..b.exact_entries.len) |i| {
-                const inserted = b.insertCuckoo(@intCast(i), 64);
-                if (!inserted) {
-                    b.overflow_entry_indices[b.overflow_len] = @intCast(i);
-                    b.overflow_len += 1;
-                }
+            bucket.suffix_param_one_table = try FlatTable.init(a, bucket.suffix_param_one_entries.len);
+            for (bucket.suffix_param_one_entries, 0..) |entry, i| {
+                bucket.suffix_param_one_table.insert(entry.hash, @intCast(i));
+            }
+
+            bucket.suffix_glob_one_table = try FlatTable.init(a, bucket.suffix_glob_one_entries.len);
+            for (bucket.suffix_glob_one_entries, 0..) |entry, i| {
+                bucket.suffix_glob_one_table.insert(entry.hash, @intCast(i));
+            }
+
+            bucket.suffix_param_table = try FlatTable.init(a, bucket.suffix_param_entries.len);
+            for (bucket.suffix_param_entries, 0..) |entry, i| {
+                bucket.suffix_param_table.insert(entry.prefix_hash, @intCast(i));
+            }
+
+            bucket.suffix_glob_table = try FlatTable.init(a, bucket.suffix_glob_entries.len);
+            for (bucket.suffix_glob_entries, 0..) |entry, i| {
+                bucket.suffix_glob_table.insert(entry.prefix_hash, @intCast(i));
             }
         }
 
@@ -386,7 +476,7 @@ const CuckooRouter = struct {
         };
     }
 
-    fn match(self: *const CuckooRouter, method_token: []const u8, path: []const u8) ?u32 {
+    fn match(self: *const RadixHashRouter, method_token: []const u8, path: []const u8) ?u32 {
         const m = parseMethod(method_token) orelse return null;
         if (m == .HEAD) {
             if (self.matchInBucket(.HEAD, path)) |rid| return rid;
@@ -395,272 +485,29 @@ const CuckooRouter = struct {
         return self.matchInBucket(m, path);
     }
 
-    fn matchInBucket(self: *const CuckooRouter, m: Method, path: []const u8) ?u32 {
-        const b = &self.buckets[@intFromEnum(m)];
-        if (b.findExact(path)) |rid| return rid;
-        for (b.pattern_route_indices) |ri| {
-            if (matchPattern(self.routes[ri].pattern, path)) return ri;
-        }
-        return null;
-    }
-};
+    fn matchInBucket(self: *const RadixHashRouter, method: Method, path: []const u8) ?u32 {
+        const bucket = &self.buckets[@intFromEnum(method)];
+        if (findExactPath(bucket, path)) |rid| return rid;
 
-const TempTrieNode = struct {
-    terminal_route: ?u32 = null,
-    glob_route: ?u32 = null,
-    param_child: ?u32 = null,
-    lit_names: std.ArrayListUnmanaged([]const u8) = .empty,
-    lit_children: std.ArrayListUnmanaged(u32) = .empty,
-};
-
-const TempTrieBucket = struct {
-    nodes: std.ArrayListUnmanaged(TempTrieNode) = .empty,
-
-    fn init(a: Allocator) !TempTrieBucket {
-        var b: TempTrieBucket = .{};
-        try b.nodes.append(a, .{});
-        return b;
-    }
-
-    fn newNode(self: *TempTrieBucket, a: Allocator) !u32 {
-        const idx: u32 = @intCast(self.nodes.items.len);
-        try self.nodes.append(a, .{});
-        return idx;
-    }
-
-    fn findLitChild(self: *const TempTrieBucket, node_idx: u32, part: []const u8) ?u32 {
-        const n = &self.nodes.items[node_idx];
-        for (n.lit_names.items, 0..) |name, i| {
-            if (std.mem.eql(u8, name, part)) return n.lit_children.items[i];
-        }
-        return null;
-    }
-
-    fn insertRoute(self: *TempTrieBucket, a: Allocator, route: Route) !void {
-        var node_idx: u32 = 0;
-        for (route.pattern.segments) |seg| {
-            switch (seg.kind) {
-                .lit => {
-                    if (self.findLitChild(node_idx, seg.lit)) |child_idx| {
-                        node_idx = child_idx;
-                    } else {
-                        const child_idx = try self.newNode(a);
-                        var n = &self.nodes.items[node_idx];
-                        try n.lit_names.append(a, seg.lit);
-                        try n.lit_children.append(a, child_idx);
-                        node_idx = child_idx;
-                    }
-                },
-                .param => {
-                    var n = &self.nodes.items[node_idx];
-                    if (n.param_child) |child_idx| {
-                        node_idx = child_idx;
-                    } else {
-                        const child_idx = try self.newNode(a);
-                        n = &self.nodes.items[node_idx];
-                        n.param_child = child_idx;
-                        node_idx = child_idx;
-                    }
-                },
-                .glob => {
-                    var n = &self.nodes.items[node_idx];
-                    if (n.glob_route == null) n.glob_route = route.route_index;
-                    return;
-                },
-            }
-        }
-        var n = &self.nodes.items[node_idx];
-        if (n.terminal_route == null) n.terminal_route = route.route_index;
-    }
-};
-
-const RadixEdge = struct {
-    labels: []const []const u8,
-    child: u32,
-};
-
-const RadixNode = struct {
-    terminal_route: ?u32 = null,
-    glob_route: ?u32 = null,
-    param_child: ?u32 = null,
-    lit_edges: std.StringHashMapUnmanaged(u32) = .empty,
-};
-
-const ParsedSeg = struct {
-    part: []const u8,
-    next_pos: usize,
-};
-
-const RadixBucket = struct {
-    nodes: std.ArrayListUnmanaged(RadixNode) = .empty,
-    edges: std.ArrayListUnmanaged(RadixEdge) = .empty,
-
-    fn init(a: Allocator, routes: []Route, method: Method) !RadixBucket {
-        var temp = try TempTrieBucket.init(a);
-        for (routes) |r| {
-            if (r.method == method) try temp.insertRoute(a, r);
+        const head = decodeHead(path) orelse return null;
+        switch (head.kind) {
+            .root => {},
+            .one => {
+                if (findOneSeg(bucket.suffix_glob_one_entries, &bucket.suffix_glob_one_table, head.seg0, head.seg0_hash)) |rid| return rid;
+            },
+            .two => {
+                if (findOneSeg(bucket.suffix_param_one_entries, &bucket.suffix_param_one_table, head.seg0, head.seg0_hash)) |rid| return rid;
+                if (findOneSeg(bucket.suffix_glob_one_entries, &bucket.suffix_glob_one_table, head.seg0, head.seg0_hash)) |rid| return rid;
+            },
+            .many => {
+                if (findOneSeg(bucket.suffix_glob_one_entries, &bucket.suffix_glob_one_table, head.seg0, head.seg0_hash)) |rid| return rid;
+            },
         }
 
-        var bucket: RadixBucket = .{};
-        _ = try bucket.compileNode(a, &temp, 0);
-        return bucket;
-    }
-
-    fn compileNode(self: *RadixBucket, a: Allocator, temp: *const TempTrieBucket, temp_idx: u32) !u32 {
-        const temp_node = &temp.nodes.items[temp_idx];
-        const idx: u32 = @intCast(self.nodes.items.len);
-        try self.nodes.append(a, .{
-            .terminal_route = temp_node.terminal_route,
-            .glob_route = temp_node.glob_route,
-        });
-
-        if (temp_node.param_child) |param_child| {
-            const compiled_param_child = try self.compileNode(a, temp, param_child);
-            self.nodes.items[idx].param_child = compiled_param_child;
-        }
-
-        for (temp_node.lit_names.items, 0..) |first_label, child_idx| {
-            var labels: std.ArrayListUnmanaged([]const u8) = .empty;
-            try labels.append(a, first_label);
-
-            var walk_idx = temp_node.lit_children.items[child_idx];
-            while (true) {
-                const walk = &temp.nodes.items[walk_idx];
-                const collapsible = walk.terminal_route == null and
-                    walk.glob_route == null and
-                    walk.param_child == null and
-                    walk.lit_names.items.len == 1;
-                if (!collapsible) break;
-                try labels.append(a, walk.lit_names.items[0]);
-                walk_idx = walk.lit_children.items[0];
-            }
-
-            const child = try self.compileNode(a, temp, walk_idx);
-            const edge_idx: u32 = @intCast(self.edges.items.len);
-            try self.edges.append(a, .{
-                .labels = try labels.toOwnedSlice(a),
-                .child = child,
-            });
-            try self.nodes.items[idx].lit_edges.put(a, first_label, edge_idx);
-        }
-
-        return idx;
-    }
-
-    fn match(self: *const RadixBucket, path: []const u8) ?u32 {
-        if (path.len == 0 or path[0] != '/') return null;
-        const start_pos: usize = if (path.len == 1) 2 else 1;
-        return self.matchFrom(0, path, start_pos);
-    }
-
-    fn matchFrom(self: *const RadixBucket, node_idx: u32, path: []const u8, pos: usize) ?u32 {
-        const node = &self.nodes.items[node_idx];
-        if (pos == path.len + 1) return node.terminal_route orelse node.glob_route;
-
-        const parsed = parseNextSeg(path, pos) orelse return node.glob_route;
-
-        if (node.lit_edges.get(parsed.part)) |edge_idx| {
-            if (self.matchEdge(edge_idx, path, parsed.next_pos)) |after_edge_pos| {
-                if (self.matchFrom(self.edges.items[edge_idx].child, path, after_edge_pos)) |rid| return rid;
-            }
-        }
-
-        if (node.param_child) |param_child| {
-            if (self.matchFrom(param_child, path, parsed.next_pos)) |rid| return rid;
-        }
-
-        return node.glob_route;
-    }
-
-    fn matchEdge(self: *const RadixBucket, edge_idx: u32, path: []const u8, pos_after_first: usize) ?usize {
-        const edge = self.edges.items[edge_idx];
-        var pos = pos_after_first;
-        var i: usize = 1;
-        while (i < edge.labels.len) : (i += 1) {
-            const parsed = parseNextSeg(path, pos) orelse return null;
-            if (!std.mem.eql(u8, parsed.part, edge.labels[i])) return null;
-            pos = parsed.next_pos;
-        }
-        return pos;
-    }
-
-    fn debug(self: *const RadixBucket, path: []const u8) void {
-        if (path.len == 0 or path[0] != '/') {
-            std.debug.print("invalid path\n", .{});
-            return;
-        }
-        const start_pos: usize = if (path.len == 1) 2 else 1;
-        self.debugFrom(0, path, start_pos, 0);
-    }
-
-    fn debugFrom(self: *const RadixBucket, node_idx: u32, path: []const u8, pos: usize, depth: usize) void {
-        const node = &self.nodes.items[node_idx];
-        std.debug.print(
-            "{s}node {d}: terminal={any} glob={any} param={any} lit_count={d} pos={d}\n",
-            .{ indent(depth), node_idx, node.terminal_route, node.glob_route, node.param_child, node.lit_edges.size, pos },
-        );
-        if (pos == path.len + 1) {
-            std.debug.print("{s}done\n", .{indent(depth)});
-            return;
-        }
-
-        const parsed = parseNextSeg(path, pos) orelse {
-            std.debug.print("{s}parse failed at pos={d}\n", .{ indent(depth), pos });
-            return;
-        };
-        std.debug.print("{s}seg={s} next={d}\n", .{ indent(depth), parsed.part, parsed.next_pos });
-
-        if (node.lit_edges.get(parsed.part)) |edge_idx| {
-            const edge = self.edges.items[edge_idx];
-            std.debug.print("{s}lit edge {d} labels=", .{ indent(depth), edge_idx });
-            for (edge.labels) |label| std.debug.print("{s}/", .{label});
-            std.debug.print(" child={d}\n", .{edge.child});
-            if (self.matchEdge(edge_idx, path, parsed.next_pos)) |after_edge_pos| {
-                std.debug.print("{s}edge matched -> pos={d}\n", .{ indent(depth), after_edge_pos });
-                self.debugFrom(edge.child, path, after_edge_pos, depth + 1);
-            } else {
-                std.debug.print("{s}edge mismatch\n", .{indent(depth)});
-            }
-        } else {
-            std.debug.print("{s}no literal edge\n", .{indent(depth)});
-        }
-
-        if (node.param_child) |param_child| {
-            std.debug.print("{s}try param child {d}\n", .{ indent(depth), param_child });
-            self.debugFrom(param_child, path, parsed.next_pos, depth + 1);
-        } else {
-            std.debug.print("{s}no param child\n", .{indent(depth)});
-        }
-    }
-};
-
-const RadixHashRouter = struct {
-    buckets: [method_count]RadixBucket,
-
-    fn init(a: Allocator, routes: []Route) !RadixHashRouter {
-        var buckets: [method_count]RadixBucket = undefined;
-        for (0..method_count) |mi| {
-            buckets[mi] = try RadixBucket.init(a, routes, @enumFromInt(mi));
-        }
-        return .{ .buckets = buckets };
-    }
-
-    fn match(self: *const RadixHashRouter, method_token: []const u8, path: []const u8) ?u32 {
-        const m = parseMethod(method_token) orelse return null;
-        if (m == .HEAD) {
-            if (self.buckets[@intFromEnum(Method.HEAD)].match(path)) |rid| return rid;
-            return self.buckets[@intFromEnum(Method.GET)].match(path);
-        }
-        return self.buckets[@intFromEnum(m)].match(path);
-    }
-
-    fn debugMatch(self: *const RadixHashRouter, method_token: []const u8, path: []const u8) void {
-        const m = parseMethod(method_token) orelse {
-            std.debug.print("bad method: {s}\n", .{method_token});
-            return;
-        };
-        std.debug.print("radix debug: method={s} path={s}\n", .{ method_token, path });
-        self.buckets[@intFromEnum(m)].debug(path);
+        const decoded = decodePath(path) orelse return null;
+        if (findSuffixParam(bucket, &decoded)) |rid| return rid;
+        if (findSuffixGlob(bucket, &decoded)) |rid| return rid;
+        return findFallback(self.routes, &bucket.fallback, path);
     }
 };
 
@@ -750,26 +597,184 @@ fn parseMethod(token: []const u8) ?Method {
     return null;
 }
 
-fn parseNextSeg(path: []const u8, pos: usize) ?ParsedSeg {
-    if (pos > path.len) return null;
-    const next_slash = std.mem.indexOfScalarPos(u8, path, pos, '/') orelse path.len;
-    const part = path[pos..next_slash];
-    if (part.len == 0) return null;
+fn prefixHashStep(prev: u64, seg_hash: u64) u64 {
+    var x = prev ^ seg_hash;
+    x *%= 0x9e37_79b9_7f4a_7c15;
+    x ^= x >> 29;
+    return x;
+}
+
+fn prefixHashForPattern(prefix: []const PatternSeg) u64 {
+    var h = prefix_hash_seed;
+    for (prefix) |seg| {
+        h = prefixHashStep(h, util.fnv1a64(seg.lit));
+    }
+    return h;
+}
+
+fn isTrailingParamRoute(p: Pattern) bool {
+    if (p.segments.len == 0 or p.segments[p.segments.len - 1].kind != .param) return false;
+    for (p.segments[0 .. p.segments.len - 1]) |seg| {
+        if (seg.kind != .lit) return false;
+    }
+    return true;
+}
+
+fn isTrailingGlobRoute(p: Pattern) bool {
+    if (p.segments.len == 0 or p.segments[p.segments.len - 1].kind != .glob) return false;
+    for (p.segments[0 .. p.segments.len - 1]) |seg| {
+        if (seg.kind != .lit) return false;
+    }
+    return true;
+}
+
+fn decodePath(path: []const u8) ?DecodedPath {
+    if (path.len == 0 or path[0] != '/') return null;
+
+    var decoded: DecodedPath = .{
+        .path = path,
+        .path_hash = util.fnv1a64(path),
+        .seg_count = 0,
+        .segs = undefined,
+        .seg_hashes = undefined,
+        .prefix_hashes = undefined,
+    };
+    decoded.prefix_hashes[0] = prefix_hash_seed;
+
+    if (path.len == 1) return decoded;
+
+    var pos: usize = 1;
+    while (pos < path.len) {
+        if (decoded.seg_count == max_path_segments) return null;
+
+        const slash = std.mem.indexOfScalarPos(u8, path, pos, '/') orelse path.len;
+        const part = path[pos..slash];
+        if (part.len == 0) return null;
+
+        const idx = decoded.seg_count;
+        const part_hash = util.fnv1a64(part);
+        decoded.segs[idx] = part;
+        decoded.seg_hashes[idx] = part_hash;
+        decoded.seg_count += 1;
+        decoded.prefix_hashes[decoded.seg_count] = prefixHashStep(decoded.prefix_hashes[decoded.seg_count - 1], part_hash);
+
+        if (slash == path.len) break;
+        if (slash + 1 == path.len) return null;
+        pos = slash + 1;
+    }
+
+    return decoded;
+}
+
+fn decodeHead(path: []const u8) ?PathHead {
+    if (path.len == 0 or path[0] != '/') return null;
+    if (path.len == 1) return .{ .kind = .root };
+
+    const first_slash = std.mem.indexOfScalarPos(u8, path, 1, '/') orelse path.len;
+    const seg0 = path[1..first_slash];
+    if (seg0.len == 0) return null;
+
+    if (first_slash == path.len) {
+        return .{
+            .kind = .one,
+            .seg0 = seg0,
+            .seg0_hash = util.fnv1a64(seg0),
+        };
+    }
+    if (first_slash + 1 == path.len) return null;
+
+    const second_slash = std.mem.indexOfScalarPos(u8, path, first_slash + 1, '/') orelse path.len;
+    const seg1 = path[first_slash + 1 .. second_slash];
+    if (seg1.len == 0) return null;
+
     return .{
-        .part = part,
-        .next_pos = if (next_slash == path.len) path.len + 1 else next_slash + 1,
+        .kind = if (second_slash == path.len) .two else .many,
+        .seg0 = seg0,
+        .seg0_hash = util.fnv1a64(seg0),
     };
 }
 
-fn indent(depth: usize) []const u8 {
-    return switch (depth) {
-        0 => "",
-        1 => "  ",
-        2 => "    ",
-        3 => "      ",
-        4 => "        ",
-        else => "          ",
-    };
+fn findExactPath(bucket: *const HybridBucket, path: []const u8) ?u32 {
+    if (bucket.exact_entries.len == 0) return null;
+
+    const path_hash = util.fnv1a64(path);
+    var pos: u64 = path_hash & bucket.exact_table.mask;
+    var probe: usize = 0;
+    while (probe < bucket.exact_table.slots.len) : (probe += 1) {
+        const slot = bucket.exact_table.slots[@intCast(pos)];
+        if (slot == 0) return null;
+        const entry = bucket.exact_entries[slot - 1];
+        if (entry.hash == path_hash and std.mem.eql(u8, entry.path, path)) return entry.route_index;
+        pos = (pos + 1) & bucket.exact_table.mask;
+    }
+    return null;
+}
+
+fn findOneSeg(entries: []const ExactHeadEntry, table: *const FlatTable, seg0: []const u8, seg0_hash: u64) ?u32 {
+    if (entries.len == 0) return null;
+
+    var pos: u64 = seg0_hash & table.mask;
+    var probe: usize = 0;
+    while (probe < table.slots.len) : (probe += 1) {
+        const slot = table.slots[@intCast(pos)];
+        if (slot == 0) return null;
+        const entry = entries[slot - 1];
+        if (entry.hash == seg0_hash and std.mem.eql(u8, entry.seg0, seg0)) return entry.route_index;
+        pos = (pos + 1) & table.mask;
+    }
+    return null;
+}
+
+fn prefixMatches(decoded: *const DecodedPath, entry: PrefixEntry) bool {
+    if (entry.prefix_count > decoded.seg_count) return false;
+    var i: usize = 0;
+    while (i < @as(usize, entry.prefix_count)) : (i += 1) {
+        if (!std.mem.eql(u8, entry.prefix[i].lit, decoded.segs[i])) return false;
+    }
+    return true;
+}
+
+fn findPrefixEntry(entries: []const PrefixEntry, table: *const FlatTable, decoded: *const DecodedPath, prefix_count: usize) ?u32 {
+    if (entries.len == 0) return null;
+
+    const h = decoded.prefix_hashes[prefix_count];
+    var pos: u64 = h & table.mask;
+    var probe: usize = 0;
+    while (probe < table.slots.len) : (probe += 1) {
+        const slot = table.slots[@intCast(pos)];
+        if (slot == 0) return null;
+        const entry = entries[slot - 1];
+        if (entry.prefix_hash == h and entry.prefix_count == @as(u8, @intCast(prefix_count)) and prefixMatches(decoded, entry)) {
+            return entry.route_index;
+        }
+        pos = (pos + 1) & table.mask;
+    }
+    return null;
+}
+
+fn findSuffixParam(bucket: *const HybridBucket, decoded: *const DecodedPath) ?u32 {
+    if (decoded.seg_count == 0) return null;
+    const prefix_count = decoded.seg_count - 1;
+    return findPrefixEntry(bucket.suffix_param_entries, &bucket.suffix_param_table, decoded, prefix_count);
+}
+
+fn findSuffixGlob(bucket: *const HybridBucket, decoded: *const DecodedPath) ?u32 {
+    if (bucket.suffix_glob_entries.len == 0) return null;
+
+    var prefix_count: usize = decoded.seg_count;
+    while (true) {
+        if (findPrefixEntry(bucket.suffix_glob_entries, &bucket.suffix_glob_table, decoded, prefix_count)) |rid| return rid;
+        if (prefix_count == 0) break;
+        prefix_count -= 1;
+    }
+    return null;
+}
+
+fn findFallback(routes: []const Route, fallback: *const FallbackBucket, path: []const u8) ?u32 {
+    for (fallback.route_indices) |route_index| {
+        if (matchPattern(routes[route_index].pattern, path)) return route_index;
+    }
+    return null;
 }
 
 fn methodToken(m: Method) []const u8 {
@@ -796,16 +801,6 @@ fn nextPow2AtLeastRuntime(n: usize, min: usize) usize {
     return x + 1;
 }
 
-fn cuckooSecondaryHash(h1: u64) u64 {
-    var x = h1 ^ 0x9e37_79b9_7f4a_7c15;
-    x ^= x >> 30;
-    x *%= 0xbf58_476d_1ce4_e5b9;
-    x ^= x >> 27;
-    x *%= 0x94d0_49bb_1331_11eb;
-    x ^= x >> 31;
-    return x;
-}
-
 fn monotonicNowNs() u64 {
     var ts: std.c.timespec = undefined;
     const rc = std.c.clock_gettime(std.c.CLOCK.MONOTONIC, &ts);
@@ -815,7 +810,9 @@ fn monotonicNowNs() u64 {
 
 fn buildRoutesAndLookups(a: Allocator, n: usize) !struct { routes: []Route, lookups: []Lookup } {
     const routes = try a.alloc(Route, n);
-    const lookups = try a.alloc(Lookup, n);
+    const hit_lookups = try a.alloc(Lookup, n);
+    const miss_count = @max(1, (n * 15 + 99) / 100);
+    const lookups = try a.alloc(Lookup, n + miss_count);
 
     for (0..n) |i| {
         var m: Method = switch (i % 6) {
@@ -850,9 +847,32 @@ fn buildRoutesAndLookups(a: Allocator, n: usize) !struct { routes: []Route, look
             .exact_path = if (pat.is_exact) pattern_str else null,
             .route_index = @intCast(i),
         };
-        lookups[i] = .{
+        hit_lookups[i] = .{
             .method = methodToken(m),
             .path = concrete_path,
+        };
+    }
+
+    for (0..lookups.len) |i| {
+        if (i % 20 < 17) {
+            lookups[i] = hit_lookups[i % hit_lookups.len];
+            continue;
+        }
+
+        const miss_idx = i - (i * 17 / 20);
+        const miss_method: Method = switch (miss_idx % 7) {
+            0 => .GET,
+            1 => .POST,
+            2 => .PUT,
+            3 => .DELETE,
+            4 => .PATCH,
+            5 => .OPTIONS,
+            else => .HEAD,
+        };
+        const miss_path = try std.fmt.allocPrint(a, "/missing/{d}/x/{d}", .{ n + miss_idx, (miss_idx % 997) + 11 });
+        lookups[i] = .{
+            .method = methodToken(miss_method),
+            .path = miss_path,
         };
     }
 
@@ -941,30 +961,6 @@ fn runRadixLookup(
     };
 }
 
-fn runCuckooLookup(
-    r: *const CuckooRouter,
-    lookups: []const Lookup,
-    lookup_ids: []const u32,
-    total_lookups: usize,
-) RunResult {
-    var checksum: u64 = 0;
-    const start_ns = monotonicNowNs();
-
-    var i: usize = 0;
-    while (i < total_lookups) : (i += 1) {
-        const l = lookups[lookup_ids[i % lookup_ids.len]];
-        const rid = r.match(l.method, l.path) orelse unreachable;
-        checksum +%= rid;
-    }
-
-    const ns = monotonicNowNs() - start_ns;
-    std.mem.doNotOptimizeAway(checksum);
-    return .{
-        .total_ns = ns,
-        .ns_per_lookup = @as(f64, @floatFromInt(ns)) / @as(f64, @floatFromInt(total_lookups)),
-    };
-}
-
 fn avgNs(results: []const RunResult) f64 {
     var total: f64 = 0;
     for (results) |r| total += r.ns_per_lookup;
@@ -978,20 +974,13 @@ fn verifyRouters(
     lookups: []const Lookup,
 ) !void {
     for (lookups, 0..) |l, i| {
-        const expected = current.match(l.method, l.path) orelse return error.CurrentRouterMissedLookup;
-        const got_hash = hash.match(l.method, l.path) orelse {
-            std.debug.print("hash missed lookup {d}: {s} {s}\n", .{ i, l.method, l.path });
-            return error.HashRouterMissedLookup;
-        };
-        const got_radix = radix.match(l.method, l.path) orelse {
-            std.debug.print("radix missed lookup {d}: {s} {s}, expected={d}\n", .{ i, l.method, l.path, expected });
-            radix.debugMatch(l.method, l.path);
-            return error.RadixRouterMissedLookup;
-        };
+        const expected = current.match(l.method, l.path);
+        const got_hash = hash.match(l.method, l.path);
+        const got_radix = radix.match(l.method, l.path);
 
         if (got_hash != expected or got_radix != expected) {
             std.debug.print(
-                "router mismatch at lookup {d}: {s} {s} -> current={d} hash={d} radix={d}\n",
+                "router mismatch at lookup {d}: {s} {s} -> current={any} hash={any} radix={any}\n",
                 .{ i, l.method, l.path, expected, got_hash, got_radix },
             );
             return error.RouterMismatch;
@@ -1060,6 +1049,7 @@ pub fn main() !void {
         \\
     , .{});
 
+    try runCase(a, 50, "50");
     try runCase(a, 500, "0.5k");
     try runCase(a, 5_000, "5k");
     try runCase(a, 50_000, "50k");

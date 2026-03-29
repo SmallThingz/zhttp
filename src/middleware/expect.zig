@@ -4,6 +4,7 @@ const parse = @import("../parse.zig");
 const Res = @import("../response.zig").Res;
 const MiddlewareInfo = @import("../middleware.zig").MiddlewareInfo;
 const ReqCtx = @import("../req_ctx.zig").ReqCtx;
+const request = @import("../request.zig");
 const test_helpers = @import("test_helpers.zig");
 const util = @import("../util.zig");
 
@@ -144,38 +145,38 @@ pub fn Expect(comptime opts: ExpectOptions) type {
     };
 }
 
-test "expect middleware: missing header passes through" {
-    const Mw = Expect(.{});
-    const MwCtx = struct {
-        expect: Mw.Info.data.?,
-    };
-    const ReqT = @import("../request.zig").Request(struct {
+const ExpectTestReq = request.Request(
+    struct {
         /// Captured request `Expect` header value.
         expect: parse.Optional(parse.String),
-    }, struct {}, &.{}, MwCtx);
+    },
+    struct {},
+    &.{},
+    struct { expect: ExpectState },
+);
 
-    const Next = struct {
-        /// Test helper next-handler implementation.
-        pub const function = call;
-        pub fn call(comptime rctx: ReqCtx, _: rctx.T()) !Res {
-            return Res.text(200, "ok");
-        }
-    };
-
-    const gpa = std.testing.allocator;
-    const path_buf = "/".*;
-    const query_buf: [0]u8 = .{};
-    const line: @import("../request.zig").RequestLine = .{
-        .method = "POST",
+fn initExpectTestReq(method: []const u8) ExpectTestReq {
+    const line: request.RequestLine = .{
+        .method = @constCast(method),
         .version = .http11,
-        .path = @constCast(path_buf[0..]),
-        .query = @constCast(query_buf[0..]),
+        .path = @constCast("/"[0..]),
+        .query = @constCast(""[0..]),
     };
-    const mw_ctx: MwCtx = .{ .expect = .{} };
-    var reqv = ReqT.init(gpa, std.testing.io, line, mw_ctx);
-    defer reqv.deinit(gpa);
+    return ExpectTestReq.init(std.testing.allocator, std.testing.io, line, .{ .expect = .{} });
+}
 
-    const res = try test_helpers.runMiddlewareTest(Mw, ReqT, Next, &reqv, line.method);
+const ExpectNextOk = struct {
+    pub const function = call;
+    pub fn call(comptime rctx: ReqCtx, _: rctx.T()) !Res {
+        return Res.text(200, "ok");
+    }
+};
+
+test "expect middleware: missing header passes through" {
+    const Mw = Expect(.{});
+    var reqv = initExpectTestReq("POST");
+    defer reqv.deinit(std.testing.allocator);
+    const res = try test_helpers.runMiddlewareTest(Mw, ExpectTestReq, ExpectNextOk, &reqv, "POST");
     try std.testing.expectEqual(@as(u16, 200), @intFromEnum(res.status));
     try std.testing.expect(!reqv.middlewareDataConst("expect").approved);
     try std.testing.expect(!reqv.middlewareDataConst("expect").sent);
@@ -183,41 +184,15 @@ test "expect middleware: missing header passes through" {
 
 test "expect middleware: accepts 100-continue and marks request approved" {
     const Mw = Expect(.{});
-    const MwCtx = struct {
-        expect: Mw.Info.data.?,
-    };
-    const ReqT = @import("../request.zig").Request(struct {
-        /// Captured request `Expect` header value.
-        expect: parse.Optional(parse.String),
-    }, struct {}, &.{}, MwCtx);
-
-    const Next = struct {
-        /// Test helper next-handler implementation.
-        pub const function = call;
-        pub fn call(comptime rctx: ReqCtx, _: rctx.T()) !Res {
-            return Res.text(200, "ok");
-        }
-    };
-
-    const gpa = std.testing.allocator;
-    const path_buf = "/".*;
-    const query_buf: [0]u8 = .{};
-    const line: @import("../request.zig").RequestLine = .{
-        .method = "POST",
-        .version = .http11,
-        .path = @constCast(path_buf[0..]),
-        .query = @constCast(query_buf[0..]),
-    };
-    const mw_ctx: MwCtx = .{ .expect = .{} };
-    var reqv = ReqT.init(gpa, std.testing.io, line, mw_ctx);
-    defer reqv.deinit(gpa);
+    var reqv = initExpectTestReq("POST");
+    defer reqv.deinit(std.testing.allocator);
     reqv.base().body = .{ .content_length = 1 };
     reqv.headersMut().expect = .{
         .present = true,
         .inner = .{ .value = "100-CONTINUE" },
     };
 
-    const res = try test_helpers.runMiddlewareTest(Mw, ReqT, Next, &reqv, line.method);
+    const res = try test_helpers.runMiddlewareTest(Mw, ExpectTestReq, ExpectNextOk, &reqv, "POST");
     try std.testing.expectEqual(@as(u16, 200), @intFromEnum(res.status));
     try std.testing.expect(reqv.middlewareDataConst("expect").approved);
     try std.testing.expect(!reqv.middlewareDataConst("expect").sent);
@@ -225,40 +200,14 @@ test "expect middleware: accepts 100-continue and marks request approved" {
 
 test "expect middleware: rejects 100-continue when body is absent by default" {
     const Mw = Expect(.{});
-    const MwCtx = struct {
-        expect: Mw.Info.data.?,
-    };
-    const ReqT = @import("../request.zig").Request(struct {
-        /// Captured request `Expect` header value.
-        expect: parse.Optional(parse.String),
-    }, struct {}, &.{}, MwCtx);
-
-    const Next = struct {
-        /// Test helper next-handler implementation.
-        pub const function = call;
-        pub fn call(comptime rctx: ReqCtx, _: rctx.T()) !Res {
-            return Res.text(200, "ok");
-        }
-    };
-
-    const gpa = std.testing.allocator;
-    const path_buf = "/".*;
-    const query_buf: [0]u8 = .{};
-    const line: @import("../request.zig").RequestLine = .{
-        .method = "GET",
-        .version = .http11,
-        .path = @constCast(path_buf[0..]),
-        .query = @constCast(query_buf[0..]),
-    };
-    const mw_ctx: MwCtx = .{ .expect = .{} };
-    var reqv = ReqT.init(gpa, std.testing.io, line, mw_ctx);
-    defer reqv.deinit(gpa);
+    var reqv = initExpectTestReq("GET");
+    defer reqv.deinit(std.testing.allocator);
     reqv.headersMut().expect = .{
         .present = true,
         .inner = .{ .value = "100-continue" },
     };
 
-    const res = try test_helpers.runMiddlewareTest(Mw, ReqT, Next, &reqv, line.method);
+    const res = try test_helpers.runMiddlewareTest(Mw, ExpectTestReq, ExpectNextOk, &reqv, "GET");
     try std.testing.expectEqual(@as(u16, 417), @intFromEnum(res.status));
     try std.testing.expect(res.close);
     try std.testing.expect(!reqv.middlewareDataConst("expect").approved);
@@ -266,80 +215,29 @@ test "expect middleware: rejects 100-continue when body is absent by default" {
 
 test "expect middleware: permissive mode allows 100-continue without body" {
     const Mw = Expect(.{ .allow_without_body = true });
-    const MwCtx = struct {
-        expect: Mw.Info.data.?,
-    };
-    const ReqT = @import("../request.zig").Request(struct {
-        /// Captured request `Expect` header value.
-        expect: parse.Optional(parse.String),
-    }, struct {}, &.{}, MwCtx);
-
-    const Next = struct {
-        /// Test helper next-handler implementation.
-        pub const function = call;
-        pub fn call(comptime rctx: ReqCtx, _: rctx.T()) !Res {
-            return Res.text(200, "ok");
-        }
-    };
-
-    const gpa = std.testing.allocator;
-    const path_buf = "/".*;
-    const query_buf: [0]u8 = .{};
-    const line: @import("../request.zig").RequestLine = .{
-        .method = "GET",
-        .version = .http11,
-        .path = @constCast(path_buf[0..]),
-        .query = @constCast(query_buf[0..]),
-    };
-    const mw_ctx: MwCtx = .{ .expect = .{} };
-    var reqv = ReqT.init(gpa, std.testing.io, line, mw_ctx);
-    defer reqv.deinit(gpa);
+    var reqv = initExpectTestReq("GET");
+    defer reqv.deinit(std.testing.allocator);
     reqv.headersMut().expect = .{
         .present = true,
         .inner = .{ .value = "100-continue" },
     };
 
-    const res = try test_helpers.runMiddlewareTest(Mw, ReqT, Next, &reqv, line.method);
+    const res = try test_helpers.runMiddlewareTest(Mw, ExpectTestReq, ExpectNextOk, &reqv, "GET");
     try std.testing.expectEqual(@as(u16, 200), @intFromEnum(res.status));
     try std.testing.expect(reqv.middlewareDataConst("expect").approved);
 }
 
 test "expect middleware: rejects 100-continue with content-length zero by default" {
     const Mw = Expect(.{});
-    const MwCtx = struct {
-        expect: Mw.Info.data.?,
-    };
-    const ReqT = @import("../request.zig").Request(struct {
-        /// Captured request `Expect` header value.
-        expect: parse.Optional(parse.String),
-    }, struct {}, &.{}, MwCtx);
-
-    const Next = struct {
-        pub const function = call;
-        pub fn call(comptime rctx: ReqCtx, _: rctx.T()) !Res {
-            return Res.text(200, "ok");
-        }
-    };
-
-    const gpa = std.testing.allocator;
-    const path_buf = "/".*;
-    const query_buf: [0]u8 = .{};
-    const line: @import("../request.zig").RequestLine = .{
-        .method = "POST",
-        .version = .http11,
-        .path = @constCast(path_buf[0..]),
-        .query = @constCast(query_buf[0..]),
-    };
-    const mw_ctx: MwCtx = .{ .expect = .{} };
-    var reqv = ReqT.init(gpa, std.testing.io, line, mw_ctx);
-    defer reqv.deinit(gpa);
+    var reqv = initExpectTestReq("POST");
+    defer reqv.deinit(std.testing.allocator);
     reqv.base().body = .{ .content_length = 0 };
     reqv.headersMut().expect = .{
         .present = true,
         .inner = .{ .value = "100-continue" },
     };
 
-    const res = try test_helpers.runMiddlewareTest(Mw, ReqT, Next, &reqv, line.method);
+    const res = try test_helpers.runMiddlewareTest(Mw, ExpectTestReq, ExpectNextOk, &reqv, "POST");
     try std.testing.expectEqual(@as(u16, 417), @intFromEnum(res.status));
     try std.testing.expect(res.close);
     try std.testing.expect(!reqv.middlewareDataConst("expect").approved);
@@ -348,40 +246,15 @@ test "expect middleware: rejects 100-continue with content-length zero by defaul
 
 test "expect middleware: accepts drained non-empty content-length body" {
     const Mw = Expect(.{});
-    const MwCtx = struct {
-        expect: Mw.Info.data.?,
-    };
-    const ReqT = @import("../request.zig").Request(struct {
-        /// Captured request `Expect` header value.
-        expect: parse.Optional(parse.String),
-    }, struct {}, &.{}, MwCtx);
-
-    const Next = struct {
-        pub const function = call;
-        pub fn call(comptime rctx: ReqCtx, _: rctx.T()) !Res {
-            return Res.text(200, "ok");
-        }
-    };
-
-    const gpa = std.testing.allocator;
-    const path_buf = "/".*;
-    const query_buf: [0]u8 = .{};
-    const line: @import("../request.zig").RequestLine = .{
-        .method = "POST",
-        .version = .http11,
-        .path = @constCast(path_buf[0..]),
-        .query = @constCast(query_buf[0..]),
-    };
-    const mw_ctx: MwCtx = .{ .expect = .{} };
-    var reqv = ReqT.init(gpa, std.testing.io, line, mw_ctx);
-    defer reqv.deinit(gpa);
+    var reqv = initExpectTestReq("POST");
+    defer reqv.deinit(std.testing.allocator);
     reqv.base().body = .{ .discarded = .content_length };
     reqv.headersMut().expect = .{
         .present = true,
         .inner = .{ .value = "100-continue" },
     };
 
-    const res = try test_helpers.runMiddlewareTest(Mw, ReqT, Next, &reqv, line.method);
+    const res = try test_helpers.runMiddlewareTest(Mw, ExpectTestReq, ExpectNextOk, &reqv, "POST");
     try std.testing.expectEqual(@as(u16, 200), @intFromEnum(res.status));
     try std.testing.expect(reqv.middlewareDataConst("expect").approved);
     try std.testing.expect(!reqv.middlewareDataConst("expect").sent);
@@ -389,40 +262,14 @@ test "expect middleware: accepts drained non-empty content-length body" {
 
 test "expect middleware: rejects unsupported expectation with close" {
     const Mw = Expect(.{});
-    const MwCtx = struct {
-        expect: Mw.Info.data.?,
-    };
-    const ReqT = @import("../request.zig").Request(struct {
-        /// Captured request `Expect` header value.
-        expect: parse.Optional(parse.String),
-    }, struct {}, &.{}, MwCtx);
-
-    const Next = struct {
-        /// Test helper next-handler implementation.
-        pub const function = call;
-        pub fn call(comptime rctx: ReqCtx, _: rctx.T()) !Res {
-            return Res.text(200, "ok");
-        }
-    };
-
-    const gpa = std.testing.allocator;
-    const path_buf = "/".*;
-    const query_buf: [0]u8 = .{};
-    const line: @import("../request.zig").RequestLine = .{
-        .method = "POST",
-        .version = .http11,
-        .path = @constCast(path_buf[0..]),
-        .query = @constCast(query_buf[0..]),
-    };
-    const mw_ctx: MwCtx = .{ .expect = .{} };
-    var reqv = ReqT.init(gpa, std.testing.io, line, mw_ctx);
-    defer reqv.deinit(gpa);
+    var reqv = initExpectTestReq("POST");
+    defer reqv.deinit(std.testing.allocator);
     reqv.headersMut().expect = .{
         .present = true,
         .inner = .{ .value = "magic-thing" },
     };
 
-    const res = try test_helpers.runMiddlewareTest(Mw, ReqT, Next, &reqv, line.method);
+    const res = try test_helpers.runMiddlewareTest(Mw, ExpectTestReq, ExpectNextOk, &reqv, "POST");
     try std.testing.expectEqual(@as(u16, 417), @intFromEnum(res.status));
     try std.testing.expect(res.close);
     try std.testing.expectEqualStrings("expectation failed\n", res.body);

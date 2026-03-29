@@ -28,6 +28,8 @@ fn testLog(method: []const u8, path: []const u8, status: u16, _: Io.Duration) vo
     log_state.status = status;
 }
 
+fn discardLog(_: []const u8, _: []const u8, _: u16, _: Io.Duration) void {}
+
 /// Configuration for `Logger`.
 pub const LoggerOptions = struct {
     /// Optional middleware context field name used to store timing/status data.
@@ -171,7 +173,7 @@ test "logger: invokes log function" {
 }
 
 test "logger: named context stores elapsed and status" {
-    const Mw = Logger(.{ .name = "log" });
+    const Mw = Logger(.{ .name = "log", .log = discardLog });
     const MwCtx = struct {
         log: Mw.Info.data.?,
     };

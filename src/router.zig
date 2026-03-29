@@ -11,6 +11,7 @@ const urldecode = @import("urldecode.zig");
 const middleware = @import("middleware.zig");
 const req_ctx = @import("req_ctx.zig");
 const route_decl = @import("route_decl.zig");
+const util = @import("util.zig");
 const ReqCtx = req_ctx.ReqCtx;
 
 comptime {
@@ -325,27 +326,6 @@ fn matchPatternNoCapture(p: Pattern, path: []u8) bool {
     return path_i > path.len;
 }
 
-fn fnv1a64(bytes: []const u8) u64 {
-    var h: u64 = 0xcbf29ce484222325;
-    for (bytes) |b| {
-        h ^= b;
-        h *%= 0x100000001b3;
-    }
-    return h;
-}
-
-fn nextPow2AtLeast(comptime n: usize, comptime min: usize) usize {
-    var x: usize = if (n < min) min else n;
-    x -= 1;
-    x |= x >> 1;
-    x |= x >> 2;
-    x |= x >> 4;
-    x |= x >> 8;
-    x |= x >> 16;
-    if (@sizeOf(usize) == 8) x |= x >> 32;
-    return x + 1;
-}
-
 const ExactEntry = struct {
     /// Stores `path`.
     path: []const u8,
@@ -365,7 +345,7 @@ fn ExactMap(comptime entries: anytype, comptime n: usize) type {
         }
     }
 
-    const cap: usize = nextPow2AtLeast(n * 2 + 1, 8);
+    const cap: usize = util.nextPow2AtLeast(n * 2 + 1, 8);
     const table = comptime blk: {
         var t: [cap]u16 = .{0} ** cap;
         const mask: u64 = cap - 1;
@@ -386,7 +366,7 @@ fn ExactMap(comptime entries: anytype, comptime n: usize) type {
         /// Find the route index for an exact path match.
         pub fn find(path: []const u8) ?u16 {
             if (n == 0) return null;
-            const h = fnv1a64(path);
+            const h = util.fnv1a64(path);
             const mask: u64 = cap - 1;
             var pos: u64 = h & mask;
             var probe: usize = 0;
@@ -487,7 +467,7 @@ pub fn Compiled(
                     if (exact) {
                         exact_storage[mid][exact_n] = .{
                             .path = rd.pattern,
-                            .hash = fnv1a64(rd.pattern),
+                            .hash = util.fnv1a64(rd.pattern),
                             .route_index = @intCast(i),
                         };
                         exact_n += 1;

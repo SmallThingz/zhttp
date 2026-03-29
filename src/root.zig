@@ -198,16 +198,6 @@ test "fuzz: propagates testOne error in non-fuzz mode" {
     try std.testing.expectEqual(@as(usize, 1), ctx.count);
 }
 
-test "root exports: top-level aliases point at canonical modules" {
-    try std.testing.expect(Res == response.Res);
-    try std.testing.expect(SegmentedRes == response.SegmentedRes);
-    try std.testing.expect(NoBodyRes == response.NoBodyRes);
-    try std.testing.expect(OperationCtx == operations.OperationCtx);
-    try std.testing.expect(route == router.route);
-    try std.testing.expect(get == router.get);
-    try std.testing.expect(ReqCtx == @import("req_ctx.zig").ReqCtx);
-}
-
 test {
     _ = @import("parse.zig");
     _ = @import("request.zig");

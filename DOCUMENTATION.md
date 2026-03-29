@@ -35,7 +35,14 @@ Global middlewares/operations are configured in `Server(.{ ... })`.
 A middleware is a `type` that exposes:
 
 - `pub const Info: zhttp.middleware.MiddlewareInfo`
-- `pub fn call(comptime rctx: zhttp.ReqCtx, req: rctx.T()) !rctx.Response([]const u8)`
+- `pub fn call(comptime rctx: zhttp.ReqCtx, req: rctx.T()) !rctx.Response(Body)`
+
+`Body` follows the same rules as endpoints:
+
+- `[]const u8`
+- `[][]const u8`
+- `void`
+- custom struct with `pub fn body(self, comptime rctx, req: rctx.TReadOnly(), cw) !void`
 
 Minimal example:
 
@@ -158,12 +165,27 @@ Important constraints:
 - parameter count must match the base method (zhttp supports at most one extra arg beyond `req`).
 - this is optional; most middlewares should not implement it.
 
+`rctx.TReadOnly()` is the override-free request view. It exposes the same surface as
+`rctx.T()` but dispatches directly to the base request implementation instead of
+walking the middleware override chain.
+
 Use `Override` only for cross-cutting request behavior changes.
 
 ## 2.9 Middleware and Response Bodies
 
-Response bodies may be `[]const u8`, `[][]const u8`, `void`, or a custom
-body struct with `pub fn body(self, comptime rctx, req: rctx.TReadOnly(), cw) !void`.
+Response bodies may be:
+
+- `[]const u8` for one contiguous body
+- `[][]const u8` for vectored fixed-length bodies
+- `void` for empty bodies
+- a custom body struct with `pub fn body(self, comptime rctx, req: rctx.TReadOnly(), cw) !void`
+
+Request body accessors available to middleware and endpoints:
+
+- `req.bodyAll(max_bytes)` reads and caches the full body
+- `req.bodyReader()` returns a one-way body reader for streaming consumers
+- `req.allocator()` uses request-lifetime allocation
+- `req.gpa()` returns the server allocator and must be freed manually
 
 ## 2.8 Middleware checklist
 
@@ -312,6 +334,13 @@ This is intentional: fail early, keep runtime fast.
 
 `Override` exists for advanced request-behavior interception, but is optional by design.
 Most middleware should remain simple (`Info` + `call` + optional state).
+
+## 4.9 Readonly request views for body writers
+
+Custom response body writers run after middleware/endpoint code has already produced
+the response metadata. They therefore receive `rctx.TReadOnly()` instead of `rctx.T()`.
+This keeps the request API available while avoiding another middleware-override pass
+during response streaming.
 
 ## 5. Testing Guidance
 

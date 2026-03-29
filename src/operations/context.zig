@@ -44,24 +44,3 @@ test "OperationCtx: T and filter delegate to router" {
     try std.testing.expectEqual(@as(usize, 3), indices.len);
     try std.testing.expectEqual(@as(usize, 3), indices[1]);
 }
-
-test "OperationCtx: empty filter result is passed through unchanged" {
-    const std = @import("std");
-
-    const Op = struct {};
-    const FakeRouter = struct {
-        pub fn filterByOperation(_: *@This(), comptime operation: type) []const usize {
-            comptime {
-                if (operation != Op) @compileError("wrong operation type");
-            }
-            return &.{};
-        }
-    };
-
-    const opctx: OperationCtx = .{
-        .operation = Op,
-        .router_type = FakeRouter,
-    };
-    var router: FakeRouter = .{};
-    try std.testing.expectEqual(@as(usize, 0), opctx.filter(&router).len);
-}

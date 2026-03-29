@@ -1,5 +1,4 @@
 const std = @import("std");
-const Res = @import("../response.zig").Res;
 const Header = @import("../response.zig").Header;
 const core_util = @import("../util.zig");
 

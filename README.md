@@ -83,37 +83,41 @@ exe.root_module.addImport("zhttp", zhttp_dep.module("zhttp"));
 - `zhttp.Server(.{ ... })` accepts `.Context`, `.middlewares`, `.operations`, `.routes`, `.config`, `.error_handler`, and `.not_found_handler`. `.error_handler` is a writer-based hook for user handler/middleware errors with signature `fn(*Server, *std.Io.Writer, comptime ErrorSet: type, err: ErrorSet) zhttp.router.Action`. Server parse/validation errors stay on the built-in bad-request path. If no not-found handler is provided, a built-in `404 not found` endpoint is used.
 - Route helpers: `zhttp.get`, `post`, `put`, `delete`, `patch`, `head`, `options`, and `zhttp.route(...)` each take `(pattern, EndpointType)`.
 - Endpoint types must expose `pub const Info: zhttp.router.EndpointInfo = .{ ... };` and `pub fn call(comptime rctx: zhttp.ReqCtx, req: rctx.T()) !rctx.Response(Body)`.
-- Supported `Body` types are `[]const u8`, `[][]const u8`, `void`, and custom
-  structs that expose `pub fn body(self, comptime rctx, req: rctx.TReadOnly(), cw) !void`.
-- Current limitation: when a route includes middleware, the endpoint body type must be `[]const u8`.
+- Supported `Body` types are `[]const u8`, `[][]const u8`, `void`, and custom structs that expose `pub fn body(self, comptime rctx, req: rctx.TReadOnly(), cw) !void`.
 - `EndpointInfo` fields: `.headers`, `.query`, `.path`, `.middlewares`, `.operations`.
 - Optional endpoint upgrade hook: `pub fn upgrade(server, stream, r, w, line, res) void`. If present and `call` returns `101 Switching Protocols`, zhttp writes upgrade response and returns `zhttp.router.Action.upgraded`; the upgrade hook owns connection lifecycle.
 - Standard middleware signatures are available at top-level as `zhttp.CorsSignature`.
 - Header capture keys match case-insensitively, and `_` in field names matches `-` in incoming headers.
 - If `Info.path` is omitted, path params default to strings.
 - Route patterns support both segment params (`/users/{id}`) and trailing named globs (`/static/{*path}`).
-- Typed request accessors include `req.header(...)`, `req.queryParam(...)`, `req.paramValue(...)`, and `req.middlewareData(...)`.
+- Typed request accessors include `req.header(...)`, `req.queryParam(...)`, `req.paramValue(...)`, `req.middlewareData(...)`, and `req.middlewareStatic(...)`.
+- Request body helpers:
+  - `req.bodyAll(max_bytes)` reads and caches the full request body for repeated use.
+  - `req.bodyReader()` gives one-way streaming access to the request body.
+  - `req.gpa()` returns the server allocator; memory taken from it must be freed manually.
+- `rctx.TReadOnly()` produces the same request surface without middleware overrides. Use it from custom response body writers when you want direct access to the base request methods.
 
 ## Response Body Modes
 
 - `[]const u8` uses `Content-Length` (single contiguous body).
 - `[][]const u8` uses `Content-Length` (sum of segments, written via vectored I/O).
+- `void` uses `Content-Length: 0`.
 - Custom response body structs use `Transfer-Encoding: chunked`.
 
 Chunked example shape:
 
 ```zig
+const StreamBody = struct {
+    pub fn body(_: @This(), comptime rctx: zhttp.ReqCtx, req: rctx.TReadOnly(), cw: *zhttp.response.ChunkedWriter) std.Io.Writer.Error!void {
+        _ = req;
+        try cw.writeAll("hello ");
+        try cw.writeAll("world");
+    }
+};
+
 pub fn call(comptime rctx: zhttp.ReqCtx, req: rctx.T()) !rctx.Response(StreamBody) {
     _ = req;
-    return .{
-        .status = .ok,
-        .body = .{ .writeFn = struct {
-            fn write(cw: *zhttp.response.ChunkedWriter) std.Io.Writer.Error!void {
-                try cw.writeAll("hello ");
-                try cw.writeAll("world");
-            }
-        }.write },
-    };
+    return .{ .status = .ok, .body = .{} };
 }
 ```
 

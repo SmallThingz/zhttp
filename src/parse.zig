@@ -66,23 +66,10 @@ pub fn doneParsingStruct(value: anytype, present: []const bool) !void {
     }
 }
 
-fn asciiLower(c: u8) u8 {
-    return if (c >= 'A' and c <= 'Z') c + 32 else c;
-}
-
-fn fnv1a64(bytes: []const u8) u64 {
-    var h: u64 = 0xcbf29ce484222325;
-    for (bytes) |b| {
-        h ^= b;
-        h *%= 0x100000001b3;
-    }
-    return h;
-}
-
 fn fnv1a64HeaderKey(bytes: []const u8) u64 {
     var h: u64 = 0xcbf29ce484222325;
     for (bytes) |b| {
-        const c: u8 = if (b == '_') '-' else asciiLower(b);
+        const c: u8 = if (b == '_') '-' else util.asciiLower(b);
         h ^= c;
         h *%= 0x100000001b3;
     }
@@ -93,7 +80,7 @@ fn asciiEqHeaderKeyIgnoreCase(input: []const u8, field_name: []const u8) bool {
     if (input.len != field_name.len) return false;
     for (input, field_name) |ic, fc0| {
         const fc: u8 = if (fc0 == '_') '-' else fc0;
-        if (asciiLower(ic) != asciiLower(fc)) return false;
+        if (util.asciiLower(ic) != util.asciiLower(fc)) return false;
     }
     return true;
 }
@@ -103,21 +90,9 @@ fn headerFieldNamesClash(a: []const u8, b: []const u8) bool {
     for (a, b) |ac0, bc0| {
         const ac: u8 = if (ac0 == '_') '-' else ac0;
         const bc: u8 = if (bc0 == '_') '-' else bc0;
-        if (asciiLower(ac) != asciiLower(bc)) return false;
+        if (util.asciiLower(ac) != util.asciiLower(bc)) return false;
     }
     return true;
-}
-
-fn nextPow2AtLeast(comptime n: usize, comptime min: usize) usize {
-    var x: usize = if (n < min) min else n;
-    x -= 1;
-    x |= x >> 1;
-    x |= x >> 2;
-    x |= x >> 4;
-    x |= x >> 8;
-    x |= x >> 16;
-    if (@sizeOf(usize) == 8) x |= x >> 32;
-    return x + 1;
 }
 
 pub const LookupKind = enum { header, query };
@@ -156,13 +131,13 @@ pub fn Lookup(comptime T: type, comptime kind: LookupKind) type {
         for (keys, 0..) |k, i| {
             out[i] = switch (kind) {
                 .header => fnv1a64HeaderKey(k),
-                .query => fnv1a64(k),
+                .query => util.fnv1a64(k),
             };
         }
         break :blk out;
     };
 
-    const table_cap: usize = nextPow2AtLeast(fields.len * 2 + 1, 8);
+    const table_cap: usize = util.nextPow2AtLeast(fields.len * 2 + 1, 8);
 
     const table = comptime blk: {
         var t: [table_cap]u16 = .{0} ** table_cap;
@@ -190,7 +165,7 @@ pub fn Lookup(comptime T: type, comptime kind: LookupKind) type {
             if (count == 0) return null;
             const h = switch (kind) {
                 .header => fnv1a64HeaderKey(name),
-                .query => fnv1a64(name),
+                .query => util.fnv1a64(name),
             };
             const mask: u64 = table_cap - 1;
             var pos: u64 = h & mask;

@@ -1528,6 +1528,31 @@ test "bodyReader: partial stream then discard transitions to discarded" {
     try std.testing.expectError(error.BadRequest, reqv.bodyAll(16));
 }
 
+test "bodyReader: chunked partial stream then discard transitions to discarded" {
+    const ReqT = Request(struct {}, struct {}, &.{}, TestMwCtx);
+    const gpa = std.testing.allocator;
+    const path = try gpa.dupe(u8, "/");
+    defer gpa.free(path);
+    const query = try gpa.dupe(u8, "");
+    defer gpa.free(query);
+    const line: RequestLine = .{ .method = "POST", .version = .http11, .path = path, .query = query };
+    const mw_ctx: TestMwCtx = .{};
+    var reqv = ReqT.init(gpa, std.testing.io, line, mw_ctx);
+    defer reqv.deinit(gpa);
+
+    var r = Io.Reader.fixed("Transfer-Encoding: chunked\r\n\r\n4\r\nWiki\r\n0\r\n\r\n");
+    try reqv.parseHeaders(gpa, &r, 8 * 1024);
+    var br = try reqv.bodyReader();
+    var buf: [2]u8 = undefined;
+    const n = try br.read(buf[0..]);
+    try std.testing.expectEqual(@as(usize, 2), n);
+    try std.testing.expectEqualStrings("Wi", buf[0..n]);
+    try std.testing.expectEqualDeep(Body{ .streamed = .chunked }, reqv.baseConst().body);
+    try br.discardRemaining();
+    try std.testing.expectEqualDeep(Body{ .discarded = .chunked }, reqv.baseConst().body);
+    try std.testing.expectError(error.BadRequest, reqv.bodyAll(16));
+}
+
 test "bodyReader: none body reaches eof immediately and marks discarded" {
     const ReqT = Request(struct {}, struct {}, &.{}, TestMwCtx);
     const gpa = std.testing.allocator;
@@ -1581,6 +1606,29 @@ test "bodyAll: replays stored body error" {
     try std.testing.expectEqualDeep(Body{ .errored = .{
         .err = error.EndOfStream,
         .framing = .content_length,
+    } }, reqv.baseConst().body);
+    try std.testing.expectError(error.EndOfStream, reqv.bodyAll(16));
+    try std.testing.expectError(error.EndOfStream, reqv.discardUnreadBody());
+}
+
+test "bodyAll: chunked replays stored body error" {
+    const ReqT = Request(struct {}, struct {}, &.{}, TestMwCtx);
+    const gpa = std.testing.allocator;
+    const path = try gpa.dupe(u8, "/");
+    defer gpa.free(path);
+    const query = try gpa.dupe(u8, "");
+    defer gpa.free(query);
+    const line: RequestLine = .{ .method = "POST", .version = .http11, .path = path, .query = query };
+    const mw_ctx: TestMwCtx = .{};
+    var reqv = ReqT.init(gpa, std.testing.io, line, mw_ctx);
+    defer reqv.deinit(gpa);
+
+    var r = Io.Reader.fixed("Transfer-Encoding: chunked\r\n\r\n1\r\na");
+    try reqv.parseHeaders(gpa, &r, 8 * 1024);
+    try std.testing.expectError(error.EndOfStream, reqv.bodyAll(16));
+    try std.testing.expectEqualDeep(Body{ .errored = .{
+        .err = error.EndOfStream,
+        .framing = .chunked,
     } }, reqv.baseConst().body);
     try std.testing.expectError(error.EndOfStream, reqv.bodyAll(16));
     try std.testing.expectError(error.EndOfStream, reqv.discardUnreadBody());

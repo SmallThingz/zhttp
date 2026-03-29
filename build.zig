@@ -101,6 +101,11 @@ pub fn build(b: *std.Build) void {
     mod_tests.root_module.addImport("libbrotli", brotli_mod);
     const run_mod_tests = b.addRunArtifact(mod_tests);
     run_mod_tests.addArgs(&.{"--zhttp-skip=loopback listen preflight"});
+    if (sanitize_thread) {
+        // TSAN slows the socket-heavy suite substantially; run tests
+        // serially so the sanitizer sweep completes reliably.
+        run_mod_tests.addArgs(&.{ "--jobs", "1" });
+    }
     if (b.args) |args| {
         run_mod_tests.addArgs(args);
     }

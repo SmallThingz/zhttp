@@ -141,7 +141,7 @@ pub fn main(init: std.process.Init) !void {
         var group: std.Io.Group = .init;
         var group_done = false;
         defer if (!group_done) {
-            group.cancel(io);
+            server.stop();
             group.await(io) catch {};
         };
         try group.concurrent(io, SrvT.run, .{&server});
@@ -182,7 +182,7 @@ pub fn main(init: std.process.Init) !void {
 
         stream.close(io);
         close_stream = false;
-        group.cancel(io);
+        server.stop();
         group.await(io) catch {};
         group_done = true;
         return;

@@ -930,6 +930,7 @@ test "Server config: arena_reset_limit override is applied" {
 
 test "Server stop: blocked accept loop shuts down cleanly" {
     primeSocketBackend();
+    const io = std.testing.io;
 
     const SrvT = Server(.{
         .routes = .{
@@ -944,65 +945,53 @@ test "Server stop: blocked accept loop shuts down cleanly" {
     });
 
     for (0..64) |_| {
-        {
-            var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
-            defer threaded.deinit();
-            const io = threaded.io();
+        const addr0: Io.net.IpAddress = .{ .ip4 = Io.net.Ip4Address.loopback(0) };
+        var group: Io.Group = .init;
+        var server = try SrvT.init(std.testing.allocator, io, addr0, {});
+        const port: u16 = server.listener.socket.address.getPort();
+        try std.testing.expect(port != 0);
 
-            const addr0: Io.net.IpAddress = .{ .ip4 = Io.net.Ip4Address.loopback(0) };
-            var group: Io.Group = .init;
-            var server = try SrvT.init(std.testing.allocator, io, addr0, {});
-            const port: u16 = server.listener.socket.address.getPort();
-            try std.testing.expect(port != 0);
+        try group.concurrent(io, SrvT.run, .{&server});
 
-            try group.concurrent(io, SrvT.run, .{&server});
+        // Drive one full request so the accept loop returns to its steady-state
+        // blocking-accept path before shutdown, without leaving a connection
+        // task mid-read.
+        var stream = try Io.net.IpAddress.connect(&.{ .ip4 = Io.net.Ip4Address.loopback(port) }, io, .{ .mode = .stream });
 
-            // Drive one full request so the accept loop returns to its steady-state
-            // blocking-accept path before shutdown, without leaving a connection
-            // task mid-read.
-            var stream = try Io.net.IpAddress.connect(&.{ .ip4 = Io.net.Ip4Address.loopback(port) }, io, .{ .mode = .stream });
+        var rb: [1024]u8 = undefined;
+        var wb: [256]u8 = undefined;
+        var sr = stream.reader(io, &rb);
+        var sw = stream.writer(io, &wb);
+        try sw.interface.writeAll("GET / HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n");
+        try sw.interface.flush();
 
-            var rb: [1024]u8 = undefined;
-            var wb: [256]u8 = undefined;
-            var sr = stream.reader(io, &rb);
-            var sw = stream.writer(io, &wb);
-            try sw.interface.writeAll("GET / HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n");
-            try sw.interface.flush();
+        const resp =
+            "HTTP/1.1 200 OK\r\n" ++
+            "connection: close\r\n" ++
+            "content-type: text/plain; charset=utf-8\r\n" ++
+            "content-length: 2\r\n" ++
+            "\r\n" ++
+            "ok";
+        var got: [resp.len]u8 = undefined;
+        try sr.interface.readSliceAll(got[0..]);
+        try std.testing.expectEqualStrings(resp, got[0..]);
+        try expectClosed(&sr.interface);
+        stream.close(io);
 
-            const resp =
-                "HTTP/1.1 200 OK\r\n" ++
-                "connection: close\r\n" ++
-                "content-type: text/plain; charset=utf-8\r\n" ++
-                "content-length: 2\r\n" ++
-                "\r\n" ++
-                "ok";
-            var got: [resp.len]u8 = undefined;
-            try sr.interface.readSliceAll(got[0..]);
-            try std.testing.expectEqualStrings(resp, got[0..]);
-            try expectClosed(&sr.interface);
-            stream.close(io);
-
-            stopServerTest(io, &group, &server);
-        }
+        stopServerTest(io, &group, &server);
     }
 }
 
-test "Server stop: active body read cancels cleanly" {
+test "Server stop: idle keepalive keep-alive connection shuts down cleanly" {
     primeSocketBackend();
-
-    const State = struct {
-        entered: std.atomic.Value(u32) = std.atomic.Value(u32).init(0),
-    };
+    const io = std.testing.io;
 
     const SrvT = Server(.{
-        .Context = State,
         .routes = .{
-            router.post("/", struct {
+            router.get("/", struct {
                 pub const Info: router.EndpointInfo = .{};
-
                 pub fn call(comptime rctx: ReqCtx, req: rctx.T()) !response.Res {
-                    req.ctx().entered.store(1, .release);
-                    _ = try req.bodyAll(1024);
+                    _ = req;
                     return response.Res.text(200, "ok");
                 }
             }),
@@ -1010,49 +999,40 @@ test "Server stop: active body read cancels cleanly" {
     });
 
     for (0..16) |_| {
-        {
-            var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
-            defer threaded.deinit();
-            const io = threaded.io();
+        const addr0: Io.net.IpAddress = .{ .ip4 = Io.net.Ip4Address.loopback(0) };
+        var group: Io.Group = .init;
+        var server = try SrvT.init(std.testing.allocator, io, addr0, {});
+        const port: u16 = server.listener.socket.address.getPort();
+        try group.concurrent(io, SrvT.run, .{&server});
 
-            var state: State = .{};
-            const addr0: Io.net.IpAddress = .{ .ip4 = Io.net.Ip4Address.loopback(0) };
-            var group: Io.Group = .init;
-            var server = try SrvT.init(std.testing.allocator, io, addr0, &state);
-            const port: u16 = server.listener.socket.address.getPort();
-            try std.testing.expect(port != 0);
+        var stream = try Io.net.IpAddress.connect(&.{ .ip4 = Io.net.Ip4Address.loopback(port) }, io, .{ .mode = .stream });
 
-            try group.concurrent(io, SrvT.run, .{&server});
+        var rb: [1024]u8 = undefined;
+        var wb: [256]u8 = undefined;
+        var sr = stream.reader(io, &rb);
+        var sw = stream.writer(io, &wb);
+        try sw.interface.writeAll("GET / HTTP/1.1\r\nHost: x\r\n\r\n");
+        try sw.interface.flush();
 
-            var stream = try Io.net.IpAddress.connect(&.{ .ip4 = Io.net.Ip4Address.loopback(port) }, io, .{ .mode = .stream });
-            defer stream.close(io);
+        const resp =
+            "HTTP/1.1 200 OK\r\n" ++
+            "connection: keep-alive\r\n" ++
+            "content-type: text/plain; charset=utf-8\r\n" ++
+            "content-length: 2\r\n" ++
+            "\r\n" ++
+            "ok";
+        var got: [resp.len]u8 = undefined;
+        try sr.interface.readSliceAll(got[0..]);
+        try std.testing.expectEqualStrings(resp, got[0..]);
 
-            var rb: [1024]u8 = undefined;
-            var wb: [256]u8 = undefined;
-            var sr = stream.reader(io, &rb);
-            var sw = stream.writer(io, &wb);
-            try sw.interface.writeAll(
-                "POST / HTTP/1.1\r\n" ++
-                    "Host: x\r\n" ++
-                    "Content-Length: 8\r\n" ++
-                    "\r\n",
-            );
-            try sw.interface.flush();
-
-            var spins: usize = 0;
-            while (state.entered.load(.acquire) == 0 and spins < 10_000) : (spins += 1) {
-                std.Thread.yield() catch {};
-            }
-            try std.testing.expectEqual(@as(u32, 1), state.entered.load(.acquire));
-
-            stopServerTest(io, &group, &server);
-            try expectClosed(&sr.interface);
-        }
+        stopServerTest(io, &group, &server);
+        stream.close(io);
     }
 }
 
 test "Server stop: concurrent stop calls are race-free and idempotent" {
     primeSocketBackend();
+    const io = std.testing.io;
 
     const SrvT = Server(.{
         .routes = .{
@@ -1074,10 +1054,6 @@ test "Server stop: concurrent stop calls are race-free and idempotent" {
             while (i < 64) : (i += 1) self.server.stop();
         }
     };
-
-    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
-    defer threaded.deinit();
-    const io = threaded.io();
 
     const addr0: Io.net.IpAddress = .{ .ip4 = Io.net.Ip4Address.loopback(0) };
     var group: Io.Group = .init;

@@ -268,6 +268,14 @@ pub const ReqCtx = struct {
                 return Ctx.call(@TypeOf(self2._base.bodyAll(max_bytes)), "bodyAll", .{ self2, max_bytes });
             }
 
+            /// Returns the server GPA.
+            ///
+            /// Warning: memory allocated with this allocator is not request-owned
+            /// and must be freed manually by the caller.
+            pub fn gpa(self2: ReqSelf) std.mem.Allocator {
+                return Ctx.call(std.mem.Allocator, "gpa", .{self2});
+            }
+
             /// Starts streaming the request body.
             pub fn bodyReader(self2: ReqSelf) @TypeOf(self2._base.bodyReader()) {
                 return Ctx.call(@TypeOf(self2._base.bodyReader()), "bodyReader", .{self2});
@@ -402,6 +410,9 @@ test "ReqCtx: run/next/override chain and server access work" {
         override_seen: bool = false,
 
         pub fn allocator(self: *@This()) std.mem.Allocator {
+            return self.allocator_value;
+        }
+        pub fn gpa(self: *@This()) std.mem.Allocator {
             return self.allocator_value;
         }
         pub fn io(self: *@This()) std.Io {
@@ -603,6 +614,9 @@ test "ReqCtx: request wrapper forwards accessors and const forms" {
         pub fn allocator(self: *@This()) std.mem.Allocator {
             return self.allocator_value;
         }
+        pub fn gpa(self: *@This()) std.mem.Allocator {
+            return self.allocator_value;
+        }
         pub fn io(self: *@This()) std.Io {
             return self.io_value;
         }
@@ -690,6 +704,9 @@ test "ReqCtx: request wrapper forwards accessors and const forms" {
             const alloc = req.allocator();
             const buf = try alloc.alloc(u8, 1);
             alloc.free(buf);
+            const gpa = req.gpa();
+            const gpa_buf = try gpa.alloc(u8, 1);
+            gpa.free(gpa_buf);
             _ = req.io();
             try testing.expect(rctx.Response([]const u8) == Res);
             try testing.expectEqual(@as(u8, 5), req.ctx().value);

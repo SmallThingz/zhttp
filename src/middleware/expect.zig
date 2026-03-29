@@ -72,9 +72,7 @@ pub fn Expect(comptime opts: ExpectOptions) type {
                 .chunked => true,
                 .content_length => true,
                 .downloaded => true,
-                .discarded => |origin| origin != .none,
-                .streamed => |origin| origin != .none,
-                .errored => |state| state.origin != .none,
+                .discarded, .streamed, .errored => base.body_origin != .none,
             };
         }
 

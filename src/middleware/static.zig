@@ -11,6 +11,7 @@ const router = @import("../router.zig");
 const test_helpers = @import("test_helpers.zig");
 const util = @import("util.zig");
 
+const Allocator = std.mem.Allocator;
 const Io = std.Io;
 
 fn normalizeMount(comptime m: []const u8) []const u8 {
@@ -626,6 +627,7 @@ fn testRouteDecl(comptime method: []const u8, comptime pattern: []const u8, comp
 fn testServerType(comptime rd: router.RouteDecl, comptime RouteStaticCtx: type) type {
     return struct {
         io: Io,
+        gpa: Allocator,
         ctx: void,
         route_static_ctx: RouteStaticCtx,
 
@@ -684,7 +686,7 @@ test "static: serves file and index, blocks traversal" {
         };
         const mw_ctx: MwCtx = .{};
         const mw_static = try initStaticRouteCtx(S, a, "/static/{*path}");
-        var server: TestServer = .{ .io = std.testing.io, .ctx = {}, .route_static_ctx = mw_static };
+        var server: TestServer = .{ .io = std.testing.io, .gpa = a, .ctx = {}, .route_static_ctx = mw_static };
         var reqv = ReqT.initWithServer(a, line, mw_ctx, &server);
         defer reqv.deinit(a);
         var rel0 = "hello.txt".*;
@@ -709,7 +711,7 @@ test "static: serves file and index, blocks traversal" {
         };
         const mw_ctx: MwCtx = .{};
         const mw_static = try initStaticRouteCtx(S, a, "/static/{*path}");
-        var server: TestServer = .{ .io = std.testing.io, .ctx = {}, .route_static_ctx = mw_static };
+        var server: TestServer = .{ .io = std.testing.io, .gpa = a, .ctx = {}, .route_static_ctx = mw_static };
         var reqv = ReqT.initWithServer(a, line, mw_ctx, &server);
         defer reqv.deinit(a);
         try reqv.parseParams(a, &.{""});
@@ -732,7 +734,7 @@ test "static: serves file and index, blocks traversal" {
         };
         const mw_ctx: MwCtx = .{};
         const mw_static = try initStaticRouteCtx(S, a, "/static/{*path}");
-        var server: TestServer = .{ .io = std.testing.io, .ctx = {}, .route_static_ctx = mw_static };
+        var server: TestServer = .{ .io = std.testing.io, .gpa = a, .ctx = {}, .route_static_ctx = mw_static };
         var reqv = ReqT.initWithServer(a, line, mw_ctx, &server);
         defer reqv.deinit(a);
         var rel_bad = "../secret.txt".*;
@@ -767,7 +769,7 @@ test "static: explicit glob_param_name works with multiple path params" {
     };
     const mw_ctx: MwCtx = .{};
     const mw_static = try initStaticRouteCtx(S, a, "/x/{prefix}/{*rest}");
-    var server: TestServer = .{ .io = std.testing.io, .ctx = {}, .route_static_ctx = mw_static };
+    var server: TestServer = .{ .io = std.testing.io, .gpa = a, .ctx = {}, .route_static_ctx = mw_static };
     var reqv = ReqT.initWithServer(a, line, mw_ctx, &server);
     defer reqv.deinit(a);
     var p0 = "prefix".*;
@@ -801,7 +803,7 @@ test "static: etag returns 304 on match" {
         };
         const mw_ctx: MwCtx = .{};
         const mw_static = try initStaticRouteCtx(S, a, "/static/{*path}");
-        var server: TestServer = .{ .io = std.testing.io, .ctx = {}, .route_static_ctx = mw_static };
+        var server: TestServer = .{ .io = std.testing.io, .gpa = a, .ctx = {}, .route_static_ctx = mw_static };
         var reqv = ReqT.initWithServer(a, line, mw_ctx, &server);
         defer reqv.deinit(a);
         var rel1 = "hello.txt".*;
@@ -817,7 +819,7 @@ test "static: etag returns 304 on match" {
             .query = @constCast(query_buf[0..]),
         };
         const mw_ctx2: MwCtx = .{};
-        var server2: TestServer = .{ .io = std.testing.io, .ctx = {}, .route_static_ctx = mw_static };
+        var server2: TestServer = .{ .io = std.testing.io, .gpa = a, .ctx = {}, .route_static_ctx = mw_static };
         var reqv2 = ReqT.initWithServer(a, line2, mw_ctx2, &server2);
         defer reqv2.deinit(a);
         var rel6 = "hello.txt".*;
@@ -865,7 +867,7 @@ test "static: in-memory cache serves stale bytes when fs watch is disabled" {
             .query = @constCast(query_buf[0..]),
         };
         const mw_ctx: MwCtx = .{};
-        var server: TestServer = .{ .io = std.testing.io, .ctx = {}, .route_static_ctx = mw_static };
+        var server: TestServer = .{ .io = std.testing.io, .gpa = a, .ctx = {}, .route_static_ctx = mw_static };
         var reqv = ReqT.initWithServer(a, line, mw_ctx, &server);
         defer reqv.deinit(a);
         var rel2 = "watch.txt".*;
@@ -885,7 +887,7 @@ test "static: in-memory cache serves stale bytes when fs watch is disabled" {
             .query = @constCast(query_buf[0..]),
         };
         const mw_ctx: MwCtx = .{};
-        var server: TestServer = .{ .io = std.testing.io, .ctx = {}, .route_static_ctx = mw_static };
+        var server: TestServer = .{ .io = std.testing.io, .gpa = a, .ctx = {}, .route_static_ctx = mw_static };
         var reqv = ReqT.initWithServer(a, line, mw_ctx, &server);
         defer reqv.deinit(a);
         var rel3 = "watch.txt".*;
@@ -934,7 +936,7 @@ test "static: in-memory cache refreshes when fs watch is enabled" {
             .query = @constCast(query_buf[0..]),
         };
         const mw_ctx: MwCtx = .{};
-        var server: TestServer = .{ .io = std.testing.io, .ctx = {}, .route_static_ctx = mw_static };
+        var server: TestServer = .{ .io = std.testing.io, .gpa = a, .ctx = {}, .route_static_ctx = mw_static };
         var reqv = ReqT.initWithServer(a, line, mw_ctx, &server);
         defer reqv.deinit(a);
         var rel4 = "watch.txt".*;
@@ -954,7 +956,7 @@ test "static: in-memory cache refreshes when fs watch is enabled" {
             .query = @constCast(query_buf[0..]),
         };
         const mw_ctx: MwCtx = .{};
-        var server: TestServer = .{ .io = std.testing.io, .ctx = {}, .route_static_ctx = mw_static };
+        var server: TestServer = .{ .io = std.testing.io, .gpa = a, .ctx = {}, .route_static_ctx = mw_static };
         var reqv = ReqT.initWithServer(a, line, mw_ctx, &server);
         defer reqv.deinit(a);
         var rel5 = "watch.txt".*;

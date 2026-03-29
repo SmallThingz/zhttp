@@ -5,6 +5,7 @@ const MiddlewareInfo = @import("../middleware.zig").MiddlewareInfo;
 const ReqCtx = @import("../req_ctx.zig").ReqCtx;
 const test_helpers = @import("test_helpers.zig");
 
+const Allocator = std.mem.Allocator;
 const Io = std.Io;
 
 const LogState = struct {
@@ -118,6 +119,7 @@ test "logger: invokes log function" {
     const ServerT = struct {
         const RouteStaticCtx = struct {};
         io: Io,
+        gpa: Allocator,
         ctx: void,
         route_static_ctx: RouteStaticCtx = .{},
 
@@ -156,7 +158,7 @@ test "logger: invokes log function" {
         .query = @constCast(query_buf[0..]),
     };
     const mw_ctx: MwCtx = .{};
-    var server: ServerT = .{ .io = std.testing.io, .ctx = {} };
+    var server: ServerT = .{ .io = std.testing.io, .gpa = gpa, .ctx = {} };
     var reqv = ReqT.initWithServer(gpa, line, mw_ctx, &server);
     defer reqv.deinit(gpa);
 

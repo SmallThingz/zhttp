@@ -29,12 +29,9 @@ pub const Body = union(enum) {
     chunked,
     content_length: usize,
     downloaded: []u8,
-    streamed: BodyOrigin,
-    discarded: BodyOrigin,
-    errored: struct {
-        origin: BodyOrigin,
-        err: BodyOpError,
-    },
+    streamed,
+    discarded,
+    errored: BodyOpError,
 };
 
 pub const Base = struct {
@@ -53,6 +50,8 @@ pub const Base = struct {
 
     /// Stores `body`.
     body: Body = .none,
+    /// Stores `body_origin`.
+    body_origin: BodyOrigin = .none,
 };
 
 pub const ParseLineError = error{
@@ -265,6 +264,7 @@ pub fn RequestPWithPatternExt(
     const ServerT = @typeInfo(ServerPtr).pointer.child;
     comptime {
         if (!@hasField(ServerT, "io")) @compileError("ServerPtr pointee must have field `io`");
+        if (!@hasField(ServerT, "gpa")) @compileError("ServerPtr pointee must have field `gpa`");
         if (!@hasField(ServerT, "ctx")) @compileError("ServerPtr pointee must have field `ctx`");
         if (!@hasDecl(ServerT, "RouteStaticType")) @compileError("ServerPtr pointee must expose `pub fn RouteStaticType(comptime route_index: usize) type`");
         if (!@hasDecl(ServerT, "routeStatic")) @compileError("ServerPtr pointee must expose `pub fn routeStatic(self: *Server, comptime route_index: usize) *RouteStaticType(route_index)`");
@@ -364,6 +364,7 @@ pub fn RequestPWithPatternExt(
         ) Self {
             default_server = undefined;
             default_server.io = init_io;
+            default_server.gpa = init_arena;
             default_server.ctx = app_ctx;
             default_server.routeStatic(route_index).* = std.mem.zeroes(MwStaticCtx);
             return initWithServer(init_arena, line, mw_ctx, &default_server);
@@ -393,6 +394,14 @@ pub fn RequestPWithPatternExt(
         /// Implements allocator.
         pub fn allocator(self: *const Self) Allocator {
             return self._base.arena;
+        }
+
+        /// Returns the server GPA.
+        ///
+        /// Warning: memory allocated with this allocator is not request-owned
+        /// and must be freed manually by the caller.
+        pub fn gpa(self: *const Self) Allocator {
+            return self._server.gpa;
         }
 
         /// Implements base.
@@ -536,18 +545,11 @@ pub fn RequestPWithPatternExt(
                 else => {},
             }
             self._base.body = .none;
+            self._base.body_origin = .none;
         }
 
-        fn bodyOrigin(body: Body) BodyOrigin {
-            return switch (body) {
-                .none => .none,
-                .chunked => .chunked,
-                .content_length => .content_length,
-                .downloaded => .content_length,
-                .streamed => |origin| origin,
-                .discarded => |origin| origin,
-                .errored => |state| state.origin,
-            };
+        fn bodyOrigin(self: *const Self) BodyOrigin {
+            return self._base.body_origin;
         }
 
         /// Releases resources held by this value.
@@ -724,10 +726,13 @@ pub fn RequestPWithPatternExt(
             if (has_chunked and content_length != null) return error.BadRequest;
             if (has_chunked) {
                 self._base.body = .chunked;
+                self._base.body_origin = .chunked;
             } else if (content_length) |cl| {
                 self._base.body = .{ .content_length = cl };
+                self._base.body_origin = .content_length;
             } else {
                 self._base.body = .none;
+                self._base.body_origin = .none;
             }
 
             if (HeaderLookup.count != 0) {
@@ -736,9 +741,10 @@ pub fn RequestPWithPatternExt(
         }
 
         fn rememberBodyError(self: *Self, err: BodyOpError) BodyOpError {
-            const origin = bodyOrigin(self._base.body);
+            const origin = self.bodyOrigin();
             self.clearBody(self._base.arena);
-            self._base.body = .{ .errored = .{ .origin = origin, .err = err } };
+            self._base.body = .{ .errored = err };
+            self._base.body_origin = origin;
             return err;
         }
 
@@ -821,7 +827,7 @@ pub fn RequestPWithPatternExt(
             },
 
             fn finish(self: *@This()) void {
-                self.req._base.body = .{ .discarded = bodyOrigin(self.req._base.body) };
+                self.req._base.body = .discarded;
                 self.state = .done;
             }
 
@@ -886,8 +892,10 @@ pub fn RequestPWithPatternExt(
                     try out.appendSlice(a, buf[0..n]);
                 }
                 const body = try out.toOwnedSlice(a);
+                const origin = self.req.bodyOrigin();
                 self.req.clearBody(a);
                 self.req._base.body = .{ .downloaded = body };
+                self.req._base.body_origin = origin;
                 self.state = .done;
                 return body;
             }
@@ -946,7 +954,7 @@ pub fn RequestPWithPatternExt(
                 .chunked => self.readChunkedAll(a, r, max_bytes),
                 .downloaded => |body| body,
                 .discarded, .streamed => error.BadRequest,
-                .errored => |state| state.err,
+                .errored => |err| err,
             };
         }
 
@@ -959,7 +967,7 @@ pub fn RequestPWithPatternExt(
         pub fn bodyReader(self: *Self) BodyOpError!BodyReader {
             return switch (self._base.body) {
                 .none => blk: {
-                    self._base.body = .{ .streamed = .none };
+                    self._base.body = .streamed;
                     break :blk .{
                         .req = self,
                         .reader = self._base.reader,
@@ -967,7 +975,7 @@ pub fn RequestPWithPatternExt(
                     };
                 },
                 .content_length => |len| blk: {
-                    self._base.body = .{ .streamed = .content_length };
+                    self._base.body = .streamed;
                     break :blk .{
                         .req = self,
                         .reader = self._base.reader,
@@ -975,7 +983,7 @@ pub fn RequestPWithPatternExt(
                     };
                 },
                 .chunked => blk: {
-                    self._base.body = .{ .streamed = .chunked };
+                    self._base.body = .streamed;
                     break :blk .{
                         .req = self,
                         .reader = self._base.reader,
@@ -983,7 +991,7 @@ pub fn RequestPWithPatternExt(
                     };
                 },
                 .downloaded, .discarded, .streamed => error.BadRequest,
-                .errored => |state| state.err,
+                .errored => |err| err,
             };
         }
 
@@ -1000,7 +1008,7 @@ pub fn RequestPWithPatternExt(
                         });
                         remaining -= tossed;
                     }
-                    self._base.body = .{ .discarded = .content_length };
+                    self._base.body = .discarded;
                 },
                 .chunked => {
                     while (try self.readChunkHeader(r)) |size| {
@@ -1014,10 +1022,10 @@ pub fn RequestPWithPatternExt(
                         }
                         try self.readChunkCrlf(r);
                     }
-                    self._base.body = .{ .discarded = .chunked };
+                    self._base.body = .discarded;
                 },
                 .streamed => return error.BadRequest,
-                .errored => |state| return state.err,
+                .errored => |err| return err,
             }
         }
 
@@ -1055,6 +1063,7 @@ pub fn Request(comptime Headers: type, comptime Query: type, comptime param_name
     const StandaloneServer = struct {
         const RouteStaticCtx = struct {};
         io: Io,
+        gpa: Allocator,
         ctx: void,
         route_static_ctx: RouteStaticCtx = .{},
 
@@ -1557,9 +1566,11 @@ test "bodyReader: partial stream then discard transitions to discarded" {
     const n = try br.read(buf[0..]);
     try std.testing.expectEqual(@as(usize, 2), n);
     try std.testing.expectEqualStrings("he", buf[0..n]);
-    try std.testing.expectEqualDeep(Body{ .streamed = .content_length }, reqv.baseConst().body);
+    try std.testing.expectEqualDeep(Body.streamed, reqv.baseConst().body);
+    try std.testing.expectEqual(BodyOrigin.content_length, reqv.baseConst().body_origin);
     try br.discardRemaining();
-    try std.testing.expectEqualDeep(Body{ .discarded = .content_length }, reqv.baseConst().body);
+    try std.testing.expectEqualDeep(Body.discarded, reqv.baseConst().body);
+    try std.testing.expectEqual(BodyOrigin.content_length, reqv.baseConst().body_origin);
     try std.testing.expectError(error.BadRequest, reqv.bodyAll(16));
 }
 
@@ -1578,7 +1589,8 @@ test "bodyAll: replays stored body error" {
     var r = Io.Reader.fixed("Content-Length: 5\r\n\r\nhel");
     try reqv.parseHeaders(gpa, &r, 8 * 1024);
     try std.testing.expectError(error.EndOfStream, reqv.bodyAll(16));
-    try std.testing.expectEqualDeep(Body{ .errored = .{ .origin = .content_length, .err = error.EndOfStream } }, reqv.baseConst().body);
+    try std.testing.expectEqual(BodyOrigin.content_length, reqv.baseConst().body_origin);
+    try std.testing.expectEqualDeep(Body{ .errored = error.EndOfStream }, reqv.baseConst().body);
     try std.testing.expectError(error.EndOfStream, reqv.bodyAll(16));
     try std.testing.expectError(error.EndOfStream, reqv.discardUnreadBody());
 }
@@ -1824,6 +1836,7 @@ test "RequestPWithPatternExt: accessors, setters, middleware data, and typed cap
     };
     const Server = struct {
         io: Io,
+        gpa: Allocator,
         ctx: *AppCtx,
         route_static_ctx: StaticData = .{},
 
@@ -1871,11 +1884,12 @@ test "RequestPWithPatternExt: accessors, setters, middleware data, and typed cap
     const line: RequestLine = .{ .method = "GET", .version = .http11, .path = path, .query = query };
 
     var app_ctx: AppCtx = .{ .value = 3 };
-    var server: Server = .{ .io = std.testing.io, .ctx = &app_ctx };
+    var server: Server = .{ .io = std.testing.io, .gpa = gpa, .ctx = &app_ctx };
     var reqv = ReqT.initWithServer(gpa, line, .{ .auth = .{ .value = 5 } }, &server);
     defer reqv.deinit(gpa);
 
     try std.testing.expect(reqv.server() == &server);
+    try std.testing.expect(reqv.gpa().ptr == gpa.ptr);
     try std.testing.expectEqual(@as(u8, 3), reqv.ctx().value);
     try std.testing.expectEqual(@as(u8, 3), reqv.ctxConst().value);
     reqv.mwCtxMut().auth.value = 6;
@@ -1946,9 +1960,10 @@ test "RequestPWithPatternExt: accessors, setters, middleware data, and typed cap
     const body = try reqv.bodyAll(8);
     try std.testing.expectEqualStrings("hello", body);
 
-    var server2: Server = .{ .io = std.testing.io, .ctx = &app_ctx2 };
+    var server2: Server = .{ .io = std.testing.io, .gpa = gpa, .ctx = &app_ctx2 };
     reqv.setServer(&server2);
     try std.testing.expect(reqv.server() == &server2);
+    try std.testing.expect(reqv.gpa().ptr == gpa.ptr);
     reqv.setIo(std.testing.io);
 
     var reqv2 = ReqT.initWithCtx(gpa, std.testing.io, line, .{ .auth = .{ .value = 2 } }, &app_ctx2);

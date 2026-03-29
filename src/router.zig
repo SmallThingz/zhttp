@@ -924,6 +924,8 @@ fn dispatchForTest(
         const RouteStaticCtx = struct {};
         /// Stores `io`.
         io: Io,
+        /// Stores `gpa`.
+        gpa: Allocator,
         /// Stores `ctx`.
         ctx: @TypeOf(ctx),
         /// Stores `route_static_ctx`.
@@ -954,6 +956,7 @@ fn dispatchForTest(
     };
     var server: ServerT = .{
         .io = std.testing.io,
+        .gpa = allocator,
         .ctx = ctx,
     };
     var params: [S.MaxParams][]u8 = undefined;
@@ -1532,6 +1535,8 @@ test "dispatch: typed path params bad value errors" {
         const RouteStaticCtx = struct {};
         /// Stores `io`.
         io: Io,
+        /// Stores `gpa`.
+        gpa: Allocator,
         /// Stores `ctx`.
         ctx: void,
         /// Stores `route_static_ctx`.
@@ -1560,7 +1565,7 @@ test "dispatch: typed path params bad value errors" {
             unreachable;
         }
     };
-    var server: ServerT = .{ .io = std.testing.io, .ctx = {} };
+    var server: ServerT = .{ .io = std.testing.io, .gpa = a, .ctx = {} };
     const rid = S.match(line.method, line.path).?;
     try std.testing.expectError(error.BadValue, S.dispatch(&server, a, &r, &w, &stream, line, rid, params[0..S.MaxParams], 8 * 1024, 8 * 1024));
 }
@@ -1816,6 +1821,8 @@ test "dispatch: handler error uses callback" {
         const RouteStaticCtx = struct {};
         /// Stores `io`.
         io: Io,
+        /// Stores `gpa`.
+        gpa: Allocator,
         /// Stores `ctx`.
         ctx: void,
         /// Stores `called`.
@@ -1849,6 +1856,7 @@ test "dispatch: handler error uses callback" {
     };
     var server: ServerT = .{
         .io = std.testing.io,
+        .gpa = a,
         .ctx = {},
         .called = &called,
     };
@@ -2003,6 +2011,8 @@ test "dispatch: invalid path percent-encoding rejected" {
         const RouteStaticCtx = struct {};
         /// Stores `io`.
         io: Io,
+        /// Stores `gpa`.
+        gpa: Allocator,
         /// Stores `ctx`.
         ctx: void,
         /// Stores `route_static_ctx`.
@@ -2031,7 +2041,7 @@ test "dispatch: invalid path percent-encoding rejected" {
             unreachable;
         }
     };
-    var server: ServerT = .{ .io = std.testing.io, .ctx = {} };
+    var server: ServerT = .{ .io = std.testing.io, .gpa = a, .ctx = {} };
     const rid = S.match(line.method, line.path).?;
     try std.testing.expectError(error.InvalidPercentEncoding, S.dispatch(&server, a, &r, &w, &stream, line, rid, params[0..S.MaxParams], 8 * 1024, 8 * 1024));
 }
@@ -2041,6 +2051,8 @@ test "dispatch: endpoint upgrade handles 101 and returns upgraded action" {
         const RouteStaticCtx = struct {};
         /// Stores `io`.
         io: Io,
+        /// Stores `gpa`.
+        gpa: Allocator,
         /// Stores `ctx`.
         ctx: void,
         /// Stores `upgraded`.
@@ -2104,6 +2116,7 @@ test "dispatch: endpoint upgrade handles 101 and returns upgraded action" {
 
     var server: ServerT = .{
         .io = std.testing.io,
+        .gpa = a,
         .ctx = {},
         .upgraded = false,
     };
@@ -2147,6 +2160,8 @@ test "dispatch: endpoint without upgrade does not check status" {
         const RouteStaticCtx = struct {};
         /// Stores `io`.
         io: Io,
+        /// Stores `gpa`.
+        gpa: Allocator,
         /// Stores `ctx`.
         ctx: void,
         /// Stores `route_static_ctx`.
@@ -2180,7 +2195,7 @@ test "dispatch: endpoint without upgrade does not check status" {
     defer arena.deinit();
     const a = arena.allocator();
 
-    var server: ServerT = .{ .io = std.testing.io, .ctx = {} };
+    var server: ServerT = .{ .io = std.testing.io, .gpa = a, .ctx = {} };
     var r = Io.Reader.fixed("GET /ws HTTP/1.1\r\nHost: x\r\n\r\n");
     const line = try request.parseRequestLineBorrowed(&r, 8 * 1024);
     var out: [256]u8 = undefined;
@@ -2198,6 +2213,7 @@ test "dispatch: endpoint with upgrade but non-101 does not call upgrade" {
     const ServerT = struct {
         const RouteStaticCtx = struct {};
         io: Io,
+        gpa: Allocator,
         ctx: void,
         called: bool = false,
         route_static_ctx: RouteStaticCtx = .{},
@@ -2243,7 +2259,7 @@ test "dispatch: endpoint with upgrade but non-101 does not call upgrade" {
     defer arena.deinit();
     const a = arena.allocator();
 
-    var server: ServerT = .{ .io = std.testing.io, .ctx = {} };
+    var server: ServerT = .{ .io = std.testing.io, .gpa = a, .ctx = {} };
     var r = Io.Reader.fixed("GET /x HTTP/1.1\r\nHost: x\r\n\r\n");
     const line = try request.parseRequestLineBorrowed(&r, 8 * 1024);
     var out: [256]u8 = undefined;

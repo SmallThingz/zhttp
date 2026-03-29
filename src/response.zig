@@ -194,6 +194,9 @@ pub fn writeAny(
         return;
     }
 
+    // Custom body structs always stream through chunked encoding. They receive
+    // the readonly request wrapper so serialization can inspect request state
+    // without re-entering middleware overrides.
     try w.writeAll("transfer-encoding: chunked\r\n\r\n");
     if (!send_body) return;
 
@@ -372,6 +375,32 @@ test "writeAny: custom body writes chunked encoding" {
     try std.testing.expect(seen);
     try std.testing.expect(std.mem.indexOf(u8, out[0..w.end], "transfer-encoding: chunked\r\n\r\n") != null);
     try std.testing.expect(std.mem.endsWith(u8, out[0..w.end], "5\r\nhello\r\n1\r\n!\r\n0\r\n\r\n"));
+}
+
+test "writeAny: custom body is not invoked when send_body is false" {
+    const FakeReqCtx = struct {
+        pub fn TReadOnly(comptime _: @This()) type {
+            return struct {
+                seen: *bool,
+            };
+        }
+    }{};
+    const StreamBody = struct {
+        pub fn body(_: @This(), comptime _: @TypeOf(FakeReqCtx), req: FakeReqCtx.TReadOnly(), _: *ChunkedWriter) !void {
+            req.seen.* = true;
+        }
+    };
+    const res: Response(StreamBody) = .{
+        .status = .ok,
+        .body = .{},
+    };
+    var seen = false;
+    const req_ro: FakeReqCtx.TReadOnly() = .{ .seen = &seen };
+    var out: [256]u8 = undefined;
+    var w = std.Io.Writer.fixed(out[0..]);
+    try writeAny(FakeReqCtx, req_ro, &w, res, true, false);
+    try std.testing.expect(!seen);
+    try std.testing.expect(std.mem.endsWith(u8, out[0..w.end], "transfer-encoding: chunked\r\n\r\n"));
 }
 
 test "Response: maps supported body shapes" {

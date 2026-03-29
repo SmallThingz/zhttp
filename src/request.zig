@@ -548,10 +548,6 @@ pub fn RequestPWithPatternExt(
             self._base.body_origin = .none;
         }
 
-        fn bodyOrigin(self: *const Self) BodyOrigin {
-            return self._base.body_origin;
-        }
-
         /// Releases resources held by this value.
         pub fn deinit(self: *Self, a: Allocator) void {
             self.clearBody(a);
@@ -741,7 +737,7 @@ pub fn RequestPWithPatternExt(
         }
 
         fn rememberBodyError(self: *Self, err: BodyOpError) BodyOpError {
-            const origin = self.bodyOrigin();
+            const origin = self._base.body_origin;
             self.clearBody(self._base.arena);
             self._base.body = .{ .errored = err };
             self._base.body_origin = origin;
@@ -780,6 +776,8 @@ pub fn RequestPWithPatternExt(
             const size_str = std.mem.trim(u8, line[0..semi], " \t");
             const size = std.fmt.parseInt(usize, size_str, 16) catch return self.rememberBodyError(error.BadRequest);
             if (size == 0) {
+                // A zero-sized chunk terminates the body and is followed by
+                // optional trailers plus a blank line.
                 try self.readChunkTrailers(r);
                 return null;
             }
@@ -827,6 +825,9 @@ pub fn RequestPWithPatternExt(
             },
 
             fn finish(self: *@This()) void {
+                // Streaming consumes ownership of the remaining body bytes. Once
+                // the stream reaches EOF there is nothing left for keep-alive
+                // cleanup to discard, so the request moves to `.discarded`.
                 self.req._base.body = .discarded;
                 self.state = .done;
             }
@@ -892,7 +893,7 @@ pub fn RequestPWithPatternExt(
                     try out.appendSlice(a, buf[0..n]);
                 }
                 const body = try out.toOwnedSlice(a);
-                const origin = self.req.bodyOrigin();
+                const origin = self.req._base.body_origin;
                 self.req.clearBody(a);
                 self.req._base.body = .{ .downloaded = body };
                 self.req._base.body_origin = origin;
@@ -1572,6 +1573,44 @@ test "bodyReader: partial stream then discard transitions to discarded" {
     try std.testing.expectEqualDeep(Body.discarded, reqv.baseConst().body);
     try std.testing.expectEqual(BodyOrigin.content_length, reqv.baseConst().body_origin);
     try std.testing.expectError(error.BadRequest, reqv.bodyAll(16));
+}
+
+test "bodyReader: none body reaches eof immediately and marks discarded" {
+    const ReqT = Request(struct {}, struct {}, &.{}, TestMwCtx);
+    const gpa = std.testing.allocator;
+    const path = try gpa.dupe(u8, "/");
+    defer gpa.free(path);
+    const query = try gpa.dupe(u8, "");
+    defer gpa.free(query);
+    const line: RequestLine = .{ .method = "GET", .version = .http11, .path = path, .query = query };
+    var reqv = ReqT.init(gpa, std.testing.io, line, .{});
+    defer reqv.deinit(gpa);
+
+    var br = try reqv.bodyReader();
+    var buf: [8]u8 = undefined;
+    try std.testing.expectEqual(@as(usize, 0), try br.read(buf[0..]));
+    try std.testing.expectEqualDeep(Body.discarded, reqv.baseConst().body);
+    try std.testing.expectEqual(BodyOrigin.none, reqv.baseConst().body_origin);
+}
+
+test "bodyReader: content-length zero reaches eof immediately and marks discarded" {
+    const ReqT = Request(struct {}, struct {}, &.{}, TestMwCtx);
+    const gpa = std.testing.allocator;
+    const path = try gpa.dupe(u8, "/");
+    defer gpa.free(path);
+    const query = try gpa.dupe(u8, "");
+    defer gpa.free(query);
+    const line: RequestLine = .{ .method = "POST", .version = .http11, .path = path, .query = query };
+    var reqv = ReqT.init(gpa, std.testing.io, line, .{});
+    defer reqv.deinit(gpa);
+    reqv.base().body = .{ .content_length = 0 };
+    reqv.base().body_origin = .content_length;
+
+    var br = try reqv.bodyReader();
+    var buf: [8]u8 = undefined;
+    try std.testing.expectEqual(@as(usize, 0), try br.read(buf[0..]));
+    try std.testing.expectEqualDeep(Body.discarded, reqv.baseConst().body);
+    try std.testing.expectEqual(BodyOrigin.content_length, reqv.baseConst().body_origin);
 }
 
 test "bodyAll: replays stored body error" {

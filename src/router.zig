@@ -752,6 +752,9 @@ pub fn Compiled(
             keep_alive: bool,
             send_body: bool,
         ) !Action {
+            // Response formatting is centralized here so the dispatch path can
+            // return only transport actions while body serialization stays
+            // close to the final writer.
             try response.writeAny(rctx, req_ro, w, res, keep_alive, send_body);
             if (w.buffered().len != 0) {
                 try w.flush();

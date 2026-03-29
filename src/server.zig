@@ -329,6 +329,9 @@ pub fn Server(comptime def: anytype) type {
             defer arena.deinit();
             blk: switch (Action.@"continue") {
                 .@"continue" => {
+                    // Reuse one arena across the keep-alive loop and reset it
+                    // after each request so per-request allocations stay cheap
+                    // without leaking across requests on the same connection.
                     const a = arena.allocator();
                     defer _ = arena.reset(.{ .retain_with_limit = config.arena_reset_limit });
 

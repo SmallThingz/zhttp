@@ -12,30 +12,6 @@ pub const ST = struct {
     T: type,
 };
 
-fn reqBasePtr(req_any: anytype) @TypeOf(switch (@typeInfo(@TypeOf(req_any))) {
-    .pointer => req_any._base,
-    else => req_any._base,
-}) {
-    return switch (@typeInfo(@TypeOf(req_any))) {
-        .pointer => req_any._base,
-        else => req_any._base,
-    };
-}
-
-fn reqPath(req_any: anytype) []const u8 {
-    return switch (@typeInfo(@TypeOf(req_any))) {
-        .pointer => req_any.path,
-        else => req_any.path,
-    };
-}
-
-fn reqMethod(req_any: anytype) []const u8 {
-    return switch (@typeInfo(@TypeOf(req_any))) {
-        .pointer => req_any.method,
-        else => req_any.method,
-    };
-}
-
 fn assertTupleWithReq(comptime ParamsT: type) usize {
     const info = @typeInfo(ParamsT);
     if (info != .@"struct" or !info.@"struct".is_tuple or info.@"struct".fields.len == 0) {
@@ -142,6 +118,9 @@ pub const ReqCtx = struct {
         return @call(.auto, entry, .{ self, req });
     }
 
+    // Generate either the normal override-aware request wrapper or the
+    // readonly wrapper used during response serialization. Both expose the
+    // same surface so endpoint code can share method names.
     fn Wrapper(comptime self: Self, comptime read_only: bool) type {
         const BaseReq = self._base_req_type;
         const Ctx = self;
@@ -317,10 +296,12 @@ pub const ReqCtx = struct {
         }
 
         const req0 = @field(params, "0");
-        const req_base = reqBasePtr(req0);
-        const path = reqPath(req0);
-        const method = reqMethod(req0);
+        const req_base = req0._base;
+        const path = req0.path;
+        const method = req0.method;
 
+        // Walk backward through already-entered middleware layers so the most
+        // recent override wins and `req.bodyAll()`-style calls chain correctly.
         comptime var i: usize = self.idx;
         inline while (i > 0) : (i -= 1) {
             const mw_index: usize = i - 1;

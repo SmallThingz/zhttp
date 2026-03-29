@@ -234,7 +234,6 @@ const max_path_segments = 16;
 
 const DecodedPath = struct {
     path: []const u8,
-    path_hash: u64,
     seg_count: u8,
     segs: [max_path_segments][]const u8,
     seg_hashes: [max_path_segments]u64,
@@ -367,6 +366,9 @@ const LiteLiteralMap = struct {
     entries: []LiteLiteralEntry = &.{},
     slots: []u32 = &.{}, // 0 = empty, else entry_index + 1
     mask: u64 = 0,
+    first_byte_mask: [4]u64 = .{0} ** 4,
+
+    const linear_threshold = 12;
 
     fn init(a: Allocator, names: []const []const u8, children: []const u32) !LiteLiteralMap {
         var map: LiteLiteralMap = .{};
@@ -379,7 +381,10 @@ const LiteLiteralMap = struct {
                 .hash = util.fnv1a64(name),
                 .child = child,
             };
+            map.markFirstByte(name);
         }
+
+        if (names.len <= linear_threshold) return map;
 
         const cap = nextPow2AtLeastRuntime(names.len * 2 + 1, 8);
         map.slots = try a.alloc(u32, cap);
@@ -402,6 +407,13 @@ const LiteLiteralMap = struct {
 
     fn get(self: *const LiteLiteralMap, key: []const u8, hash: u64) ?u32 {
         if (self.entries.len == 0) return null;
+        if (!self.hasFirstByte(key)) return null;
+        if (self.entries.len <= linear_threshold) {
+            for (self.entries) |entry| {
+                if (entry.key.len == key.len and std.mem.eql(u8, entry.key, key)) return entry.child;
+            }
+            return null;
+        }
         var pos: u64 = hash & self.mask;
         var probe: usize = 0;
         while (probe < self.slots.len) : (probe += 1) {
@@ -412,6 +424,30 @@ const LiteLiteralMap = struct {
             pos = (pos + 1) & self.mask;
         }
         return null;
+    }
+
+    fn getAuto(self: *const LiteLiteralMap, key: []const u8) ?u32 {
+        if (self.entries.len == 0) return null;
+        if (!self.hasFirstByte(key)) return null;
+        if (self.entries.len <= linear_threshold) {
+            for (self.entries) |entry| {
+                if (entry.key.len == key.len and std.mem.eql(u8, entry.key, key)) return entry.child;
+            }
+            return null;
+        }
+        return self.get(key, util.fnv1a64(key));
+    }
+
+    fn markFirstByte(self: *LiteLiteralMap, key: []const u8) void {
+        if (key.len == 0) return;
+        const idx: usize = key[0] >> 6;
+        self.first_byte_mask[idx] |= @as(u64, 1) << @intCast(key[0] & 63);
+    }
+
+    fn hasFirstByte(self: *const LiteLiteralMap, key: []const u8) bool {
+        if (key.len == 0) return false;
+        const idx: usize = key[0] >> 6;
+        return (self.first_byte_mask[idx] & (@as(u64, 1) << @intCast(key[0] & 63))) != 0;
     }
 };
 
@@ -560,8 +596,7 @@ const RadixHashRouter = struct {
     fn matchInBucket(self: *const RadixHashRouter, method: Method, path: []const u8) ?u32 {
         const bucket = &self.buckets[@intFromEnum(method)];
         if (findExactPathRaw(bucket, path)) |rid| return rid;
-        const decoded = decodePath(path) orelse return null;
-        return matchPatternBucket(&bucket.pattern, &decoded, 0, 0);
+        return matchPatternRoot(&bucket.pattern, path);
     }
 
     fn debugMatch(self: *const RadixHashRouter, method_token: []const u8, path: []const u8) void {
@@ -663,6 +698,11 @@ fn minRoute(best: ?u32, candidate: ?u32) ?u32 {
     return best;
 }
 
+const HeadSeg = struct {
+    seg: []const u8,
+    next_pos: usize,
+};
+
 fn indent(depth: usize) []const u8 {
     return switch (depth) {
         0 => "",
@@ -679,21 +719,11 @@ fn decodePath(path: []const u8) ?DecodedPath {
 
     var decoded: DecodedPath = .{
         .path = path,
-        .path_hash = 0,
         .seg_count = 0,
         .segs = undefined,
         .seg_hashes = undefined,
     };
-
-    var path_hash: u64 = 0xcbf29ce484222325;
-    if (path.len == 1) {
-        for (path) |b| {
-            path_hash ^= b;
-            path_hash *%= 0x100000001b3;
-        }
-        decoded.path_hash = path_hash;
-        return decoded;
-    }
+    if (path.len == 1) return decoded;
 
     var pos: usize = 1;
     while (pos < path.len) {
@@ -702,10 +732,6 @@ fn decodePath(path: []const u8) ?DecodedPath {
         const slash = std.mem.indexOfScalarPos(u8, path, pos, '/') orelse path.len;
         const part = path[pos..slash];
         if (part.len == 0) return null;
-        for (path[pos - 1 .. slash]) |b| {
-            path_hash ^= b;
-            path_hash *%= 0x100000001b3;
-        }
 
         const idx = decoded.seg_count;
         const part_hash = util.fnv1a64(part);
@@ -717,25 +743,7 @@ fn decodePath(path: []const u8) ?DecodedPath {
         if (slash + 1 == path.len) return null;
         pos = slash + 1;
     }
-
-    decoded.path_hash = path_hash;
     return decoded;
-}
-
-fn findExactPath(bucket: *const HybridBucket, decoded: *const DecodedPath) ?u32 {
-    if (bucket.exact_entries.len == 0) return null;
-
-    const path_hash = decoded.path_hash;
-    var pos: u64 = path_hash & bucket.exact_table.mask;
-    var probe: usize = 0;
-    while (probe < bucket.exact_table.slots.len) : (probe += 1) {
-        const slot = bucket.exact_table.slots[@intCast(pos)];
-        if (slot == 0) return null;
-        const entry = bucket.exact_entries[slot - 1];
-        if (entry.hash == path_hash and std.mem.eql(u8, entry.path, decoded.path)) return entry.route_index;
-        pos = (pos + 1) & bucket.exact_table.mask;
-    }
-    return null;
 }
 
 fn findExactPathRaw(bucket: *const HybridBucket, path: []const u8) ?u32 {
@@ -752,6 +760,120 @@ fn findExactPathRaw(bucket: *const HybridBucket, path: []const u8) ?u32 {
         pos = (pos + 1) & bucket.exact_table.mask;
     }
     return null;
+}
+
+fn headSeg(path: []const u8) ?HeadSeg {
+    if (path.len == 0 or path[0] != '/') return null;
+    if (path.len == 1) return .{ .seg = "", .next_pos = path.len + 1 };
+    const slash = std.mem.indexOfScalarPos(u8, path, 1, '/') orelse path.len;
+    const seg = path[1..slash];
+    if (seg.len == 0) return null;
+    return .{
+        .seg = seg,
+        .next_pos = if (slash == path.len) path.len + 1 else slash + 1,
+    };
+}
+
+fn patternStartPos(path: []const u8) usize {
+    return if (path.len == 1) path.len + 1 else 1;
+}
+
+const RawSeg = struct {
+    seg: []const u8,
+    hash: u64,
+    next_pos: usize,
+};
+
+fn parseRawSeg(path: []const u8, pos: usize) ?RawSeg {
+    if (pos > path.len) return null;
+    const slash = std.mem.indexOfScalarPos(u8, path, pos, '/') orelse path.len;
+    const seg = path[pos..slash];
+    if (seg.len == 0) return null;
+    return .{
+        .seg = seg,
+        .hash = util.fnv1a64(seg),
+        .next_pos = if (slash == path.len) path.len + 1 else slash + 1,
+    };
+}
+
+fn skipRawSegs(path: []const u8, pos: usize, count: u32) ?usize {
+    var cur = pos;
+    var remaining = count;
+    while (remaining != 0) : (remaining -= 1) {
+        const seg = parseRawSeg(path, cur) orelse return null;
+        cur = seg.next_pos;
+    }
+    return cur;
+}
+
+fn matchPatternRoot(bucket: *const PatternBucket, path: []const u8) ?u32 {
+    if (bucket.nodes.items.len == 0) return null;
+    const root = &bucket.nodes.items[0];
+    var best: ?u32 = null;
+    if (path.len == 1) {
+        best = minRoute(best, root.end_route);
+        best = minRoute(best, root.glob_route);
+        return best;
+    }
+
+    if (root.glob_route == null and root.params.len == 0 and root.params_glob.len == 0 and
+        !root.literals.hasFirstByte(path[1..2]))
+    {
+        return null;
+    }
+
+    const head = headSeg(path) orelse return null;
+    best = minRoute(best, root.glob_route);
+
+    if (root.literals.getAuto(head.seg)) |child_idx| {
+        best = minRoute(best, matchPatternBucketRaw(bucket, path, head.next_pos, child_idx));
+    }
+
+    for (root.params_glob) |entry| {
+        if (skipRawSegs(path, patternStartPos(path), entry.param_count) != null) {
+            best = minRoute(best, entry.route_index);
+        }
+    }
+
+    for (root.params) |entry| {
+        if (skipRawSegs(path, patternStartPos(path), entry.param_count)) |next_pos| {
+            best = minRoute(best, matchPatternBucketRaw(bucket, path, next_pos, entry.next));
+        }
+    }
+
+    return best;
+}
+
+fn matchPatternBucketRaw(bucket: *const PatternBucket, path: []const u8, pos: usize, node_idx: u32) ?u32 {
+    const node = &bucket.nodes.items[node_idx];
+    var best: ?u32 = null;
+
+    if (pos == path.len + 1) {
+        best = minRoute(best, node.end_route);
+        best = minRoute(best, node.glob_route);
+    } else {
+        best = minRoute(best, node.glob_route);
+
+        const seg = parseRawSeg(path, pos) orelse return best;
+
+        if (node.literals.get(seg.seg, seg.hash)) |child_idx| {
+            best = minRoute(best, matchPatternBucketRaw(bucket, path, seg.next_pos, child_idx));
+        }
+
+        for (node.params_glob) |entry| {
+            if (skipRawSegs(path, pos, entry.param_count) != null) {
+                best = minRoute(best, entry.route_index);
+            }
+        }
+
+        for (node.params) |entry| {
+            if (skipRawSegs(path, pos, entry.param_count)) |next_pos| {
+                best = minRoute(best, matchPatternBucketRaw(bucket, path, next_pos, entry.next));
+            }
+        }
+    }
+
+    return best;
 }
 
 fn matchPatternBucket(bucket: *const PatternBucket, decoded: *const DecodedPath, node_idx: u32, seg_idx: usize) ?u32 {

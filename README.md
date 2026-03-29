@@ -83,7 +83,8 @@ exe.root_module.addImport("zhttp", zhttp_dep.module("zhttp"));
 - `zhttp.Server(.{ ... })` accepts `.Context`, `.middlewares`, `.operations`, `.routes`, `.config`, `.error_handler`, and `.not_found_handler`. `.error_handler` is a writer-based hook for user handler/middleware errors with signature `fn(*Server, *std.Io.Writer, comptime ErrorSet: type, err: ErrorSet) zhttp.router.Action`. Server parse/validation errors stay on the built-in bad-request path. If no not-found handler is provided, a built-in `404 not found` endpoint is used.
 - Route helpers: `zhttp.get`, `post`, `put`, `delete`, `patch`, `head`, `options`, and `zhttp.route(...)` each take `(pattern, EndpointType)`.
 - Endpoint types must expose `pub const Info: zhttp.router.EndpointInfo = .{ ... };` and `pub fn call(comptime rctx: zhttp.ReqCtx, req: rctx.T()) !rctx.Response(Body)`.
-- Supported `Body` types are `[]const u8`, `[][]const u8`, and `zhttp.response.BodyStream`.
+- Supported `Body` types are `[]const u8`, `[][]const u8`, `void`, and custom
+  structs that expose `pub fn body(self, comptime rctx, req: rctx.TReadOnly(), cw) !void`.
 - Current limitation: when a route includes middleware, the endpoint body type must be `[]const u8`.
 - `EndpointInfo` fields: `.headers`, `.query`, `.path`, `.middlewares`, `.operations`.
 - Optional endpoint upgrade hook: `pub fn upgrade(server, stream, r, w, line, res) void`. If present and `call` returns `101 Switching Protocols`, zhttp writes upgrade response and returns `zhttp.router.Action.upgraded`; the upgrade hook owns connection lifecycle.
@@ -97,12 +98,12 @@ exe.root_module.addImport("zhttp", zhttp_dep.module("zhttp"));
 
 - `[]const u8` uses `Content-Length` (single contiguous body).
 - `[][]const u8` uses `Content-Length` (sum of segments, written via vectored I/O).
-- `zhttp.response.BodyStream` uses `Transfer-Encoding: chunked`.
+- Custom response body structs use `Transfer-Encoding: chunked`.
 
 Chunked example shape:
 
 ```zig
-pub fn call(comptime rctx: zhttp.ReqCtx, req: rctx.T()) !rctx.Response(zhttp.response.BodyStream) {
+pub fn call(comptime rctx: zhttp.ReqCtx, req: rctx.T()) !rctx.Response(StreamBody) {
     _ = req;
     return .{
         .status = .ok,

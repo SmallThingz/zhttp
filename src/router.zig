@@ -744,8 +744,15 @@ pub fn Compiled(
         }
 
         /// Serializes and flushes a response and returns the next connection action.
-        fn finishResponse(w: *Io.Writer, res: anytype, keep_alive: bool, send_body: bool) !Action {
-            try response.writeAny(w, res, keep_alive, send_body);
+        fn finishResponse(
+            comptime rctx: ReqCtx,
+            req_ro: rctx.TReadOnly(),
+            w: *Io.Writer,
+            res: anytype,
+            keep_alive: bool,
+            send_body: bool,
+        ) !Action {
+            try response.writeAny(rctx, req_ro, w, res, keep_alive, send_body);
             if (w.buffered().len != 0) {
                 try w.flush();
             }
@@ -843,22 +850,6 @@ pub fn Compiled(
                         ._base_req_type = ReqT,
                         ._server_type = @TypeOf(server.*),
                     };
-                    comptime {
-                        const ReqW = rctx.T();
-                        const call_ret = @TypeOf(@call(.auto, rd.endpoint.call, .{ rctx, @as(ReqW, undefined) }));
-                        const resp_t = switch (@typeInfo(call_ret)) {
-                            .error_union => |eu| eu.payload,
-                            else => call_ret,
-                        };
-                        if (MwList.len != 0 and resp_t != response.Res) {
-                            @compileError(
-                                "endpoint " ++ @typeName(rd.endpoint) ++
-                                    " returns " ++ @typeName(resp_t) ++
-                                    " but this route has middleware; only rctx.Response([]const u8) is supported with middleware currently",
-                            );
-                        }
-                    }
-
                     var reqv = ReqT.initWithServer(allocator, line, mw_ctx, server);
                     reqv.setReader(r);
                     reqv.setWriter(w);
@@ -889,6 +880,11 @@ pub fn Compiled(
                         .path = line.path,
                         .method = line.method,
                     };
+                    const req_ro: rctx.TReadOnly() = .{
+                        ._base = &reqv,
+                        .path = line.path,
+                        .method = line.method,
+                    };
                     const res = rctx.run(req0) catch |err| {
                         req_tail.discardUnreadBody() catch return .close;
                         const ServerT = @TypeOf(server.*);
@@ -899,7 +895,7 @@ pub fn Compiled(
                     try req_tail.discardUnreadBody();
                     if (try maybeHandleUpgradeEntry(rd.endpoint, server, stream, r, w, line, res)) |act| return act;
                     const send_body = !(line.method.len == 4 and line.method[0] == 'H' and line.method[1] == 'E' and line.method[2] == 'A' and line.method[3] == 'D');
-                    return finishResponse(w, res, reqv.keepAlive(), send_body);
+                    return finishResponse(rctx, req_ro, w, res, reqv.keepAlive(), send_body);
                 }
             }
             return error.BadRequest;
@@ -1720,22 +1716,23 @@ test "dispatch: segmented response uses content-length" {
     try std.testing.expect(std.mem.endsWith(u8, out[0..res.len], "\r\n\r\nabcdef"));
 }
 
-test "dispatch: stream response uses chunked transfer-encoding" {
+test "dispatch: custom body response uses chunked transfer-encoding" {
     const StreamEndpoint = struct {
         pub const Info: EndpointInfo = .{};
 
-        const Writer = struct {
-            fn write(cw: *response.ChunkedWriter) !void {
+        const Body = struct {
+            pub fn body(_: @This(), comptime rctx: ReqCtx, req: rctx.TReadOnly(), cw: *response.ChunkedWriter) !void {
+                _ = req;
                 try cw.writeAll("ab");
                 try cw.writeAll("cd");
             }
         };
 
-        pub fn call(comptime rctx: ReqCtx, req: rctx.T()) !rctx.Response(response.BodyStream) {
+        pub fn call(comptime rctx: ReqCtx, req: rctx.T()) !rctx.Response(Body) {
             _ = req;
             return .{
                 .status = .ok,
-                .body = .{ .writeFn = Writer.write },
+                .body = .{},
             };
         }
     };
@@ -1755,6 +1752,83 @@ test "dispatch: stream response uses chunked transfer-encoding" {
     try std.testing.expectEqual(.@"continue", res.action);
     try std.testing.expect(std.mem.indexOf(u8, out[0..res.len], "transfer-encoding: chunked\r\n\r\n") != null);
     try std.testing.expect(std.mem.endsWith(u8, out[0..res.len], "2\r\nab\r\n2\r\ncd\r\n0\r\n\r\n"));
+}
+
+test "dispatch: middleware routes support void, segmented, and custom body responses" {
+    const Pass = struct {
+        pub const Info = @import("middleware.zig").MiddlewareInfo{ .name = "pass" };
+
+        pub fn call(comptime rctx: ReqCtx, req: rctx.T()) !rctx.Res() {
+            return rctx.next(req);
+        }
+    };
+
+    const parts = [_][]const u8{ "xy", "z" };
+
+    const S = Compiled(void, .{
+        get("/void", struct {
+            pub const Info: EndpointInfo = .{ .middlewares = &.{Pass} };
+
+            pub fn call(comptime rctx: ReqCtx, req: rctx.T()) !rctx.Response(void) {
+                _ = req;
+                return .{ .status = .no_content };
+            }
+        }),
+        get("/parts", struct {
+            pub const Info: EndpointInfo = .{ .middlewares = &.{Pass} };
+
+            pub fn call(comptime rctx: ReqCtx, req: rctx.T()) !rctx.Response([][]const u8) {
+                _ = req;
+                return .{
+                    .status = .ok,
+                    .body = @constCast(parts[0..]),
+                };
+            }
+        }),
+        get("/stream", struct {
+            pub const Info: EndpointInfo = .{ .middlewares = &.{Pass} };
+
+            const Body = struct {
+                pub fn body(_: @This(), comptime rctx: ReqCtx, req: rctx.TReadOnly(), cw: *response.ChunkedWriter) !void {
+                    _ = req;
+                    try cw.writeAll("mw");
+                }
+            };
+
+            pub fn call(comptime rctx: ReqCtx, req: rctx.T()) !rctx.Response(Body) {
+                _ = req;
+                return .{ .status = .ok, .body = .{} };
+            }
+        }),
+    }, .{});
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    {
+        var r = Io.Reader.fixed("GET /void HTTP/1.1\r\n\r\n");
+        const line = try request.parseRequestLineBorrowed(&r, 8 * 1024);
+        var out: [256]u8 = undefined;
+        const res = try dispatchForTest(S, {}, a, &r, line, out[0..]);
+        try std.testing.expect(std.mem.indexOf(u8, out[0..res.len], "content-length: 0\r\n") != null);
+    }
+    {
+        var r = Io.Reader.fixed("GET /parts HTTP/1.1\r\n\r\n");
+        const line = try request.parseRequestLineBorrowed(&r, 8 * 1024);
+        var out: [256]u8 = undefined;
+        const res = try dispatchForTest(S, {}, a, &r, line, out[0..]);
+        try std.testing.expect(std.mem.indexOf(u8, out[0..res.len], "content-length: 3\r\n") != null);
+        try std.testing.expect(std.mem.endsWith(u8, out[0..res.len], "\r\n\r\nxyz"));
+    }
+    {
+        var r = Io.Reader.fixed("GET /stream HTTP/1.1\r\n\r\n");
+        const line = try request.parseRequestLineBorrowed(&r, 8 * 1024);
+        var out: [256]u8 = undefined;
+        const res = try dispatchForTest(S, {}, a, &r, line, out[0..]);
+        try std.testing.expect(std.mem.indexOf(u8, out[0..res.len], "transfer-encoding: chunked\r\n\r\n") != null);
+        try std.testing.expect(std.mem.endsWith(u8, out[0..res.len], "2\r\nmw\r\n0\r\n\r\n"));
+    }
 }
 
 test "middleware data: set in middleware and handler access" {

@@ -160,14 +160,10 @@ Important constraints:
 
 Use `Override` only for cross-cutting request behavior changes.
 
-## 2.9 Middleware and Response Body Limitation
+## 2.9 Middleware and Response Bodies
 
-Current constraint in zhttp:
-
-- routes that include middleware currently require endpoint return type
-  `!rctx.Response([]const u8)`.
-
-`[][]const u8` and `BodyStream` endpoint response bodies currently require routes with no middleware.
+Response bodies may be `[]const u8`, `[][]const u8`, `void`, or a custom
+body struct with `pub fn body(self, comptime rctx, req: rctx.TReadOnly(), cw) !void`.
 
 ## 2.8 Middleware checklist
 
@@ -334,7 +330,7 @@ Endpoints select response serialization mode via `rctx.Response(Body)`:
 
 - `Body = []const u8`: normal `Content-Length` response.
 - `Body = [][]const u8`: vectored body, still `Content-Length`.
-- `Body = zhttp.response.BodyStream`: chunked response (`transfer-encoding: chunked`).
+- `Body = CustomBody`: chunked response (`transfer-encoding: chunked`).
 
 Chunked example:
 
@@ -342,7 +338,7 @@ Chunked example:
 const StreamEp = struct {
     pub const Info: zhttp.router.EndpointInfo = .{};
 
-    pub fn call(comptime rctx: zhttp.ReqCtx, req: rctx.T()) !rctx.Response(zhttp.response.BodyStream) {
+    pub fn call(comptime rctx: zhttp.ReqCtx, req: rctx.T()) !rctx.Response(CustomBody) {
         _ = req;
         return .{
             .status = .ok,

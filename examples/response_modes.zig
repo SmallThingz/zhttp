@@ -19,7 +19,7 @@ fn usage() void {
         \\Endpoints:
         \\  GET /plain    -> []const u8 body
         \\  GET /parts    -> [][]const u8 body
-        \\  GET /stream   -> chunked BodyStream
+        \\  GET /stream   -> chunked custom body
         \\
     , .{});
 }
@@ -54,20 +54,23 @@ const Parts = struct {
     }
 };
 
-fn writeStreamChunks(cw: *zhttp.response.ChunkedWriter) std.Io.Writer.Error!void {
-    try cw.writeAll("chunk-");
-    try cw.writeAll("stream\n");
-}
-
 const Stream = struct {
     pub const Info: zhttp.router.EndpointInfo = .{};
 
-    pub fn call(comptime rctx: ReqCtx, req: rctx.T()) !rctx.Response(zhttp.response.BodyStream) {
+    const Body = struct {
+        pub fn body(_: @This(), comptime rctx: ReqCtx, req: rctx.TReadOnly(), cw: *zhttp.response.ChunkedWriter) std.Io.Writer.Error!void {
+            _ = req;
+            try cw.writeAll("chunk-");
+            try cw.writeAll("stream\n");
+        }
+    };
+
+    pub fn call(comptime rctx: ReqCtx, req: rctx.T()) !rctx.Response(Body) {
         _ = req;
         return .{
             .status = .ok,
             .headers = &.{.{ .name = "content-type", .value = "text/plain; charset=utf-8" }},
-            .body = .{ .writeFn = writeStreamChunks },
+            .body = .{},
         };
     }
 };

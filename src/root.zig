@@ -11,7 +11,8 @@
 //! Endpoint types must expose:
 //! - `pub const Info: zhttp.router.EndpointInfo = .{ ... }`
 //! - `pub fn call(comptime rctx: zhttp.ReqCtx, req: rctx.T()) !rctx.Response(Body)`
-//!   Supported `Body` types: `[]const u8`, `[][]const u8`, `zhttp.response.BodyStream`.
+//!   Supported `Body` types: `[]const u8`, `[][]const u8`, `void`, or a custom
+//!   struct exposing `pub fn body(self, comptime rctx, req: rctx.TReadOnly(), cw) !void`.
 //!
 //! `EndpointInfo` fields:
 //! - `.headers: ?type`    Header capture schema (header keys match case-insensitively; `_` matches `-`)
@@ -47,8 +48,6 @@
 //! - `type` exposing `pub fn call(comptime rctx: zhttp.ReqCtx, req: rctx.T()) !rctx.Response(Body)`
 //!
 //! When `.Context` is configured, it is available only via `req.ctx()`.
-//! Current limitation: routes that include middleware must currently return
-//! `rctx.Response([]const u8)`.
 //! Standard middleware signature types are exported at top-level:
 //! `zhttp.CorsSignature`.
 //!
@@ -63,8 +62,7 @@ pub const router = @import("router.zig");
 
 pub const Res = response.Res;
 pub const SegmentedRes = response.SegmentedRes;
-pub const StreamRes = response.StreamRes;
-pub const BodyStream = response.BodyStream;
+pub const NoBodyRes = response.NoBodyRes;
 pub const Server = @import("server.zig").Server;
 pub const middleware = @import("middleware.zig");
 pub const operations = @import("operations.zig");

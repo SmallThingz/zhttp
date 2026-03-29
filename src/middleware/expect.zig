@@ -274,3 +274,18 @@ test "expect middleware: rejects unsupported expectation with close" {
     try std.testing.expect(res.close);
     try std.testing.expectEqualStrings("expectation failed\n", res.body);
 }
+
+test "expect middleware: trims linear whitespace around 100-continue token" {
+    const Mw = Expect(.{});
+    var reqv = initExpectTestReq("POST");
+    defer reqv.deinit(std.testing.allocator);
+    reqv.base().body = .{ .content_length = 1 };
+    reqv.headersMut().expect = .{
+        .present = true,
+        .inner = .{ .value = " \t100-continue\t " },
+    };
+
+    const res = try test_helpers.runMiddlewareTest(Mw, ExpectTestReq, ExpectNextOk, &reqv, "POST");
+    try std.testing.expectEqual(@as(u16, 200), @intFromEnum(res.status));
+    try std.testing.expect(reqv.middlewareDataConst("expect").approved);
+}

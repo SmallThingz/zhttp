@@ -318,6 +318,56 @@ test "websocketResponseWithAccept: omits optional websocket headers when absent"
     try std.testing.expectEqualStrings("sec-websocket-accept", res.headers[2].name);
 }
 
+test "websocketResponseFromAccepted: copies selected handshake outputs" {
+    const FakeReq = struct {
+        const Base = struct {
+            version: request.Version = .http11,
+        };
+
+        base: Base = .{},
+        method: []const u8 = "GET",
+
+        pub fn baseConst(self: *const @This()) *const Base {
+            return &self.base;
+        }
+
+        pub fn header(_: *const @This(), comptime field: anytype) ?[]const u8 {
+            return switch (field) {
+                .connection => "Upgrade",
+                .upgrade => "websocket",
+                .sec_websocket_key => "dGhlIHNhbXBsZSBub25jZQ==",
+                .sec_websocket_version => "13",
+                .sec_websocket_protocol => "chat, superchat",
+                .sec_websocket_extensions => "permessage-deflate",
+                .origin => "https://example.com",
+                .host => "example.com",
+                else => @compileError("unexpected header field"),
+            };
+        }
+    };
+
+    const req: FakeReq = .{};
+    const accepted = try zws.acceptServerHandshake(websocketHandshakeRequest(&req), .{
+        .selected_subprotocol = "chat",
+        .enable_permessage_deflate = true,
+        .extra_headers = &.{.{ .name = "x-up", .value = "1" }},
+    });
+    const res = try websocketResponseFromAccepted(std.testing.allocator, accepted);
+    defer std.testing.allocator.free(res.headers);
+    defer std.testing.allocator.free(res.headers[2].value);
+
+    try std.testing.expectEqual(std.http.Status.switching_protocols, res.status);
+    try std.testing.expectEqualStrings("connection", res.headers[0].name);
+    try std.testing.expectEqualStrings("upgrade", res.headers[1].name);
+    try std.testing.expectEqualStrings("sec-websocket-accept", res.headers[2].name);
+    try std.testing.expectEqualStrings("sec-websocket-protocol", res.headers[3].name);
+    try std.testing.expectEqualStrings("chat", res.headers[3].value);
+    try std.testing.expectEqualStrings("sec-websocket-extensions", res.headers[4].name);
+    try std.testing.expect(std.mem.startsWith(u8, res.headers[4].value, "permessage-deflate"));
+    try std.testing.expectEqualStrings("x-up", res.headers[5].name);
+    try std.testing.expectEqualStrings("1", res.headers[5].value);
+}
+
 test "websocketHandshakeRequest: extracts websocket headers from request" {
     const FakeReq = struct {
         const Base = struct {

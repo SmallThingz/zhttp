@@ -1266,6 +1266,27 @@ test "headers: too large rejected" {
     try std.testing.expectError(error.HeadersTooLarge, reqv.parseHeaders(gpa, &r, 8));
 }
 
+test "headers: parseHeadersWithLimits enforces per-line limit independently" {
+    const ReqT = Request(struct {}, struct {}, &.{}, TestMwCtx);
+    const gpa = std.testing.allocator;
+
+    const path = try gpa.dupe(u8, "/");
+    defer gpa.free(path);
+    const query = try gpa.dupe(u8, "");
+    defer gpa.free(query);
+    const line: RequestLine = .{ .method = "GET", .version = .http11, .path = path, .query = query };
+
+    const mw_ctx: TestMwCtx = .{};
+    var reqv = ReqT.init(gpa, std.testing.io, line, mw_ctx);
+    defer reqv.deinit(gpa);
+
+    var too_long = Io.Reader.fixed("X-Long: 1234567890\r\n\r\n");
+    try std.testing.expectError(error.HeadersTooLarge, reqv.parseHeadersWithLimits(gpa, &too_long, 128, 12));
+
+    var ok = Io.Reader.fixed("X: 1234\r\n\r\n");
+    try reqv.parseHeadersWithLimits(gpa, &ok, 128, 12);
+}
+
 test "headers: duplicate Content-Length mismatch rejected" {
     const ReqT = Request(struct {}, struct {}, &.{}, TestMwCtx);
     const gpa = std.testing.allocator;

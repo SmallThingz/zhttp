@@ -57,6 +57,11 @@ pub const Cors = struct {
     }
 };
 
+test "cors operation maxAddedRoutes matches base route count" {
+    try std.testing.expectEqual(@as(usize, 0), Cors.maxAddedRoutes(0));
+    try std.testing.expectEqual(@as(usize, 3), Cors.maxAddedRoutes(3));
+}
+
 test "cors operation adds one OPTIONS route per matched path" {
     const ops = @import("../operations.zig");
     const Res = @import("../response.zig").Res;

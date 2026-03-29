@@ -1,3 +1,4 @@
+const std = @import("std");
 const OperationCtx = @import("context.zig").OperationCtx;
 
 /// Built-in operation that auto-registers static middleware routes.
@@ -39,8 +40,12 @@ pub const Static = struct {
     }
 };
 
+test "static operation maxAddedRoutes reserves two per route" {
+    try std.testing.expectEqual(@as(usize, 0), Static.maxAddedRoutes(0));
+    try std.testing.expectEqual(@as(usize, 8), Static.maxAddedRoutes(4));
+}
+
 test "static operation adds GET/HEAD mount routes" {
-    const std = @import("std");
     const ops = @import("../operations.zig");
     const router = @import("../router.zig");
     const Res = @import("../response.zig").Res;

@@ -488,6 +488,39 @@ test "operations: add and remove routes" {
     try std.testing.expectEqualStrings("/b", @field(out, fields[0].name).pattern);
 }
 
+test "operations: addMany appends tuple routes in order" {
+    const Res = @import("response.zig").Res;
+    const Endpoint = struct {
+        pub const Info: router_mod.EndpointInfo = .{};
+        pub fn call(comptime rctx: @import("req_ctx.zig").ReqCtx, req: rctx.T()) !Res {
+            _ = req;
+            return Res.text(200, "ok");
+        }
+    };
+    const RouterT = Router(4, &.{});
+    const Result = comptime blk: {
+        var r = RouterT.init(.{
+            router_mod.get("/a", Endpoint),
+        });
+        r.addMany(.{
+            router_mod.post("/b", Endpoint),
+            router_mod.put("/c", Endpoint),
+        });
+        break :blk .{
+            .count = r.count(),
+            .m0 = r.routeConst(0).method,
+            .m1 = r.routeConst(1).method,
+            .m2 = r.routeConst(2).method,
+            .p2 = r.routeConst(2).pattern,
+        };
+    };
+    try std.testing.expectEqual(@as(usize, 3), Result.count);
+    try std.testing.expectEqualStrings("GET", Result.m0);
+    try std.testing.expectEqualStrings("POST", Result.m1);
+    try std.testing.expectEqualStrings("PUT", Result.m2);
+    try std.testing.expectEqualStrings("/c", Result.p2);
+}
+
 test "operations: order is tuple order and later ops see latest table" {
     const Res = @import("response.zig").Res;
     const OpA = struct {

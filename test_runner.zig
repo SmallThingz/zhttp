@@ -134,8 +134,6 @@ pub fn main(init: std.process.Init) !void {
         }
     }
 
-    ignoreSigIo();
-
     if (child_test_name) |name| {
         defer init.gpa.free(name);
         runSingleTest(name, seed);
@@ -173,18 +171,6 @@ fn testGroupKey(name: []const u8) []const u8 {
         return name[0 .. idx + marker.len];
     }
     return name;
-}
-
-fn ignoreSigIo() void {
-    if (builtin.os.tag == .windows or builtin.os.tag == .wasi) return;
-
-    const posix = std.posix;
-    const act: posix.Sigaction = .{
-        .handler = .{ .handler = posix.SIG.IGN },
-        .mask = posix.sigemptyset(),
-        .flags = posix.SA.RESTART,
-    };
-    posix.sigaction(.IO, &act, null);
 }
 
 const TestInfo = struct {
@@ -583,8 +569,6 @@ fn deinitChildResult(gpa: std.mem.Allocator, res: ChildResult) void {
 }
 
 fn runSingleTest(name: []const u8, seed: ?u32) void {
-    ignoreSigIo();
-
     if (seed) |s| std.testing.random_seed = s;
 
     const test_fn = findTest(name) orelse {

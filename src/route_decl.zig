@@ -1,3 +1,5 @@
+const std = @import("std");
+
 /// Compile-time endpoint metadata.
 pub const EndpointInfo = struct {
     /// Optional request header capture schema.
@@ -26,3 +28,29 @@ pub const RouteDecl = struct {
     middlewares: []const type,
     operations: []const type,
 };
+
+test "EndpointInfo defaults and RouteDecl field layout" {
+    const info: EndpointInfo = .{};
+    try std.testing.expect(info.headers == null);
+    try std.testing.expect(info.query == null);
+    try std.testing.expect(info.path == null);
+    try std.testing.expectEqual(@as(usize, 0), info.middlewares.len);
+    try std.testing.expectEqual(@as(usize, 0), info.operations.len);
+
+    const Endpoint = struct {
+        pub const Info: EndpointInfo = .{};
+    };
+    const rd: RouteDecl = .{
+        .method = "GET",
+        .pattern = "/x",
+        .endpoint = Endpoint,
+        .headers = struct {},
+        .query = struct {},
+        .params = struct {},
+        .middlewares = &.{},
+        .operations = &.{},
+    };
+    try std.testing.expectEqualStrings("GET", rd.method);
+    try std.testing.expectEqualStrings("/x", rd.pattern);
+    try std.testing.expect(rd.endpoint == Endpoint);
+}

@@ -1999,6 +1999,54 @@ test "handler: app ctx accessible through req" {
     try std.testing.expect(std.mem.endsWith(u8, out[0..res.len], "\r\n\r\nok"));
 }
 
+test "route helpers: method wrappers and Info propagation" {
+    const Mw = struct {
+        pub const Info: middleware.MiddlewareInfo = .{ .name = "mw" };
+        pub fn call(comptime rctx: ReqCtx, req: rctx.T()) !Res {
+            _ = req;
+            return Res.text(200, "ok");
+        }
+    };
+    const Op = struct {};
+    const Endpoint = struct {
+        pub const Info: EndpointInfo = .{
+            .headers = struct { host: parse.Optional(parse.String) },
+            .query = struct { page: parse.Optional(parse.Int(u16)) },
+            .path = struct { id: parse.Int(u32) },
+            .middlewares = &.{Mw},
+            .operations = &.{Op},
+        };
+        pub fn call(comptime rctx: ReqCtx, req: rctx.T()) !Res {
+            _ = req;
+            return Res.text(200, "ok");
+        }
+    };
+
+    const r_get = get("/g", Endpoint);
+    const r_post = post("/p", Endpoint);
+    const r_put = put("/u", Endpoint);
+    const r_delete = delete("/d", Endpoint);
+    const r_patch = patch("/x", Endpoint);
+    const r_head = head("/h", Endpoint);
+    const r_options = options("/o", Endpoint);
+    const r_route = route(.TRACE, "/t", Endpoint);
+
+    try std.testing.expectEqualStrings("GET", r_get.method);
+    try std.testing.expectEqualStrings("POST", r_post.method);
+    try std.testing.expectEqualStrings("PUT", r_put.method);
+    try std.testing.expectEqualStrings("DELETE", r_delete.method);
+    try std.testing.expectEqualStrings("PATCH", r_patch.method);
+    try std.testing.expectEqualStrings("HEAD", r_head.method);
+    try std.testing.expectEqualStrings("OPTIONS", r_options.method);
+    try std.testing.expectEqualStrings("TRACE", r_route.method);
+    try std.testing.expectEqualStrings("/t", r_route.pattern);
+    try std.testing.expect(r_route.headers == Endpoint.Info.headers.?);
+    try std.testing.expect(r_route.query == Endpoint.Info.query.?);
+    try std.testing.expect(r_route.params == Endpoint.Info.path.?);
+    try std.testing.expectEqual(@as(usize, 1), r_route.middlewares.len);
+    try std.testing.expectEqual(@as(usize, 1), r_route.operations.len);
+}
+
 test "route: endpoint type accepted" {
     const Endpoint = struct {
         pub const Info: EndpointInfo = .{};

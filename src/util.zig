@@ -59,6 +59,9 @@ test "tupleLen: empty and non-empty tuples" {
 }
 
 test "ascii helpers: compare case-insensitively" {
+    try std.testing.expectEqual(@as(u8, 'a'), asciiLower('A'));
+    try std.testing.expectEqual(@as(u8, 'z'), asciiLower('z'));
+    try std.testing.expectEqual(@as(u8, '-'), asciiLower('-'));
     try std.testing.expect(asciiEqlIgnoreCase("HeAdEr", "header"));
     try std.testing.expect(asciiEqlLower("ConNection", "connection"));
     try std.testing.expect(!asciiEqlLower("gzip", "br"));

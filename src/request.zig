@@ -18,20 +18,31 @@ pub const BodyOpError = error{
     OutOfMemory,
 };
 
-const BodyOrigin = enum {
+const BodyFraming = enum {
     none,
     chunked,
     content_length,
+    content_length_zero,
+};
+
+const DownloadedBody = struct {
+    bytes: []u8,
+    framing: BodyFraming,
+};
+
+const FailedBody = struct {
+    err: BodyOpError,
+    framing: BodyFraming,
 };
 
 pub const Body = union(enum) {
     none,
     chunked,
     content_length: usize,
-    downloaded: []u8,
-    streamed,
-    discarded,
-    errored: BodyOpError,
+    downloaded: DownloadedBody,
+    streamed: BodyFraming,
+    discarded: BodyFraming,
+    errored: FailedBody,
 };
 
 pub const Base = struct {
@@ -50,8 +61,6 @@ pub const Base = struct {
 
     /// Stores `body`.
     body: Body = .none,
-    /// Stores `body_origin`.
-    body_origin: BodyOrigin = .none,
 };
 
 pub const ParseLineError = error{
@@ -124,7 +133,7 @@ pub const RequestLine = struct {
     query: []u8,
 };
 
-/// Implements parse request line borrowed.
+/// Parses one request line and returns slices borrowed from the reader buffer.
 pub fn parseRequestLineBorrowed(r: *Io.Reader, max_line_len: usize) ParseLineError!RequestLine {
     const line0_incl = r.takeDelimiterInclusive('\n') catch |err| switch (err) {
         error.EndOfStream => return error.EndOfStream,
@@ -539,13 +548,43 @@ pub fn RequestPWithPatternExt(
             self._params = value;
         }
 
+        fn framingForContentLength(len: usize) BodyFraming {
+            return if (len == 0) .content_length_zero else .content_length;
+        }
+
+        fn bodyFraming(body: Body) BodyFraming {
+            return switch (body) {
+                .none => .none,
+                .chunked => .chunked,
+                .content_length => |len| framingForContentLength(len),
+                .downloaded => |downloaded| downloaded.framing,
+                .streamed => |framing| framing,
+                .discarded => |framing| framing,
+                .errored => |failed| failed.framing,
+            };
+        }
+
+        fn setDownloadedBody(self: *Self, bytes: []u8, framing: BodyFraming) void {
+            self._base.body = .{ .downloaded = .{
+                .bytes = bytes,
+                .framing = framing,
+            } };
+        }
+
+        fn setDiscardedBody(self: *Self, framing: BodyFraming) void {
+            self._base.body = .{ .discarded = framing };
+        }
+
+        fn setStreamedBody(self: *Self, framing: BodyFraming) void {
+            self._base.body = .{ .streamed = framing };
+        }
+
         fn clearBody(self: *Self, a: Allocator) void {
             switch (self._base.body) {
-                .downloaded => |body| a.free(body),
+                .downloaded => |downloaded| a.free(downloaded.bytes),
                 else => {},
             }
             self._base.body = .none;
-            self._base.body_origin = .none;
         }
 
         /// Releases resources held by this value.
@@ -722,13 +761,10 @@ pub fn RequestPWithPatternExt(
             if (has_chunked and content_length != null) return error.BadRequest;
             if (has_chunked) {
                 self._base.body = .chunked;
-                self._base.body_origin = .chunked;
             } else if (content_length) |cl| {
                 self._base.body = .{ .content_length = cl };
-                self._base.body_origin = .content_length;
             } else {
                 self._base.body = .none;
-                self._base.body_origin = .none;
             }
 
             if (HeaderLookup.count != 0) {
@@ -737,10 +773,12 @@ pub fn RequestPWithPatternExt(
         }
 
         fn rememberBodyError(self: *Self, err: BodyOpError) BodyOpError {
-            const origin = self._base.body_origin;
+            const framing = bodyFraming(self._base.body);
             self.clearBody(self._base.arena);
-            self._base.body = .{ .errored = err };
-            self._base.body_origin = origin;
+            self._base.body = .{ .errored = .{
+                .err = err,
+                .framing = framing,
+            } };
             return err;
         }
 
@@ -795,7 +833,7 @@ pub fn RequestPWithPatternExt(
             const buf = try a.alloc(u8, len);
             errdefer a.free(buf);
             try self.readExact(r, buf);
-            self._base.body = .{ .downloaded = buf };
+            self.setDownloadedBody(buf, framingForContentLength(len));
             return buf;
         }
 
@@ -810,13 +848,14 @@ pub fn RequestPWithPatternExt(
                 try self.readChunkCrlf(r);
             }
             const body = try out.toOwnedSlice(a);
-            self._base.body = .{ .downloaded = body };
+            self.setDownloadedBody(body, .chunked);
             return body;
         }
 
         pub const BodyReader = struct {
             req: *Self,
             reader: *Io.Reader,
+            framing: BodyFraming,
             state: union(enum) {
                 done,
                 none,
@@ -828,7 +867,7 @@ pub fn RequestPWithPatternExt(
                 // Streaming consumes ownership of the remaining body bytes. Once
                 // the stream reaches EOF there is nothing left for keep-alive
                 // cleanup to discard, so the request moves to `.discarded`.
-                self.req._base.body = .discarded;
+                self.req.setDiscardedBody(self.framing);
                 self.state = .done;
             }
 
@@ -893,10 +932,8 @@ pub fn RequestPWithPatternExt(
                     try out.appendSlice(a, buf[0..n]);
                 }
                 const body = try out.toOwnedSlice(a);
-                const origin = self.req._base.body_origin;
                 self.req.clearBody(a);
-                self.req._base.body = .{ .downloaded = body };
-                self.req._base.body_origin = origin;
+                self.req.setDownloadedBody(body, self.framing);
                 self.state = .done;
                 return body;
             }
@@ -953,9 +990,9 @@ pub fn RequestPWithPatternExt(
                 .none => "",
                 .content_length => |len| self.readContentLengthAll(a, r, len, max_bytes),
                 .chunked => self.readChunkedAll(a, r, max_bytes),
-                .downloaded => |body| body,
+                .downloaded => |downloaded| downloaded.bytes,
                 .discarded, .streamed => error.BadRequest,
-                .errored => |err| err,
+                .errored => |failed| failed.err,
             };
         }
 
@@ -968,31 +1005,35 @@ pub fn RequestPWithPatternExt(
         pub fn bodyReader(self: *Self) BodyOpError!BodyReader {
             return switch (self._base.body) {
                 .none => blk: {
-                    self._base.body = .streamed;
+                    self.setStreamedBody(.none);
                     break :blk .{
                         .req = self,
                         .reader = self._base.reader,
+                        .framing = .none,
                         .state = .none,
                     };
                 },
                 .content_length => |len| blk: {
-                    self._base.body = .streamed;
+                    const framing = framingForContentLength(len);
+                    self.setStreamedBody(framing);
                     break :blk .{
                         .req = self,
                         .reader = self._base.reader,
+                        .framing = framing,
                         .state = .{ .content_length = len },
                     };
                 },
                 .chunked => blk: {
-                    self._base.body = .streamed;
+                    self.setStreamedBody(.chunked);
                     break :blk .{
                         .req = self,
                         .reader = self._base.reader,
+                        .framing = .chunked,
                         .state = .{ .chunked = 0 },
                     };
                 },
                 .downloaded, .discarded, .streamed => error.BadRequest,
-                .errored => |err| err,
+                .errored => |failed| failed.err,
             };
         }
 
@@ -1009,7 +1050,7 @@ pub fn RequestPWithPatternExt(
                         });
                         remaining -= tossed;
                     }
-                    self._base.body = .discarded;
+                    self.setDiscardedBody(framingForContentLength(len));
                 },
                 .chunked => {
                     while (try self.readChunkHeader(r)) |size| {
@@ -1023,10 +1064,10 @@ pub fn RequestPWithPatternExt(
                         }
                         try self.readChunkCrlf(r);
                     }
-                    self._base.body = .discarded;
+                    self.setDiscardedBody(.chunked);
                 },
                 .streamed => return error.BadRequest,
-                .errored => |err| return err,
+                .errored => |failed| return failed.err,
             }
         }
 
@@ -1434,7 +1475,7 @@ test "bodyAll: content-length" {
     const body = try reqv.bodyAll(16);
     try std.testing.expectEqualStrings("hello", body);
     try std.testing.expectEqualStrings("hello", switch (reqv.baseConst().body) {
-        .downloaded => |cached| cached,
+        .downloaded => |cached| cached.bytes,
         else => unreachable,
     });
 }
@@ -1457,9 +1498,13 @@ test "headers: content-length zero stays distinct from no body" {
     const body = try reqv.bodyAll(0);
     try std.testing.expectEqualStrings("", body);
     try std.testing.expectEqualStrings("", switch (reqv.baseConst().body) {
-        .downloaded => |cached| cached,
+        .downloaded => |cached| cached.bytes,
         else => unreachable,
     });
+    try std.testing.expectEqualDeep(Body{ .downloaded = .{
+        .bytes = "",
+        .framing = .content_length_zero,
+    } }, reqv.baseConst().body);
 }
 
 test "bodyAll: does not emit interim 100-continue by itself" {
@@ -1567,11 +1612,9 @@ test "bodyReader: partial stream then discard transitions to discarded" {
     const n = try br.read(buf[0..]);
     try std.testing.expectEqual(@as(usize, 2), n);
     try std.testing.expectEqualStrings("he", buf[0..n]);
-    try std.testing.expectEqualDeep(Body.streamed, reqv.baseConst().body);
-    try std.testing.expectEqual(BodyOrigin.content_length, reqv.baseConst().body_origin);
+    try std.testing.expectEqualDeep(Body{ .streamed = .content_length }, reqv.baseConst().body);
     try br.discardRemaining();
-    try std.testing.expectEqualDeep(Body.discarded, reqv.baseConst().body);
-    try std.testing.expectEqual(BodyOrigin.content_length, reqv.baseConst().body_origin);
+    try std.testing.expectEqualDeep(Body{ .discarded = .content_length }, reqv.baseConst().body);
     try std.testing.expectError(error.BadRequest, reqv.bodyAll(16));
 }
 
@@ -1589,8 +1632,7 @@ test "bodyReader: none body reaches eof immediately and marks discarded" {
     var br = try reqv.bodyReader();
     var buf: [8]u8 = undefined;
     try std.testing.expectEqual(@as(usize, 0), try br.read(buf[0..]));
-    try std.testing.expectEqualDeep(Body.discarded, reqv.baseConst().body);
-    try std.testing.expectEqual(BodyOrigin.none, reqv.baseConst().body_origin);
+    try std.testing.expectEqualDeep(Body{ .discarded = .none }, reqv.baseConst().body);
 }
 
 test "bodyReader: content-length zero reaches eof immediately and marks discarded" {
@@ -1604,13 +1646,11 @@ test "bodyReader: content-length zero reaches eof immediately and marks discarde
     var reqv = ReqT.init(gpa, std.testing.io, line, .{});
     defer reqv.deinit(gpa);
     reqv.base().body = .{ .content_length = 0 };
-    reqv.base().body_origin = .content_length;
 
     var br = try reqv.bodyReader();
     var buf: [8]u8 = undefined;
     try std.testing.expectEqual(@as(usize, 0), try br.read(buf[0..]));
-    try std.testing.expectEqualDeep(Body.discarded, reqv.baseConst().body);
-    try std.testing.expectEqual(BodyOrigin.content_length, reqv.baseConst().body_origin);
+    try std.testing.expectEqualDeep(Body{ .discarded = .content_length_zero }, reqv.baseConst().body);
 }
 
 test "bodyAll: replays stored body error" {
@@ -1628,8 +1668,10 @@ test "bodyAll: replays stored body error" {
     var r = Io.Reader.fixed("Content-Length: 5\r\n\r\nhel");
     try reqv.parseHeaders(gpa, &r, 8 * 1024);
     try std.testing.expectError(error.EndOfStream, reqv.bodyAll(16));
-    try std.testing.expectEqual(BodyOrigin.content_length, reqv.baseConst().body_origin);
-    try std.testing.expectEqualDeep(Body{ .errored = error.EndOfStream }, reqv.baseConst().body);
+    try std.testing.expectEqualDeep(Body{ .errored = .{
+        .err = error.EndOfStream,
+        .framing = .content_length,
+    } }, reqv.baseConst().body);
     try std.testing.expectError(error.EndOfStream, reqv.bodyAll(16));
     try std.testing.expectError(error.EndOfStream, reqv.discardUnreadBody());
 }

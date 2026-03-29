@@ -132,7 +132,8 @@ pub fn main(init: std.process.Init) !void {
 
         const addr: std.Io.net.IpAddress = .{ .ip4 = std.Io.net.Ip4Address.loopback(actual_port) };
         var stream = try std.Io.net.IpAddress.connect(&addr, io, .{ .mode = .stream });
-        defer stream.close(io);
+        var close_stream = true;
+        defer if (close_stream) stream.close(io);
 
         var rb: [8 * 1024]u8 = undefined;
         var wb: [8 * 1024]u8 = undefined;
@@ -173,6 +174,8 @@ pub fn main(init: std.process.Init) !void {
             try std.testing.expectEqualStrings("hello\n", resp.body);
         }
 
+        stream.close(io);
+        close_stream = false;
         group.cancel(io);
         group.await(io) catch {};
         return;

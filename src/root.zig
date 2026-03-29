@@ -79,7 +79,8 @@ pub const head = router.head;
 pub const options = router.options;
 pub const ReqCtx = @import("req_ctx.zig").ReqCtx;
 
-/// Implements fuzz.
+/// Runs `testOne` across the provided corpus and forwards to Zig's builtin
+/// fuzzing ABI when the test binary is compiled in fuzz mode.
 pub fn fuzz(
     context: anytype,
     comptime testOne: fn (context: @TypeOf(context), smith: *std.testing.Smith) anyerror!void,

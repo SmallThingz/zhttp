@@ -18,8 +18,8 @@ pub const ExpectOptions = struct {
     /// Body returned when `Expect` contains an unsupported value.
     body: []const u8 = "expectation failed\n",
     /// When false (default), `Expect: 100-continue` is rejected for requests
-    /// that have no body framing (for example `GET` without body).
-    /// `Content-Length: 0` still counts as framed.
+    /// that do not advertise a readable request body.
+    /// `Content-Length: 0` is treated as no body.
     ///
     /// Set true to accept `Expect: 100-continue` even when no body is present.
     allow_without_body: bool = false,
@@ -39,8 +39,8 @@ fn is100Continue(value: []const u8) bool {
 /// Validates request `Expect` header and enables `100 Continue` body-read handling.
 ///
 /// - Missing `Expect` header: pass-through.
-/// - `Expect: 100-continue`: by default requires request body framing; when accepted,
-///   first body read/discard emits interim `100 Continue`.
+/// - `Expect: 100-continue`: by default requires a readable request body; when
+///   accepted, first body read/discard emits interim `100 Continue`.
 /// - Any other value: returns `417` and closes the connection.
 pub fn Expect(comptime opts: ExpectOptions) type {
     const reject_status: u16 = opts.status;
@@ -70,9 +70,19 @@ pub fn Expect(comptime opts: ExpectOptions) type {
             return switch (base.body) {
                 .none => false,
                 .chunked => true,
-                .content_length => true,
-                .downloaded => true,
-                .discarded, .streamed, .errored => base.body_origin != .none,
+                .content_length => |remaining| remaining != 0,
+                .downloaded => |downloaded| downloaded.bytes.len != 0 or switch (downloaded.framing) {
+                    .chunked, .content_length => true,
+                    .none, .content_length_zero => false,
+                },
+                .discarded, .streamed => |framing| switch (framing) {
+                    .chunked, .content_length => true,
+                    .none, .content_length_zero => false,
+                },
+                .errored => |failed| switch (failed.framing) {
+                    .chunked, .content_length => true,
+                    .none, .content_length_zero => false,
+                },
             };
         }
 
@@ -296,7 +306,7 @@ test "expect middleware: permissive mode allows 100-continue without body" {
     try std.testing.expect(reqv.middlewareDataConst("expect").approved);
 }
 
-test "expect middleware: accepts 100-continue with content-length zero" {
+test "expect middleware: rejects 100-continue with content-length zero by default" {
     const Mw = Expect(.{});
     const MwCtx = struct {
         expect: Mw.Info.data.?,
@@ -326,6 +336,48 @@ test "expect middleware: accepts 100-continue with content-length zero" {
     var reqv = ReqT.init(gpa, std.testing.io, line, mw_ctx);
     defer reqv.deinit(gpa);
     reqv.base().body = .{ .content_length = 0 };
+    reqv.headersMut().expect = .{
+        .present = true,
+        .inner = .{ .value = "100-continue" },
+    };
+
+    const res = try test_helpers.runMiddlewareTest(Mw, ReqT, Next, &reqv, line.method);
+    try std.testing.expectEqual(@as(u16, 417), @intFromEnum(res.status));
+    try std.testing.expect(res.close);
+    try std.testing.expect(!reqv.middlewareDataConst("expect").approved);
+    try std.testing.expect(!reqv.middlewareDataConst("expect").sent);
+}
+
+test "expect middleware: accepts drained non-empty content-length body" {
+    const Mw = Expect(.{});
+    const MwCtx = struct {
+        expect: Mw.Info.data.?,
+    };
+    const ReqT = @import("../request.zig").Request(struct {
+        /// Captured request `Expect` header value.
+        expect: parse.Optional(parse.String),
+    }, struct {}, &.{}, MwCtx);
+
+    const Next = struct {
+        pub const function = call;
+        pub fn call(comptime rctx: ReqCtx, _: rctx.T()) !Res {
+            return Res.text(200, "ok");
+        }
+    };
+
+    const gpa = std.testing.allocator;
+    const path_buf = "/".*;
+    const query_buf: [0]u8 = .{};
+    const line: @import("../request.zig").RequestLine = .{
+        .method = "POST",
+        .version = .http11,
+        .path = @constCast(path_buf[0..]),
+        .query = @constCast(query_buf[0..]),
+    };
+    const mw_ctx: MwCtx = .{ .expect = .{} };
+    var reqv = ReqT.init(gpa, std.testing.io, line, mw_ctx);
+    defer reqv.deinit(gpa);
+    reqv.base().body = .{ .discarded = .content_length };
     reqv.headersMut().expect = .{
         .present = true,
         .inner = .{ .value = "100-continue" },

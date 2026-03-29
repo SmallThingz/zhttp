@@ -23,33 +23,16 @@ fn usage() void {
         \\  GET /ws   (requires header: x-auth: secret)
         \\
         \\Notes:
-        \\  - HTTP handshake validation is done in userspace via zwebsocket.
-        \\  - `zhttp.upgrade.websocketResponse(...)` builds the 101 websocket response.
+        \\  - `zhttp.upgrade.acceptWebSocket(...)` validates the HTTP handshake.
+        \\  - `zhttp.upgrade.rejectWebSocket(...)` maps handshake errors to HTTP responses.
         \\  - endpoint `upgrade(...)` owns upgraded connection lifecycle.
         \\
     , .{});
 }
 
-const WsHeaders = struct {
-    /// Stores `connection`.
-    connection: zhttp.parse.Optional(zhttp.parse.String),
-    /// Stores `upgrade`.
-    upgrade: zhttp.parse.Optional(zhttp.parse.String),
-    /// Stores `sec_websocket_key`.
-    sec_websocket_key: zhttp.parse.Optional(zhttp.parse.String),
-    /// Stores `sec_websocket_version`.
-    sec_websocket_version: zhttp.parse.Optional(zhttp.parse.String),
-    /// Stores `sec_websocket_protocol`.
-    sec_websocket_protocol: zhttp.parse.Optional(zhttp.parse.String),
-    /// Stores `sec_websocket_extensions`.
-    sec_websocket_extensions: zhttp.parse.Optional(zhttp.parse.String),
-    /// Stores `origin`.
-    origin: zhttp.parse.Optional(zhttp.parse.String),
-    /// Stores `host`.
-    host: zhttp.parse.Optional(zhttp.parse.String),
-    /// Stores `x_auth`.
+const WsHeaders = zhttp.parse.mergeHeaderStructs(zhttp.upgrade.WebSocketHeaders, struct {
     x_auth: zhttp.parse.Optional(zhttp.parse.String),
-};
+});
 
 const Handshake = struct {
     pub const Info: zhttp.router.EndpointInfo = .{
@@ -58,33 +41,10 @@ const Handshake = struct {
     pub fn call(comptime rctx: ReqCtx, req: rctx.T()) !zhttp.Res {
         const auth = req.header(.x_auth) orelse return zhttp.Res.text(401, "missing x-auth\n");
         if (!std.mem.eql(u8, auth, "secret")) return zhttp.Res.text(403, "bad x-auth\n");
-
-        const hs_req: zws.ServerHandshakeRequest = .{
-            .method = req.method,
-            .is_http_11 = req.baseConst().version == .http11,
-            .connection = req.header(.connection),
-            .upgrade = req.header(.upgrade),
-            .sec_websocket_key = req.header(.sec_websocket_key),
-            .sec_websocket_version = req.header(.sec_websocket_version),
-            .sec_websocket_protocol = req.header(.sec_websocket_protocol),
-            .sec_websocket_extensions = req.header(.sec_websocket_extensions),
-            .origin = req.header(.origin),
-            .host = req.header(.host),
+        return zhttp.upgrade.acceptWebSocket(req, .{}) catch |err| switch (err) {
+            error.OutOfMemory => return err,
+            else => return zhttp.upgrade.rejectWebSocket(err),
         };
-
-        const accepted = zws.acceptServerHandshake(hs_req, .{}) catch |err| switch (err) {
-            error.UnsupportedWebSocketVersion => return .{
-                .status = @enumFromInt(426),
-                .headers = &.{.{ .name = "sec-websocket-version", .value = "13" }},
-                .body = "unsupported websocket version\n",
-            },
-            else => return zhttp.Res.text(400, "bad websocket handshake\n"),
-        };
-
-        return zhttp.upgrade.websocketResponseWithAccept(req.allocator(), accepted.accept_key[0..], .{
-            .subprotocol = accepted.selected_subprotocol,
-            .extensions = accepted.selected_extensions,
-        });
     }
 
     pub fn upgrade(
@@ -200,7 +160,8 @@ pub fn main(init: std.process.Init) !void {
 
         const addr: std.Io.net.IpAddress = .{ .ip4 = std.Io.net.Ip4Address.loopback(actual_port) };
         var stream = try std.Io.net.IpAddress.connect(&addr, io, .{ .mode = .stream });
-        defer stream.close(io);
+        var close_stream = true;
+        defer if (close_stream) stream.close(io);
 
         var rb: [4 * 1024]u8 = undefined;
         var wb: [4 * 1024]u8 = undefined;
@@ -229,6 +190,8 @@ pub fn main(init: std.process.Init) !void {
         try sr.interface.readSliceAll(got[0..]);
         try std.testing.expectEqualStrings(expected, got[0..]);
 
+        stream.close(io);
+        close_stream = false;
         group.cancel(io);
         group.await(io) catch {};
         return;

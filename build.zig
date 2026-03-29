@@ -63,7 +63,7 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("src/root.zig"),
         .target = target,
     });
-    const zws_dep = b.lazyDependency("zwebsocket", .{
+    const zws_dep = b.dependency("zwebsocket", .{
         .target = target,
         .optimize = optimize,
     });
@@ -80,6 +80,8 @@ pub fn build(b: *std.Build) void {
 
     const zstd_mod = zstd_dep.module("libzstd");
     const brotli_mod = brotli_dep.module("libbrotli");
+    const zws_mod = zws_dep.module("zwebsocket");
+    mod.addImport("zwebsocket", zws_mod);
     mod.addImport("libzstd", zstd_mod);
     mod.addImport("libbrotli", brotli_mod);
 
@@ -90,10 +92,11 @@ pub fn build(b: *std.Build) void {
         }),
         .test_runner = .{ .path = b.path("test_runner.zig"), .mode = .simple },
     });
+    mod_tests.root_module.addImport("zwebsocket", zws_mod);
     mod_tests.root_module.addImport("libzstd", zstd_mod);
     mod_tests.root_module.addImport("libbrotli", brotli_mod);
     const run_mod_tests = b.addRunArtifact(mod_tests);
-    run_mod_tests.addArgs(&.{ "--jobs", "1", "--exclude-filter", "loopback listen preflight" });
+    run_mod_tests.addArgs(&.{ "--exclude-filter", "loopback listen preflight" });
     const test_step = b.step("test", "Run tests");
     test_step.dependOn(&run_mod_tests.step);
 
@@ -167,8 +170,7 @@ pub fn build(b: *std.Build) void {
         });
         exe.root_module.addImport("zhttp", mod);
         if (ex.uses_zws) {
-            const dep = zws_dep orelse @panic("missing 'zwebsocket' dependency; run `zig fetch --save <zws-url>`");
-            exe.root_module.addImport("zwebsocket", dep.module("zwebsocket"));
+            exe.root_module.addImport("zwebsocket", zws_mod);
         }
         examples_step.dependOn(&exe.step);
 

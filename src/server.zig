@@ -6,11 +6,13 @@ const Io = std.Io;
 
 const response = @import("response.zig");
 const request = @import("request.zig");
+const upgrade_mod = @import("upgrade.zig");
 const ReqCtx = @import("req_ctx.zig").ReqCtx;
 const router = @import("router.zig");
 const middleware = @import("middleware.zig");
 const operations = @import("operations.zig");
 const parse = @import("parse.zig");
+const zws = @import("zwebsocket");
 
 fn setTcpNoDelay(stream: *const std.Io.net.Stream) void {
     if (builtin.os.tag != .linux) return;
@@ -465,6 +467,101 @@ fn expectClosed(r: *Io.Reader) !void {
     try std.testing.expectError(error.EndOfStream, r.readSliceAll(one[0..]));
 }
 
+fn trimCR(line: []const u8) []const u8 {
+    if (line.len != 0 and line[line.len - 1] == '\r') return line[0 .. line.len - 1];
+    return line;
+}
+
+fn trimHeaderValue(s: []const u8) []const u8 {
+    var a: usize = 0;
+    var b: usize = s.len;
+    while (a < b and (s[a] == ' ' or s[a] == '\t')) a += 1;
+    while (b > a and (s[b - 1] == ' ' or s[b - 1] == '\t')) b -= 1;
+    return s[a..b];
+}
+
+fn performWebSocketHandshake(sr: *Io.Reader, sw: *Io.Writer, path: []const u8) !void {
+    var req_buf: [1024]u8 = undefined;
+    const req = try std.fmt.bufPrint(
+        &req_buf,
+        "GET {s} HTTP/1.1\r\n" ++
+            "Host: x\r\n" ++
+            "Upgrade: websocket\r\n" ++
+            "Connection: Upgrade\r\n" ++
+            "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n" ++
+            "Sec-WebSocket-Version: 13\r\n" ++
+            "\r\n",
+        .{path},
+    );
+    try sw.writeAll(req);
+    try sw.flush();
+
+    const status_line_incl = try sr.takeDelimiterInclusive('\n');
+    const status_line = trimCR(status_line_incl[0 .. status_line_incl.len - 1]);
+    try std.testing.expectEqualStrings("HTTP/1.1 101 Switching Protocols", status_line);
+
+    var saw_accept = false;
+    while (true) {
+        const line_incl = try sr.takeDelimiterInclusive('\n');
+        const line = trimCR(line_incl[0 .. line_incl.len - 1]);
+        if (line.len == 0) break;
+
+        const colon = std.mem.indexOfScalar(u8, line, ':') orelse return error.BadHandshake;
+        const name = line[0..colon];
+        const value = trimHeaderValue(line[colon + 1 ..]);
+        if (std.ascii.eqlIgnoreCase(name, "sec-websocket-accept")) {
+            const expected = try zws.computeAcceptKey("dGhlIHNhbXBsZSBub25jZQ==");
+            try std.testing.expectEqualStrings(expected[0..], value);
+            saw_accept = true;
+        }
+    }
+    try std.testing.expect(saw_accept);
+}
+
+fn appendClientFrame(
+    buf: []u8,
+    opcode: u8,
+    payload: []const u8,
+    fin: bool,
+    masked: bool,
+    rsv1: bool,
+) ![]const u8 {
+    var w = Io.Writer.fixed(buf);
+    var b0: u8 = opcode;
+    if (fin) b0 |= 0x80;
+    if (rsv1) b0 |= 0x40;
+    try w.writeByte(b0);
+
+    if (payload.len < 126) {
+        try w.writeByte((if (masked) @as(u8, 0x80) else 0) | @as(u8, @intCast(payload.len)));
+    } else {
+        try w.writeByte((if (masked) @as(u8, 0x80) else 0) | 126);
+        var len_buf: [2]u8 = undefined;
+        std.mem.writeInt(u16, len_buf[0..], @intCast(payload.len), .big);
+        try w.writeAll(len_buf[0..]);
+    }
+
+    const mask = [_]u8{ 0x12, 0x34, 0x56, 0x78 };
+    if (masked) {
+        try w.writeAll(mask[0..]);
+        var masked_payload: [512]u8 = undefined;
+        if (payload.len > masked_payload.len) return error.BufferTooSmall;
+        for (payload, 0..) |b, i| masked_payload[i] = b ^ mask[i % mask.len];
+        try w.writeAll(masked_payload[0..payload.len]);
+    } else {
+        try w.writeAll(payload);
+    }
+
+    return buf[0..w.end];
+}
+
+fn expectServerCloseCode(conn: *zws.ClientConn, buf: []u8, expected_code: u16) !void {
+    const frame = try conn.readFrame(buf);
+    try std.testing.expectEqual(zws.Opcode.close, frame.header.opcode);
+    const close = try zws.parseClosePayload(frame.payload, true);
+    try std.testing.expectEqual(expected_code, close.code.?);
+}
+
 fn sendOneShotExpect(io: Io, port: u16, req: []const u8, expected: []const u8) !void {
     var stream = try Io.net.IpAddress.connect(&.{ .ip4 = Io.net.Ip4Address.loopback(port) }, io, .{ .mode = .stream });
     defer stream.close(io);
@@ -851,12 +948,12 @@ test "unknown path returns 404 and keeps connection" {
     try sr.interface.readSliceAll(got_nf[0..]);
     try std.testing.expectEqualStrings(not_found_resp, got_nf[0..]);
 
-    try sw.interface.writeAll("GET /ok HTTP/1.1\r\nHost: x\r\n\r\n");
+    try sw.interface.writeAll("GET /ok HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n");
     try sw.interface.flush();
 
     const ok_resp =
         "HTTP/1.1 200 OK\r\n" ++
-        "connection: keep-alive\r\n" ++
+        "connection: close\r\n" ++
         "content-type: text/plain; charset=utf-8\r\n" ++
         "content-length: 2\r\n" ++
         "\r\n" ++
@@ -864,6 +961,8 @@ test "unknown path returns 404 and keeps connection" {
     var got_ok: [ok_resp.len]u8 = undefined;
     try sr.interface.readSliceAll(got_ok[0..]);
     try std.testing.expectEqualStrings(ok_resp, got_ok[0..]);
+    var one: [1]u8 = undefined;
+    try std.testing.expectError(error.EndOfStream, sr.interface.readSliceAll(one[0..]));
 
     group.cancel(io);
     group.await(io) catch {};
@@ -949,12 +1048,12 @@ test "not_found_handler can parse query headers and body" {
     try sr.interface.readSliceAll(got[0..]);
     try std.testing.expectEqualStrings(resp, got[0..]);
 
-    try sw.interface.writeAll("GET /ok HTTP/1.1\r\nHost: x\r\n\r\n");
+    try sw.interface.writeAll("GET /ok HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n");
     try sw.interface.flush();
 
     const ok_resp =
         "HTTP/1.1 200 OK\r\n" ++
-        "connection: keep-alive\r\n" ++
+        "connection: close\r\n" ++
         "content-type: text/plain; charset=utf-8\r\n" ++
         "content-length: 2\r\n" ++
         "\r\n" ++
@@ -962,6 +1061,8 @@ test "not_found_handler can parse query headers and body" {
     var got_ok: [ok_resp.len]u8 = undefined;
     try sr.interface.readSliceAll(got_ok[0..]);
     try std.testing.expectEqualStrings(ok_resp, got_ok[0..]);
+    var one: [1]u8 = undefined;
+    try std.testing.expectError(error.EndOfStream, sr.interface.readSliceAll(one[0..]));
 
     group.cancel(io);
     group.await(io) catch {};
@@ -1479,12 +1580,12 @@ test "middleware static_context: per-route init and request access" {
     try sr.interface.readSliceAll(got_a[0..]);
     try std.testing.expectEqualStrings(resp_a, got_a[0..]);
 
-    try sw.interface.writeAll("GET /b HTTP/1.1\r\nHost: x\r\n\r\n");
+    try sw.interface.writeAll("GET /b HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n");
     try sw.interface.flush();
 
     const resp_b =
         "HTTP/1.1 200 OK\r\n" ++
-        "connection: keep-alive\r\n" ++
+        "connection: close\r\n" ++
         "content-type: text/plain; charset=utf-8\r\n" ++
         "content-length: 6\r\n" ++
         "\r\n" ++
@@ -1492,6 +1593,8 @@ test "middleware static_context: per-route init and request access" {
     var got_b: [resp_b.len]u8 = undefined;
     try sr.interface.readSliceAll(got_b[0..]);
     try std.testing.expectEqualStrings(resp_b, got_b[0..]);
+    var one: [1]u8 = undefined;
+    try std.testing.expectError(error.EndOfStream, sr.interface.readSliceAll(one[0..]));
 
     group.cancel(io);
     group.await(io) catch {};
@@ -1653,11 +1756,11 @@ test "ReqCtx.Server allows cross-route static context access" {
     try sr.interface.readSliceAll(got1[0..]);
     try std.testing.expectEqualStrings(touched, got1[0..]);
 
-    try sw.interface.writeAll("GET /state HTTP/1.1\r\nHost: x\r\n\r\n");
+    try sw.interface.writeAll("GET /state HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n");
     try sw.interface.flush();
     const state1 =
         "HTTP/1.1 200 OK\r\n" ++
-        "connection: keep-alive\r\n" ++
+        "connection: close\r\n" ++
         "content-type: text/plain; charset=utf-8\r\n" ++
         "content-length: 8\r\n" ++
         "\r\n" ++
@@ -1665,6 +1768,8 @@ test "ReqCtx.Server allows cross-route static context access" {
     var got2: [state1.len]u8 = undefined;
     try sr.interface.readSliceAll(got2[0..]);
     try std.testing.expectEqualStrings(state1, got2[0..]);
+    var one: [1]u8 = undefined;
+    try std.testing.expectError(error.EndOfStream, sr.interface.readSliceAll(one[0..]));
 
     group.cancel(io);
     group.await(io) catch {};
@@ -2233,9 +2338,10 @@ test "server soak: one second real-socket variety including malformed keepalive 
         try runSoakVarietyCase(io, port, random, mandatory_case, &upgrade_cases, &malformed_cases, &keepalive_cases);
     }
 
+    const soak_duration = std.Io.Clock.Duration.fromMilliseconds(250);
     const start = Io.Clock.awake.now(io);
     var timed_iterations: usize = 0;
-    while (start.untilNow(io, .awake).nanoseconds < std.time.ns_per_s) : (timed_iterations += 1) {
+    while (start.untilNow(io, .awake).nanoseconds < soak_duration.nanoseconds) : (timed_iterations += 1) {
         try runSoakVarietyCase(io, port, random, timed_iterations % soak_case_count, &upgrade_cases, &malformed_cases, &keepalive_cases);
     }
 
@@ -2247,4 +2353,258 @@ test "server soak: one second real-socket variety including malformed keepalive 
     try std.testing.expect(malformed_cases != 0);
     try std.testing.expect(keepalive_cases != 0);
     try std.testing.expect(ctx.upgrades == upgrade_cases);
+}
+
+test "server websocket abuse: helper handshake and hostile frame mix" {
+    const Ctx = struct {
+        upgrades: usize = 0,
+    };
+
+    const Ws = struct {
+        pub const Info: router.EndpointInfo = .{
+            .headers = upgrade_mod.WebSocketHeaders,
+        };
+
+        pub fn call(comptime _: ReqCtx, req: anytype) !response.Res {
+            return upgrade_mod.acceptWebSocket(req, .{}) catch |err| return upgrade_mod.rejectWebSocket(err);
+        }
+
+        pub fn upgrade(server: anytype, stream: *const std.Io.net.Stream, r: *Io.Reader, w: *Io.Writer, _: request.RequestLine, _: response.Res) void {
+            server.ctx.upgrades += 1;
+            defer stream.close(server.io);
+
+            var conn = zws.ServerConn.init(r, w, .{
+                .max_frame_payload_len = 64,
+                .max_message_payload_len = 128,
+            });
+            var msg_buf: [128]u8 = undefined;
+
+            while (true) {
+                const msg = conn.readMessage(msg_buf[0..]) catch |err| {
+                    switch (err) {
+                        error.EndOfStream,
+                        error.ConnectionClosed,
+                        error.ReadFailed,
+                        error.WriteFailed,
+                        => return,
+                        error.InvalidUtf8 => {
+                            conn.writeClose(1007, "") catch {};
+                            w.flush() catch {};
+                            return;
+                        },
+                        error.FrameTooLarge, error.MessageTooLarge => {
+                            conn.writeClose(1009, "") catch {};
+                            w.flush() catch {};
+                            return;
+                        },
+                        error.Timeout,
+                        error.FrameActive,
+                        error.NoActiveFrame,
+                        error.FragmentWriteInProgress,
+                        error.UnexpectedContinuationWrite,
+                        => {
+                            conn.writeClose(1011, "") catch {};
+                            w.flush() catch {};
+                            return;
+                        },
+                        error.InvalidCompressedMessage,
+                        error.InvalidClosePayload,
+                        error.InvalidCloseCode,
+                        error.ReservedBitsSet,
+                        error.UnknownOpcode,
+                        error.InvalidFrameLength,
+                        error.MaskBitInvalid,
+                        error.UnexpectedContinuation,
+                        error.ExpectedContinuation,
+                        error.ControlFrameFragmented,
+                        error.ControlFrameTooLarge,
+                        => {
+                            conn.writeClose(1002, "") catch {};
+                            w.flush() catch {};
+                            return;
+                        },
+                        error.OutOfMemory => {
+                            conn.writeClose(1011, "") catch {};
+                            w.flush() catch {};
+                            return;
+                        },
+                    }
+                };
+
+                switch (msg.opcode) {
+                    .text => conn.writeText(msg.payload) catch return,
+                    .binary => conn.writeBinary(msg.payload) catch return,
+                }
+                w.flush() catch return;
+            }
+        }
+    };
+
+    const io = std.testing.io;
+    primeSocketBackend();
+
+    var ctx: Ctx = .{};
+    const SrvT = Server(.{
+        .Context = Ctx,
+        .routes = .{
+            router.get("/ws", Ws),
+        },
+        .config = .{
+            .read_buffer = 4096,
+            .write_buffer = 2048,
+            .max_request_line = 512,
+            .max_single_header_size = 512,
+            .max_header_bytes = 2048,
+        },
+    });
+
+    const addr0: Io.net.IpAddress = .{ .ip4 = Io.net.Ip4Address.loopback(0) };
+    var server = try SrvT.init(std.testing.allocator, io, addr0, &ctx);
+    defer server.deinit();
+    const port: u16 = server.listener.socket.address.getPort();
+
+    var group: Io.Group = .init;
+    defer group.cancel(io);
+    try group.concurrent(io, SrvT.run, .{&server});
+
+    const case_count = 7;
+    var mandatory_case: usize = 0;
+    while (mandatory_case < case_count) : (mandatory_case += 1) {
+        const case_id = mandatory_case;
+        var stream = try Io.net.IpAddress.connect(&.{ .ip4 = Io.net.Ip4Address.loopback(port) }, io, .{ .mode = .stream });
+        defer stream.close(io);
+
+        var rb: [8 * 1024]u8 = undefined;
+        var wb: [8 * 1024]u8 = undefined;
+        var sr = stream.reader(io, &rb);
+        var sw = stream.writer(io, &wb);
+        try performWebSocketHandshake(&sr.interface, &sw.interface, "/ws");
+        var client = zws.ClientConn.init(&sr.interface, &sw.interface, .{});
+        var msg_buf: [256]u8 = undefined;
+
+        switch (case_id) {
+            0 => {
+                try client.writeText("hello");
+                try sw.interface.flush();
+                const msg = try client.readMessage(msg_buf[0..]);
+                try std.testing.expectEqual(zws.MessageOpcode.text, msg.opcode);
+                try std.testing.expectEqualStrings("hello", msg.payload);
+            },
+            1 => {
+                try client.writePing("zz");
+                try sw.interface.flush();
+                const frame = try client.readFrame(msg_buf[0..]);
+                try std.testing.expectEqual(zws.Opcode.pong, frame.header.opcode);
+                try std.testing.expectEqualStrings("zz", frame.payload);
+            },
+            2 => {
+                var frame_buf: [512]u8 = undefined;
+                const frame1 = try appendClientFrame(frame_buf[0..], 0x1, "hel", false, true, false);
+                try sw.interface.writeAll(frame1);
+                const frame2 = try appendClientFrame(frame_buf[0..], 0x0, "lo", true, true, false);
+                try sw.interface.writeAll(frame2);
+                try sw.interface.flush();
+                const msg = try client.readMessage(msg_buf[0..]);
+                try std.testing.expectEqual(zws.MessageOpcode.text, msg.opcode);
+                try std.testing.expectEqualStrings("hello", msg.payload);
+            },
+            3 => {
+                const frame = try appendClientFrame(msg_buf[0..], 0x1, "bad", true, false, false);
+                try sw.interface.writeAll(frame);
+                try sw.interface.flush();
+                try expectServerCloseCode(&client, msg_buf[0..], 1002);
+            },
+            4 => {
+                const frame = try appendClientFrame(msg_buf[0..], 0x1, "bad", true, true, true);
+                try sw.interface.writeAll(frame);
+                try sw.interface.flush();
+                try expectServerCloseCode(&client, msg_buf[0..], 1002);
+            },
+            5 => {
+                var payload: [80]u8 = .{'x'} ** 80;
+                const frame = try appendClientFrame(msg_buf[0..], 0x2, payload[0..], true, true, false);
+                try sw.interface.writeAll(frame);
+                try sw.interface.flush();
+                try expectServerCloseCode(&client, msg_buf[0..], 1009);
+            },
+            6 => {
+                try client.writeClose(1000, "done");
+                try sw.interface.flush();
+                try std.testing.expectError(error.ConnectionClosed, client.readMessage(msg_buf[0..]));
+            },
+            else => unreachable,
+        }
+    }
+
+    const soak_duration = std.Io.Clock.Duration.fromMilliseconds(250);
+    const start = Io.Clock.awake.now(io);
+    var timed_iterations: usize = 0;
+    while (start.untilNow(io, .awake).nanoseconds < soak_duration.nanoseconds) : (timed_iterations += 1) {
+        const case_id = timed_iterations % case_count;
+        var stream = try Io.net.IpAddress.connect(&.{ .ip4 = Io.net.Ip4Address.loopback(port) }, io, .{ .mode = .stream });
+        defer stream.close(io);
+
+        var rb: [8 * 1024]u8 = undefined;
+        var wb: [8 * 1024]u8 = undefined;
+        var sr = stream.reader(io, &rb);
+        var sw = stream.writer(io, &wb);
+        try performWebSocketHandshake(&sr.interface, &sw.interface, "/ws");
+        var client = zws.ClientConn.init(&sr.interface, &sw.interface, .{});
+        var msg_buf: [256]u8 = undefined;
+
+        switch (case_id) {
+            0 => {
+                try client.writeText("ok");
+                try sw.interface.flush();
+                const msg = try client.readMessage(msg_buf[0..]);
+                try std.testing.expectEqualStrings("ok", msg.payload);
+            },
+            1 => {
+                try client.writePing("p");
+                try sw.interface.flush();
+                const frame = try client.readFrame(msg_buf[0..]);
+                try std.testing.expectEqual(zws.Opcode.pong, frame.header.opcode);
+            },
+            2 => {
+                var frame_buf: [512]u8 = undefined;
+                const frame1 = try appendClientFrame(frame_buf[0..], 0x1, "a", false, true, false);
+                try sw.interface.writeAll(frame1);
+                const frame2 = try appendClientFrame(frame_buf[0..], 0x0, "b", true, true, false);
+                try sw.interface.writeAll(frame2);
+                try sw.interface.flush();
+                const msg = try client.readMessage(msg_buf[0..]);
+                try std.testing.expectEqualStrings("ab", msg.payload);
+            },
+            3 => {
+                const frame = try appendClientFrame(msg_buf[0..], 0x1, "x", true, false, false);
+                try sw.interface.writeAll(frame);
+                try sw.interface.flush();
+                try expectServerCloseCode(&client, msg_buf[0..], 1002);
+            },
+            4 => {
+                const frame = try appendClientFrame(msg_buf[0..], 0x1, "x", true, true, true);
+                try sw.interface.writeAll(frame);
+                try sw.interface.flush();
+                try expectServerCloseCode(&client, msg_buf[0..], 1002);
+            },
+            5 => {
+                var payload: [80]u8 = .{'y'} ** 80;
+                const frame = try appendClientFrame(msg_buf[0..], 0x2, payload[0..], true, true, false);
+                try sw.interface.writeAll(frame);
+                try sw.interface.flush();
+                try expectServerCloseCode(&client, msg_buf[0..], 1009);
+            },
+            6 => {
+                try client.writeClose(1000, "");
+                try sw.interface.flush();
+                _ = client.readMessage(msg_buf[0..]) catch {};
+            },
+            else => unreachable,
+        }
+    }
+
+    try std.testing.expect(timed_iterations != 0);
+    group.cancel(io);
+    group.await(io) catch {};
+    try std.testing.expect(ctx.upgrades >= case_count);
 }

@@ -65,10 +65,7 @@ pub fn main(init: std.process.Init) !void {
 Add as a dependency:
 
 ```bash
-<!-- README_FETCH:START -->
-
-zig fetch --save git+https://github.com/SmallThingz/zhttp?ref=75d3f69713a581ef989cf5313ceedadbc7a77909
-<!-- README_FETCH:END -->
+zig fetch --save git+https://github.com/SmallThingz/zhttp#main
 ```
 
 `build.zig`:

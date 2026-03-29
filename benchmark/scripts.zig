@@ -3,8 +3,6 @@ const builtin = @import("builtin");
 
 const ReadmeComparisonStartMarker = "<!-- README_COMPARISON:START -->";
 const ReadmeComparisonEndMarker = "<!-- README_COMPARISON:END -->";
-const ReadmeFetchStartMarker = "<!-- README_FETCH:START -->";
-const ReadmeFetchEndMarker = "<!-- README_FETCH:END -->";
 const BenchmarkResultsRelDir = "benchmark/results";
 const BenchmarkLatestJsonRelPath = "benchmark/results/bench_latest.json";
 const BenchmarkLatestMdRelPath = "benchmark/results/bench_latest.md";
@@ -1168,63 +1166,6 @@ fn updateReadmeSection(
     _ = try writeFileIfChanged(io, allocator, readme_path, out.items);
 }
 
-fn gitOutputTrimmed(io: std.Io, allocator: std.mem.Allocator, root: []const u8, argv: []const []const u8) !?[]u8 {
-    const out = std.process.run(allocator, io, .{
-        .argv = argv,
-        .cwd = .{ .path = root },
-        .stdout_limit = .limited(4096),
-        .stderr_limit = .limited(4096),
-    }) catch return null;
-    defer allocator.free(out.stdout);
-    defer allocator.free(out.stderr);
-    switch (out.term) {
-        .exited => |code| if (code != 0) return null,
-        else => return null,
-    }
-    const trimmed = std.mem.trim(u8, out.stdout, " \t\r\n");
-    if (trimmed.len == 0) return null;
-    return try allocator.dupe(u8, trimmed);
-}
-
-fn normalizeRemoteUrl(allocator: std.mem.Allocator, raw: []const u8) !?[]u8 {
-    var view = raw;
-    var owned: ?[]u8 = null;
-    defer if (owned) |buf| allocator.free(buf);
-
-    if (std.mem.startsWith(u8, raw, "git@github.com:")) {
-        owned = try std.fmt.allocPrint(allocator, "https://github.com/{s}", .{raw["git@github.com:".len..]});
-        view = owned.?;
-    } else if (std.mem.startsWith(u8, raw, "ssh://git@github.com/")) {
-        owned = try std.fmt.allocPrint(allocator, "https://github.com/{s}", .{raw["ssh://git@github.com/".len..]});
-        view = owned.?;
-    } else if (!std.mem.startsWith(u8, raw, "https://") and !std.mem.startsWith(u8, raw, "http://")) {
-        return null;
-    }
-
-    const no_dot_git = if (std.mem.endsWith(u8, view, ".git")) view[0 .. view.len - 4] else view;
-    return try allocator.dupe(u8, no_dot_git);
-}
-
-fn syncReadmeFetchCommand(io: std.Io, allocator: std.mem.Allocator, root: []const u8) !void {
-    const replacement = blk: {
-        const remote = try gitOutputTrimmed(io, allocator, root, &.{ "git", "config", "--get", "remote.origin.url" });
-        if (remote == null) break :blk try allocator.dupe(u8, "zig fetch --save <git-or-tarball-url>");
-        defer allocator.free(remote.?);
-
-        const head = try gitOutputTrimmed(io, allocator, root, &.{ "git", "rev-parse", "HEAD" });
-        if (head == null) break :blk try allocator.dupe(u8, "zig fetch --save <git-or-tarball-url>");
-        defer allocator.free(head.?);
-
-        const url = try normalizeRemoteUrl(allocator, remote.?);
-        if (url == null) break :blk try allocator.dupe(u8, "zig fetch --save <git-or-tarball-url>");
-        defer allocator.free(url.?);
-
-        break :blk try std.fmt.allocPrint(allocator, "zig fetch --save git+{s}?ref={s}", .{ url.?, head.? });
-    };
-    defer allocator.free(replacement);
-    try updateReadmeSection(io, allocator, root, ReadmeFetchStartMarker, ReadmeFetchEndMarker, replacement);
-}
-
 fn renderBenchmarkMarkdown(allocator: std.mem.Allocator, snap: BenchmarkSnapshot) ![]u8 {
     var out: std.Io.Writer.Allocating = .init(allocator);
     errdefer out.deinit();
@@ -1327,7 +1268,7 @@ fn syncReadmeComparisonSummary(io: std.Io, allocator: std.mem.Allocator, root: [
     try updateReadmeSection(io, allocator, root, ReadmeComparisonStartMarker, ReadmeComparisonEndMarker, replacement);
 }
 
-/// Writes benchmark snapshot and refreshes README fetch section.
+/// Writes benchmark snapshot files.
 pub fn writeBenchmarkSnapshotAndSyncFetch(
     io: std.Io,
     allocator: std.mem.Allocator,
@@ -1364,8 +1305,6 @@ pub fn writeBenchmarkSnapshotAndSyncFetch(
     defer allocator.free(md_path);
     _ = try writeFileIfChanged(io, allocator, md_path, md);
 
-    try syncReadmeFetchCommand(io, allocator, root);
-
     const summary = try std.fmt.allocPrint(
         allocator,
         "benchmark/results/bench_latest.json updated\nzhttp: req/s={d:.2} ns/req={d:.2} MiB/s={d:.2} fixed_bytes={d}\n",
@@ -1375,7 +1314,7 @@ pub fn writeBenchmarkSnapshotAndSyncFetch(
     try writeStdout(io, summary);
 }
 
-/// Writes benchmark comparison snapshot and refreshes README comparison/fetch sections.
+/// Writes benchmark comparison snapshot and refreshes the README comparison section.
 pub fn writeCompareSnapshotAndSyncReadme(
     io: std.Io,
     allocator: std.mem.Allocator,
@@ -1416,7 +1355,6 @@ pub fn writeCompareSnapshotAndSyncReadme(
     _ = try writeFileIfChanged(io, allocator, md_path, md);
 
     try syncReadmeComparisonSummary(io, allocator, root);
-    try syncReadmeFetchCommand(io, allocator, root);
 
     const z_rel = if (faf.req_per_s == 0.0) 0.0 else zhttp.req_per_s / faf.req_per_s;
     const summary = try std.fmt.allocPrint(

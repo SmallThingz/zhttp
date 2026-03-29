@@ -5,6 +5,7 @@ const Header = @import("../response.zig").Header;
 const MiddlewareInfo = @import("../middleware.zig").MiddlewareInfo;
 const ReqCtx = @import("../req_ctx.zig").ReqCtx;
 const parse = @import("../parse.zig");
+const request = @import("../request.zig");
 const test_helpers = @import("test_helpers.zig");
 const util = @import("util.zig");
 const core_util = @import("../util.zig");
@@ -241,6 +242,28 @@ pub fn Compression(comptime opts: CompressionOptions) type {
     };
 }
 
+const CompressionTestMwCtx = struct {};
+const CompressionTestReq = request.Request(
+    struct { accept_encoding: parse.Optional(parse.String) },
+    struct {},
+    &.{},
+    CompressionTestMwCtx,
+);
+
+fn initCompressionTestReq(a: std.mem.Allocator, raw_headers: []const u8) !CompressionTestReq {
+    const line: request.RequestLine = .{
+        .method = "GET",
+        .version = .http11,
+        .path = @constCast("/"[0..]),
+        .query = @constCast(""[0..]),
+    };
+    var reqv = CompressionTestReq.init(a, std.testing.io, line, .{});
+    if (raw_headers.len == 0) return reqv;
+    var r = std.Io.Reader.fixed(raw_headers);
+    try reqv.parseHeaders(a, &r, 1024);
+    return reqv;
+}
+
 test "compression: negotiateEncodings honors q/wildcard and whitelist order" {
     var n = negotiateEncodings("br", &.{ .br, .gzip });
     try std.testing.expectEqual(@as(usize, 1), n.len);
@@ -271,13 +294,6 @@ test "compression: negotiateEncodings honors q/wildcard and whitelist order" {
 
 test "compression: check_then_add skips when content-encoding exists" {
     const Mw = Compression(.{ .min_size = 0, .content_encoding_behavior = .check_then_add });
-    const MwCtx = struct {};
-    const ReqT = @import("../request.zig").Request(
-        struct { accept_encoding: parse.Optional(parse.String) },
-        struct {},
-        &.{},
-        MwCtx,
-    );
 
     const Next = struct {
         /// Test helper next-handler implementation with pre-existing encoding.
@@ -294,21 +310,10 @@ test "compression: check_then_add skips when content-encoding exists" {
     var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena_state.deinit();
     const a = arena_state.allocator();
-    const path_buf = "/".*;
-    const query_buf: [0]u8 = .{};
-    const line: @import("../request.zig").RequestLine = .{
-        .method = "GET",
-        .version = .http11,
-        .path = @constCast(path_buf[0..]),
-        .query = @constCast(query_buf[0..]),
-    };
-    const mw_ctx: MwCtx = .{};
-    var reqv = ReqT.init(a, std.testing.io, line, mw_ctx);
+    var reqv = try initCompressionTestReq(a, "Accept-Encoding: gzip\r\n\r\n");
     defer reqv.deinit(a);
-    var r = std.Io.Reader.fixed("Accept-Encoding: gzip\r\n\r\n");
-    try reqv.parseHeaders(a, &r, 1024);
 
-    const res = try test_helpers.runMiddlewareTest(Mw, ReqT, Next, &reqv, line.method);
+    const res = try test_helpers.runMiddlewareTest(Mw, CompressionTestReq, Next, &reqv, "GET");
     try std.testing.expectEqual(@as(usize, 1), res.headers.len);
     try std.testing.expectEqualStrings("br", res.headers[0].value);
     try std.testing.expectEqualStrings("hello", res.body);
@@ -319,13 +324,6 @@ test "compression: check_then_add skips duplicate vary" {
         .min_size = 0,
         .vary_behavior = .check_then_add,
     });
-    const MwCtx = struct {};
-    const ReqT = @import("../request.zig").Request(
-        struct { accept_encoding: parse.Optional(parse.String) },
-        struct {},
-        &.{},
-        MwCtx,
-    );
 
     const Next = struct {
         /// Test helper next-handler implementation with compressible payload.
@@ -342,21 +340,10 @@ test "compression: check_then_add skips duplicate vary" {
     var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena_state.deinit();
     const a = arena_state.allocator();
-    const path_buf = "/".*;
-    const query_buf: [0]u8 = .{};
-    const line: @import("../request.zig").RequestLine = .{
-        .method = "GET",
-        .version = .http11,
-        .path = @constCast(path_buf[0..]),
-        .query = @constCast(query_buf[0..]),
-    };
-    const mw_ctx: MwCtx = .{};
-    var reqv = ReqT.init(a, std.testing.io, line, mw_ctx);
+    var reqv = try initCompressionTestReq(a, "Accept-Encoding: gzip\r\n\r\n");
     defer reqv.deinit(a);
-    var r = std.Io.Reader.fixed("Accept-Encoding: gzip\r\n\r\n");
-    try reqv.parseHeaders(a, &r, 1024);
 
-    const res = try test_helpers.runMiddlewareTest(Mw, ReqT, Next, &reqv, line.method);
+    const res = try test_helpers.runMiddlewareTest(Mw, CompressionTestReq, Next, &reqv, "GET");
     try std.testing.expectEqual(@as(usize, 2), res.headers.len);
     try std.testing.expectEqualStrings("content-encoding", res.headers[1].name);
 }
@@ -364,13 +351,6 @@ test "compression: check_then_add skips duplicate vary" {
 test "compression: selects deflate when preferred" {
     const payload = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
     const Mw = Compression(.{ .min_size = 0 });
-    const MwCtx = struct {};
-    const ReqT = @import("../request.zig").Request(
-        struct { accept_encoding: parse.Optional(parse.String) },
-        struct {},
-        &.{},
-        MwCtx,
-    );
 
     const Next = struct {
         /// Test helper next-handler implementation with compressible payload.
@@ -387,21 +367,10 @@ test "compression: selects deflate when preferred" {
     var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena_state.deinit();
     const a = arena_state.allocator();
-    const path_buf = "/".*;
-    const query_buf: [0]u8 = .{};
-    const line: @import("../request.zig").RequestLine = .{
-        .method = "GET",
-        .version = .http11,
-        .path = @constCast(path_buf[0..]),
-        .query = @constCast(query_buf[0..]),
-    };
-    const mw_ctx: MwCtx = .{};
-    var reqv = ReqT.init(a, std.testing.io, line, mw_ctx);
+    var reqv = try initCompressionTestReq(a, "Accept-Encoding: gzip;q=0, deflate\r\n\r\n");
     defer reqv.deinit(a);
-    var r = std.Io.Reader.fixed("Accept-Encoding: gzip;q=0, deflate\r\n\r\n");
-    try reqv.parseHeaders(a, &r, 1024);
 
-    const res = try test_helpers.runMiddlewareTest(Mw, ReqT, Next, &reqv, line.method);
+    const res = try test_helpers.runMiddlewareTest(Mw, CompressionTestReq, Next, &reqv, "GET");
     try std.testing.expectEqual(@as(usize, 2), res.headers.len);
     try std.testing.expectEqualStrings("content-encoding", res.headers[0].name);
     try std.testing.expectEqualStrings("deflate", res.headers[0].value);
@@ -412,13 +381,6 @@ test "compression: selects deflate when preferred" {
 test "compression: selects gzip when preferred" {
     const payload = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
     const Mw = Compression(.{ .min_size = 0 });
-    const MwCtx = struct {};
-    const ReqT = @import("../request.zig").Request(
-        struct { accept_encoding: parse.Optional(parse.String) },
-        struct {},
-        &.{},
-        MwCtx,
-    );
 
     const Next = struct {
         /// Test helper next-handler implementation with compressible payload.
@@ -435,21 +397,10 @@ test "compression: selects gzip when preferred" {
     var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena_state.deinit();
     const a = arena_state.allocator();
-    const path_buf = "/".*;
-    const query_buf: [0]u8 = .{};
-    const line: @import("../request.zig").RequestLine = .{
-        .method = "GET",
-        .version = .http11,
-        .path = @constCast(path_buf[0..]),
-        .query = @constCast(query_buf[0..]),
-    };
-    const mw_ctx: MwCtx = .{};
-    var reqv = ReqT.init(a, std.testing.io, line, mw_ctx);
+    var reqv = try initCompressionTestReq(a, "Accept-Encoding: gzip, deflate;q=0\r\n\r\n");
     defer reqv.deinit(a);
-    var r = std.Io.Reader.fixed("Accept-Encoding: gzip, deflate;q=0\r\n\r\n");
-    try reqv.parseHeaders(a, &r, 1024);
 
-    const res = try test_helpers.runMiddlewareTest(Mw, ReqT, Next, &reqv, line.method);
+    const res = try test_helpers.runMiddlewareTest(Mw, CompressionTestReq, Next, &reqv, "GET");
     try std.testing.expectEqualStrings("gzip", res.headers[0].value);
     try std.testing.expect(res.body.len > 10);
     try std.testing.expectEqual(@as(u8, 0x1f), res.body[0]);
@@ -459,13 +410,6 @@ test "compression: selects gzip when preferred" {
 test "compression: selects brotli when preferred" {
     const payload = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
     const Mw = Compression(.{ .min_size = 0 });
-    const MwCtx = struct {};
-    const ReqT = @import("../request.zig").Request(
-        struct { accept_encoding: parse.Optional(parse.String) },
-        struct {},
-        &.{},
-        MwCtx,
-    );
 
     const Next = struct {
         /// Test helper next-handler implementation with compressible payload.
@@ -482,21 +426,10 @@ test "compression: selects brotli when preferred" {
     var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena_state.deinit();
     const a = arena_state.allocator();
-    const path_buf = "/".*;
-    const query_buf: [0]u8 = .{};
-    const line: @import("../request.zig").RequestLine = .{
-        .method = "GET",
-        .version = .http11,
-        .path = @constCast(path_buf[0..]),
-        .query = @constCast(query_buf[0..]),
-    };
-    const mw_ctx: MwCtx = .{};
-    var reqv = ReqT.init(a, std.testing.io, line, mw_ctx);
+    var reqv = try initCompressionTestReq(a, "Accept-Encoding: br, gzip;q=0.1\r\n\r\n");
     defer reqv.deinit(a);
-    var r = std.Io.Reader.fixed("Accept-Encoding: br, gzip;q=0.1\r\n\r\n");
-    try reqv.parseHeaders(a, &r, 1024);
 
-    const res = try test_helpers.runMiddlewareTest(Mw, ReqT, Next, &reqv, line.method);
+    const res = try test_helpers.runMiddlewareTest(Mw, CompressionTestReq, Next, &reqv, "GET");
     try std.testing.expectEqualStrings("br", res.headers[0].value);
     const decoded = try brotli.decompress(a, res.body, payload.len * 2);
     try std.testing.expectEqualStrings(payload, decoded);
@@ -505,13 +438,6 @@ test "compression: selects brotli when preferred" {
 test "compression: selects zstd when preferred" {
     const payload = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
     const Mw = Compression(.{ .min_size = 0 });
-    const MwCtx = struct {};
-    const ReqT = @import("../request.zig").Request(
-        struct { accept_encoding: parse.Optional(parse.String) },
-        struct {},
-        &.{},
-        MwCtx,
-    );
 
     const Next = struct {
         /// Test helper next-handler implementation with compressible payload.
@@ -528,21 +454,10 @@ test "compression: selects zstd when preferred" {
     var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena_state.deinit();
     const a = arena_state.allocator();
-    const path_buf = "/".*;
-    const query_buf: [0]u8 = .{};
-    const line: @import("../request.zig").RequestLine = .{
-        .method = "GET",
-        .version = .http11,
-        .path = @constCast(path_buf[0..]),
-        .query = @constCast(query_buf[0..]),
-    };
-    const mw_ctx: MwCtx = .{};
-    var reqv = ReqT.init(a, std.testing.io, line, mw_ctx);
+    var reqv = try initCompressionTestReq(a, "Accept-Encoding: zstd;q=1, br;q=0\r\n\r\n");
     defer reqv.deinit(a);
-    var r = std.Io.Reader.fixed("Accept-Encoding: zstd;q=1, br;q=0\r\n\r\n");
-    try reqv.parseHeaders(a, &r, 1024);
 
-    const res = try test_helpers.runMiddlewareTest(Mw, ReqT, Next, &reqv, line.method);
+    const res = try test_helpers.runMiddlewareTest(Mw, CompressionTestReq, Next, &reqv, "GET");
     try std.testing.expectEqualStrings("zstd", res.headers[0].value);
     const decoded = try zstd.decompress(a, res.body, payload.len * 2);
     try std.testing.expectEqualStrings(payload, decoded);
@@ -554,13 +469,6 @@ test "compression: whitelist disables schemes not in list" {
         .min_size = 0,
         .schemes = &.{.gzip},
     });
-    const MwCtx = struct {};
-    const ReqT = @import("../request.zig").Request(
-        struct { accept_encoding: parse.Optional(parse.String) },
-        struct {},
-        &.{},
-        MwCtx,
-    );
 
     const Next = struct {
         /// Test helper next-handler implementation with compressible payload.
@@ -577,21 +485,10 @@ test "compression: whitelist disables schemes not in list" {
     var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena_state.deinit();
     const a = arena_state.allocator();
-    const path_buf = "/".*;
-    const query_buf: [0]u8 = .{};
-    const line: @import("../request.zig").RequestLine = .{
-        .method = "GET",
-        .version = .http11,
-        .path = @constCast(path_buf[0..]),
-        .query = @constCast(query_buf[0..]),
-    };
-    const mw_ctx: MwCtx = .{};
-    var reqv = ReqT.init(a, std.testing.io, line, mw_ctx);
+    var reqv = try initCompressionTestReq(a, "Accept-Encoding: br, gzip\r\n\r\n");
     defer reqv.deinit(a);
-    var r = std.Io.Reader.fixed("Accept-Encoding: br, gzip\r\n\r\n");
-    try reqv.parseHeaders(a, &r, 1024);
 
-    const res = try test_helpers.runMiddlewareTest(Mw, ReqT, Next, &reqv, line.method);
+    const res = try test_helpers.runMiddlewareTest(Mw, CompressionTestReq, Next, &reqv, "GET");
     try std.testing.expectEqualStrings("gzip", res.headers[0].value);
 }
 
@@ -601,13 +498,6 @@ test "compression: whitelist order controls tie-break preference" {
         .min_size = 0,
         .schemes = &.{ .gzip, .br },
     });
-    const MwCtx = struct {};
-    const ReqT = @import("../request.zig").Request(
-        struct { accept_encoding: parse.Optional(parse.String) },
-        struct {},
-        &.{},
-        MwCtx,
-    );
 
     const Next = struct {
         /// Test helper next-handler implementation with compressible payload.
@@ -624,20 +514,9 @@ test "compression: whitelist order controls tie-break preference" {
     var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena_state.deinit();
     const a = arena_state.allocator();
-    const path_buf = "/".*;
-    const query_buf: [0]u8 = .{};
-    const line: @import("../request.zig").RequestLine = .{
-        .method = "GET",
-        .version = .http11,
-        .path = @constCast(path_buf[0..]),
-        .query = @constCast(query_buf[0..]),
-    };
-    const mw_ctx: MwCtx = .{};
-    var reqv = ReqT.init(a, std.testing.io, line, mw_ctx);
+    var reqv = try initCompressionTestReq(a, "Accept-Encoding: br, gzip\r\n\r\n");
     defer reqv.deinit(a);
-    var r = std.Io.Reader.fixed("Accept-Encoding: br, gzip\r\n\r\n");
-    try reqv.parseHeaders(a, &r, 1024);
 
-    const res = try test_helpers.runMiddlewareTest(Mw, ReqT, Next, &reqv, line.method);
+    const res = try test_helpers.runMiddlewareTest(Mw, CompressionTestReq, Next, &reqv, "GET");
     try std.testing.expectEqualStrings("gzip", res.headers[0].value);
 }

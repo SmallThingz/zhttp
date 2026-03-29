@@ -3,7 +3,7 @@ const builtin = @import("builtin");
 
 pub const panic = std.debug.FullPanic(panicHandler);
 
-const default_job_cap: usize = 4;
+const default_job_cap: usize = 16;
 
 fn print(comptime fmt: []const u8, args: anytype) void {
     var buf: [4096]u8 = undefined;
@@ -167,6 +167,14 @@ fn printHelp() void {
     );
 }
 
+fn testGroupKey(name: []const u8) []const u8 {
+    const marker = ".test.";
+    if (std.mem.indexOf(u8, name, marker)) |idx| {
+        return name[0 .. idx + marker.len];
+    }
+    return name;
+}
+
 fn ignoreSigIo() void {
     if (builtin.os.tag == .windows or builtin.os.tag == .wasi) return;
 
@@ -203,6 +211,13 @@ const Summary = struct {
     leak: usize = 0,
     /// Stores `crash`.
     crash: usize = 0,
+};
+
+const Dashboard = struct {
+    /// Stores currently running test names per worker slot.
+    running: []?[]const u8,
+    /// Number of dashboard lines currently rendered.
+    rendered_lines: usize = 0,
 };
 
 fn noteStatus(summary: *Summary, status: Status) void {
@@ -251,6 +266,50 @@ fn runAllTests(
         return;
     }
 
+    const GroupBucket = struct {
+        key: []const u8,
+        items: std.ArrayList(TestInfo) = .empty,
+        next: usize = 0,
+    };
+
+    var buckets: std.ArrayList(GroupBucket) = .empty;
+    defer {
+        for (buckets.items) |*b| b.items.deinit(gpa);
+        buckets.deinit(gpa);
+    }
+
+    for (tests.items) |t| {
+        const key = testGroupKey(t.name);
+        var found: ?usize = null;
+        for (buckets.items, 0..) |b, bi| {
+            if (std.mem.eql(u8, b.key, key)) {
+                found = bi;
+                break;
+            }
+        }
+        if (found == null) {
+            try buckets.append(gpa, .{ .key = key });
+            found = buckets.items.len - 1;
+        }
+        try buckets.items[found.?].items.append(gpa, t);
+    }
+
+    var reordered: std.ArrayList(TestInfo) = .empty;
+    defer reordered.deinit(gpa);
+    try reordered.ensureTotalCapacity(gpa, tests.items.len);
+
+    var remaining = tests.items.len;
+    while (remaining != 0) {
+        for (buckets.items) |*bucket| {
+            if (bucket.next >= bucket.items.items.len) continue;
+            try reordered.append(gpa, bucket.items.items[bucket.next]);
+            bucket.next += 1;
+            remaining -= 1;
+        }
+    }
+
+    @memcpy(tests.items, reordered.items);
+
     const cpu_count = std.Thread.getCpuCount() catch 1;
     var job_count = jobs orelse @min(cpu_count, default_job_cap);
     if (job_count == 0) job_count = 1;
@@ -260,6 +319,11 @@ fn runAllTests(
     var summary: Summary = .{};
     var print_mutex: std.Io.Mutex = .init;
     var count_mutex: std.Io.Mutex = .init;
+    const slot_count: usize = if (builtin.single_threaded or job_count == 1) 1 else job_count;
+    const running = try gpa.alloc(?[]const u8, slot_count);
+    defer gpa.free(running);
+    @memset(running, null);
+    var dashboard: Dashboard = .{ .running = running };
 
     var ctx = WorkerCtx{
         .gpa = gpa,
@@ -271,28 +335,48 @@ fn runAllTests(
         .summary = &summary,
         .print_mutex = &print_mutex,
         .count_mutex = &count_mutex,
+        .dashboard = &dashboard,
     };
 
     if (builtin.single_threaded or job_count == 1) {
         for (tests.items) |t| {
+            print_mutex.lockUncancelable(io);
+            ctx.dashboard.running[0] = t.name;
+            renderDashboardLocked(&ctx);
+            print_mutex.unlock(io);
+
             const result = runChildTest(&ctx, t.name) catch |err| {
+                print_mutex.lockUncancelable(io);
+                defer print_mutex.unlock(io);
+                clearDashboardLocked(&ctx);
+                ctx.dashboard.running[0] = null;
                 printRunnerError(t.name, err);
+                renderDashboardLocked(&ctx);
                 noteStatus(&summary, .fail);
                 continue;
             };
+
+            print_mutex.lockUncancelable(io);
             defer deinitChildResult(gpa, result);
+            clearDashboardLocked(&ctx);
+            ctx.dashboard.running[0] = null;
             printTestOutput(t.name, result);
+            renderDashboardLocked(&ctx);
+            print_mutex.unlock(io);
             noteStatus(&summary, result.status);
         }
     } else {
         const threads = try gpa.alloc(std.Thread, job_count);
         defer gpa.free(threads);
         for (threads, 0..) |*t, i| {
-            _ = i;
-            t.* = try std.Thread.spawn(.{}, worker, .{&ctx});
+            t.* = try std.Thread.spawn(.{}, worker, .{ &ctx, i });
         }
         for (threads) |t| t.join();
     }
+
+    print_mutex.lockUncancelable(io);
+    clearDashboardLocked(&ctx);
+    print_mutex.unlock(io);
 
     print(
         "\npass: {d}  fail: {d}  skip: {d}  leak: {d}  crash: {d}\n",
@@ -323,18 +407,54 @@ const WorkerCtx = struct {
     print_mutex: *std.Io.Mutex,
     /// Stores `count_mutex`.
     count_mutex: *std.Io.Mutex,
+    /// Stores running dashboard state.
+    dashboard: *Dashboard,
 };
 
-fn worker(ctx: *WorkerCtx) void {
+fn clearDashboardLocked(ctx: *WorkerCtx) void {
+    if (ctx.dashboard.rendered_lines == 0) return;
+    print("\x1b[{d}F", .{ctx.dashboard.rendered_lines});
+    var i: usize = 0;
+    while (i < ctx.dashboard.rendered_lines) : (i += 1) {
+        print("\x1b[2K\n", .{});
+    }
+    print("\x1b[{d}F", .{ctx.dashboard.rendered_lines});
+    ctx.dashboard.rendered_lines = 0;
+}
+
+fn renderDashboardLocked(ctx: *WorkerCtx) void {
+    clearDashboardLocked(ctx);
+
+    var rendered: usize = 0;
+    for (ctx.dashboard.running) |name_opt| {
+        if (name_opt) |name| {
+            print("\x1b[33mrunning\x1b[0m {s}\n", .{name});
+            rendered += 1;
+        }
+    }
+    if (rendered == 0) return;
+    ctx.dashboard.rendered_lines = rendered;
+}
+
+fn worker(ctx: *WorkerCtx, slot: usize) void {
     while (true) {
         const idx = ctx.next_index.fetchAdd(1, .seq_cst);
         if (idx >= ctx.tests.len) break;
 
         const test_name = ctx.tests[idx].name;
+
+        ctx.print_mutex.lockUncancelable(ctx.io);
+        ctx.dashboard.running[slot] = test_name;
+        renderDashboardLocked(ctx);
+        ctx.print_mutex.unlock(ctx.io);
+
         const result = runChildTest(ctx, test_name) catch |err| {
             ctx.print_mutex.lockUncancelable(ctx.io);
             defer ctx.print_mutex.unlock(ctx.io);
+            clearDashboardLocked(ctx);
+            ctx.dashboard.running[slot] = null;
             printRunnerError(test_name, err);
+            renderDashboardLocked(ctx);
             ctx.count_mutex.lockUncancelable(ctx.io);
             noteStatus(ctx.summary, .fail);
             ctx.count_mutex.unlock(ctx.io);
@@ -344,7 +464,10 @@ fn worker(ctx: *WorkerCtx) void {
         ctx.print_mutex.lockUncancelable(ctx.io);
         defer ctx.print_mutex.unlock(ctx.io);
         defer deinitChildResult(ctx.gpa, result);
+        clearDashboardLocked(ctx);
+        ctx.dashboard.running[slot] = null;
         printTestOutput(test_name, result);
+        renderDashboardLocked(ctx);
 
         ctx.count_mutex.lockUncancelable(ctx.io);
         noteStatus(ctx.summary, result.status);

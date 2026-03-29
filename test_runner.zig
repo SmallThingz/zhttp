@@ -3,11 +3,7 @@ const builtin = @import("builtin");
 
 pub const panic = std.debug.FullPanic(panicHandler);
 
-var is_child_mode: bool = false;
 const default_job_cap: usize = 4;
-const default_timeout = std.Io.Timeout{
-    .duration = std.Io.Clock.Duration.fromSeconds(8),
-};
 
 fn print(comptime fmt: []const u8, args: anytype) void {
     var buf: [4096]u8 = undefined;
@@ -139,7 +135,6 @@ pub fn main(init: std.process.Init) !void {
     }
 
     if (child_test_name) |name| {
-        is_child_mode = true;
         defer init.gpa.free(name);
         runSingleTest(name, seed);
         return;
@@ -170,6 +165,18 @@ fn printHelp() void {
     );
 }
 
+fn ignoreSigIo() void {
+    if (builtin.os.tag == .windows or builtin.os.tag == .wasi) return;
+
+    const posix = std.posix;
+    const act: posix.Sigaction = .{
+        .handler = .{ .handler = posix.SIG.IGN },
+        .mask = posix.sigemptyset(),
+        .flags = posix.SA.RESTART,
+    };
+    posix.sigaction(.IO, &act, null);
+}
+
 const TestInfo = struct {
     /// Stores `name`.
     name: []const u8,
@@ -195,6 +202,20 @@ const Summary = struct {
     /// Stores `crash`.
     crash: usize = 0,
 };
+
+fn noteStatus(summary: *Summary, status: Status) void {
+    switch (status) {
+        .pass => summary.pass += 1,
+        .fail => summary.fail += 1,
+        .skip => summary.skip += 1,
+        .leak => summary.leak += 1,
+        .crash => summary.crash += 1,
+    }
+}
+
+fn printRunnerError(name: []const u8, err: anyerror) void {
+    print("\n== TEST {s} ==\nrunner error: {s}\n", .{ name, @errorName(err) });
+}
 
 fn runAllTests(
     gpa: std.mem.Allocator,
@@ -252,23 +273,14 @@ fn runAllTests(
 
     if (builtin.single_threaded or job_count == 1) {
         for (tests.items) |t| {
-            const result = if (shouldRunInProcess(t.name))
-                childResultFromStatus(runInProcessTest(t.name, seed))
-            else
-                runChildTest(&ctx, t.name) catch |err| {
-                    print("\n== TEST {s} ==\nrunner error: {s}\n", .{ t.name, @errorName(err) });
-                    summary.fail += 1;
-                    continue;
-                };
+            const result = runChildTest(&ctx, t.name) catch |err| {
+                printRunnerError(t.name, err);
+                noteStatus(&summary, .fail);
+                continue;
+            };
             defer deinitChildResult(gpa, result);
             printTestOutput(t.name, result);
-            switch (result.status) {
-                .pass => summary.pass += 1,
-                .fail => summary.fail += 1,
-                .skip => summary.skip += 1,
-                .leak => summary.leak += 1,
-                .crash => summary.crash += 1,
-            }
+            noteStatus(&summary, result.status);
         }
     } else {
         const threads = try gpa.alloc(std.Thread, job_count);
@@ -320,9 +332,9 @@ fn worker(ctx: *WorkerCtx) void {
         const result = runChildTest(ctx, test_name) catch |err| {
             ctx.print_mutex.lockUncancelable(ctx.io);
             defer ctx.print_mutex.unlock(ctx.io);
-            print("\n== TEST {s} ==\nrunner error: {s}\n", .{ test_name, @errorName(err) });
+            printRunnerError(test_name, err);
             ctx.count_mutex.lockUncancelable(ctx.io);
-            ctx.summary.fail += 1;
+            noteStatus(ctx.summary, .fail);
             ctx.count_mutex.unlock(ctx.io);
             continue;
         };
@@ -333,13 +345,7 @@ fn worker(ctx: *WorkerCtx) void {
         printTestOutput(test_name, result);
 
         ctx.count_mutex.lockUncancelable(ctx.io);
-        switch (result.status) {
-            .pass => ctx.summary.pass += 1,
-            .fail => ctx.summary.fail += 1,
-            .skip => ctx.summary.skip += 1,
-            .leak => ctx.summary.leak += 1,
-            .crash => ctx.summary.crash += 1,
-        }
+        noteStatus(ctx.summary, result.status);
         ctx.count_mutex.unlock(ctx.io);
     }
 }
@@ -353,27 +359,7 @@ const ChildResult = struct {
     stdout: []u8,
     /// Stores `stderr`.
     stderr: []u8,
-    /// Stores `timed_out`.
-    timed_out: bool = false,
 };
-
-fn shouldRunInProcess(name: []const u8) bool {
-    return std.mem.startsWith(u8, name, "src.server.test.");
-}
-
-fn childResultFromStatus(status: Status) ChildResult {
-    return .{
-        .status = status,
-        .term = .{ .exited = switch (status) {
-            .pass => 0,
-            .skip => 2,
-            .leak => 3,
-            .fail, .crash => 1,
-        } },
-        .stdout = "",
-        .stderr = "",
-    };
-}
 
 fn runChildTest(ctx: *WorkerCtx, test_name: []const u8) !ChildResult {
     var argv: std.ArrayList([]const u8) = .empty;
@@ -397,25 +383,13 @@ fn runChildTest(ctx: *WorkerCtx, test_name: []const u8) !ChildResult {
         .stdout_limit = .limited(256 * 1024),
         .stderr_limit = .limited(256 * 1024),
         .reserve_amount = 16 * 1024,
-        .timeout = default_timeout,
-    }) catch |err| switch (err) {
-        error.Timeout => {
-            return .{
-                .status = .crash,
-                .term = null,
-                .stdout = try ctx.gpa.dupe(u8, ""),
-                .stderr = try std.fmt.allocPrint(ctx.gpa, "test timed out after {}\n", .{default_timeout.duration}),
-                .timed_out = true,
-            };
-        },
-        else => {
-            return .{
-                .status = .fail,
-                .term = null,
-                .stdout = try ctx.gpa.dupe(u8, ""),
-                .stderr = try std.fmt.allocPrint(ctx.gpa, "runner error: {s}\n", .{@errorName(err)}),
-            };
-        },
+    }) catch |err| {
+        return .{
+            .status = .fail,
+            .term = null,
+            .stdout = try ctx.gpa.dupe(u8, ""),
+            .stderr = try std.fmt.allocPrint(ctx.gpa, "runner error: {s}\n", .{@errorName(err)}),
+        };
     };
     errdefer ctx.gpa.free(run_result.stdout);
     errdefer ctx.gpa.free(run_result.stderr);
@@ -456,15 +430,15 @@ fn printTestOutput(name: []const u8, res: ChildResult) void {
 
     print("{s}{s}\x1b[0m {s}", .{ color, label, name });
 
-    if (res.timed_out) {
-        print(" | timeout", .{});
-    } else if (res.term) |term| {
+    if (res.term) |term| {
         switch (term) {
             .exited => |code| if (code != 0) print(" | exit {d}", .{code}),
             .signal => |sig| print(" | signal {d}", .{@intFromEnum(sig)}),
             .stopped => |code| print(" | stopped {d}", .{code}),
             .unknown => |code| print(" | unknown {d}", .{code}),
         }
+    } else {
+        print(" | no-term", .{});
     }
 
     print("\n", .{});
@@ -483,35 +457,9 @@ fn deinitChildResult(gpa: std.mem.Allocator, res: ChildResult) void {
     gpa.free(res.stderr);
 }
 
-fn runInProcessTest(name: []const u8, seed: ?u32) Status {
-    if (seed) |s| std.testing.random_seed = s;
-
-    const test_fn = findTest(name) orelse {
-        print("unknown test: {s}\n", .{name});
-        return .fail;
-    };
-
-    std.testing.allocator_instance = .{};
-    const result = test_fn.func();
-    const leak_status = std.testing.allocator_instance.deinit();
-
-    if (leak_status == .leak) {
-        print("memory leak\n", .{});
-        return .leak;
-    }
-
-    if (result) |_| {
-        return .pass;
-    } else |err| switch (err) {
-        error.SkipZigTest => return .skip,
-        else => {
-            print("{s}\n", .{@errorName(err)});
-            return .fail;
-        },
-    }
-}
-
 fn runSingleTest(name: []const u8, seed: ?u32) void {
+    ignoreSigIo();
+
     if (seed) |s| std.testing.random_seed = s;
 
     const test_fn = findTest(name) orelse {

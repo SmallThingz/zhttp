@@ -80,7 +80,11 @@ pub fn main(init: std.process.Init) !void {
         const actual_port: u16 = server.listener.socket.address.getPort();
 
         var group: std.Io.Group = .init;
-        defer group.cancel(io);
+        var group_done = false;
+        defer if (!group_done) {
+            group.cancel(io);
+            group.await(io) catch {};
+        };
         try group.concurrent(io, SrvT.run, .{&server});
 
         const addr: std.Io.net.IpAddress = .{ .ip4 = std.Io.net.Ip4Address.loopback(actual_port) };
@@ -96,6 +100,7 @@ pub fn main(init: std.process.Init) !void {
         const req =
             "POST /echo HTTP/1.1\r\n" ++
             "Host: x\r\n" ++
+            "Connection: close\r\n" ++
             "Expect: 100-continue\r\n" ++
             "Content-Length: 5\r\n" ++
             "\r\n" ++
@@ -110,7 +115,7 @@ pub fn main(init: std.process.Init) !void {
 
         const resp =
             "HTTP/1.1 200 OK\r\n" ++
-            "connection: keep-alive\r\n" ++
+            "connection: close\r\n" ++
             "content-type: text/plain; charset=utf-8\r\n" ++
             "content-length: 5\r\n" ++
             "\r\n" ++
@@ -124,6 +129,7 @@ pub fn main(init: std.process.Init) !void {
         close_stream = false;
         group.cancel(io);
         group.await(io) catch {};
+        group_done = true;
         return;
     }
 

@@ -2215,7 +2215,7 @@ test "server adversarial malformed clients recover and keep serving" {
     group.await(io) catch {};
 }
 
-test "server soak: one second real-socket variety including malformed keepalive and upgrade flows" {
+test "server soak: deterministic real-socket variety including malformed keepalive and upgrade flows" {
     const Ctx = struct {
         upgrades: usize = 0,
     };
@@ -2338,14 +2338,11 @@ test "server soak: one second real-socket variety including malformed keepalive 
         try runSoakVarietyCase(io, port, random, mandatory_case, &upgrade_cases, &malformed_cases, &keepalive_cases);
     }
 
-    const soak_duration = std.Io.Clock.Duration.fromMilliseconds(250);
-    const start = Io.Clock.awake.now(io);
-    var timed_iterations: usize = 0;
-    while (start.untilNow(io, .awake).nanoseconds < soak_duration.nanoseconds) : (timed_iterations += 1) {
-        try runSoakVarietyCase(io, port, random, timed_iterations % soak_case_count, &upgrade_cases, &malformed_cases, &keepalive_cases);
+    const extra_iterations: usize = soak_case_count * 4;
+    var extra_iter: usize = 0;
+    while (extra_iter < extra_iterations) : (extra_iter += 1) {
+        try runSoakVarietyCase(io, port, random, extra_iter % soak_case_count, &upgrade_cases, &malformed_cases, &keepalive_cases);
     }
-
-    try std.testing.expect(timed_iterations != 0);
     group.cancel(io);
     group.await(io) catch {};
 
@@ -2536,11 +2533,10 @@ test "server websocket abuse: helper handshake and hostile frame mix" {
         }
     }
 
-    const soak_duration = std.Io.Clock.Duration.fromMilliseconds(250);
-    const start = Io.Clock.awake.now(io);
-    var timed_iterations: usize = 0;
-    while (start.untilNow(io, .awake).nanoseconds < soak_duration.nanoseconds) : (timed_iterations += 1) {
-        const case_id = timed_iterations % case_count;
+    const extra_iterations: usize = case_count * 8;
+    var extra_iter: usize = 0;
+    while (extra_iter < extra_iterations) : (extra_iter += 1) {
+        const case_id = extra_iter % case_count;
         var stream = try Io.net.IpAddress.connect(&.{ .ip4 = Io.net.Ip4Address.loopback(port) }, io, .{ .mode = .stream });
         defer stream.close(io);
 
@@ -2603,7 +2599,6 @@ test "server websocket abuse: helper handshake and hostile frame mix" {
         }
     }
 
-    try std.testing.expect(timed_iterations != 0);
     group.cancel(io);
     group.await(io) catch {};
     try std.testing.expect(ctx.upgrades >= case_count);

@@ -984,21 +984,16 @@ pub fn RequestPWithPatternExt(
             }
         };
 
-        /// Consume the remaining request body and cache it in request-owned storage.
-        fn bodyAllFrom(self: *Self, a: Allocator, r: *Io.Reader, max_bytes: usize) BodyOpError![]const u8 {
+        /// Read and return the full request body, up to `max_bytes`.
+        pub fn bodyAll(self: *Self, max_bytes: usize) BodyOpError![]const u8 {
             return switch (self._base.body) {
                 .none => "",
-                .content_length => |len| self.readContentLengthAll(a, r, len, max_bytes),
-                .chunked => self.readChunkedAll(a, r, max_bytes),
+                .content_length => |len| self.readContentLengthAll(self._base.arena, self._base.reader, len, max_bytes),
+                .chunked => self.readChunkedAll(self._base.arena, self._base.reader, max_bytes),
                 .downloaded => |downloaded| downloaded.bytes,
                 .discarded, .streamed => error.BadRequest,
                 .errored => |failed| failed.err,
             };
-        }
-
-        /// Read and return the full request body, up to `max_bytes`.
-        pub fn bodyAll(self: *Self, max_bytes: usize) BodyOpError![]const u8 {
-            return bodyAllFrom(self, self._base.arena, self._base.reader, max_bytes);
         }
 
         /// Starts streaming the request body.
@@ -1037,14 +1032,14 @@ pub fn RequestPWithPatternExt(
             };
         }
 
-        /// Drain any unread request body bytes so the connection can be reused.
-        fn discardUnreadBodyFrom(self: *Self, r: *Io.Reader) BodyOpError!void {
+        /// Discard any unread request body bytes so the connection can be reused.
+        pub fn discardUnreadBody(self: *Self) BodyOpError!void {
             switch (self._base.body) {
                 .none, .downloaded, .discarded => return,
                 .content_length => |len| {
                     var remaining = len;
                     while (remaining != 0) {
-                        const tossed = r.discard(.limited(remaining)) catch |err| return self.rememberBodyError(switch (err) {
+                        const tossed = self._base.reader.discard(.limited(remaining)) catch |err| return self.rememberBodyError(switch (err) {
                             error.EndOfStream => error.EndOfStream,
                             error.ReadFailed => error.ReadFailed,
                         });
@@ -1053,27 +1048,22 @@ pub fn RequestPWithPatternExt(
                     self.setDiscardedBody(framingForContentLength(len));
                 },
                 .chunked => {
-                    while (try self.readChunkHeader(r)) |size| {
+                    while (try self.readChunkHeader(self._base.reader)) |size| {
                         var remaining = size;
                         while (remaining != 0) {
-                            const tossed = r.discard(.limited(remaining)) catch |err| return self.rememberBodyError(switch (err) {
+                            const tossed = self._base.reader.discard(.limited(remaining)) catch |err| return self.rememberBodyError(switch (err) {
                                 error.EndOfStream => error.EndOfStream,
                                 error.ReadFailed => error.ReadFailed,
                             });
                             remaining -= tossed;
                         }
-                        try self.readChunkCrlf(r);
+                        try self.readChunkCrlf(self._base.reader);
                     }
                     self.setDiscardedBody(.chunked);
                 },
                 .streamed => return error.BadRequest,
                 .errored => |failed| return failed.err,
             }
-        }
-
-        /// Discard any unread request body bytes so the connection can be reused.
-        pub fn discardUnreadBody(self: *Self) BodyOpError!void {
-            return discardUnreadBodyFrom(self, self._base.reader);
         }
     };
 }

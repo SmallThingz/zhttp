@@ -119,7 +119,11 @@ pub fn main(init: std.process.Init) !void {
         const actual_port: u16 = server.listener.socket.address.getPort();
 
         var group: std.Io.Group = .init;
-        defer group.cancel(io);
+        var group_done = false;
+        defer if (!group_done) {
+            group.cancel(io);
+            group.await(io) catch {};
+        };
         try group.concurrent(io, SrvT.run, .{&server});
 
         const addr: std.Io.net.IpAddress = .{ .ip4 = std.Io.net.Ip4Address.loopback(actual_port) };
@@ -182,6 +186,7 @@ pub fn main(init: std.process.Init) !void {
         close_stream = false;
         group.cancel(io);
         group.await(io) catch {};
+        group_done = true;
         return;
     }
 

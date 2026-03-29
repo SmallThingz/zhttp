@@ -97,6 +97,9 @@ pub fn build(b: *std.Build) void {
     mod_tests.root_module.addImport("libbrotli", brotli_mod);
     const run_mod_tests = b.addRunArtifact(mod_tests);
     run_mod_tests.addArgs(&.{ "--exclude-filter", "loopback listen preflight" });
+    if (b.args) |args| {
+        run_mod_tests.addArgs(args);
+    }
     const test_step = b.step("test", "Run tests");
     test_step.dependOn(&run_mod_tests.step);
 

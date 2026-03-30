@@ -631,27 +631,25 @@ fn PatternRadix(comptime all_patterns: []const Pattern, comptime route_ids: []co
 
                 const lit_len: u16 = @intCast(self.out_lit_count - lit_start_idx);
                 self.out_nodes[out_idx].lit_len = lit_len;
-                if (lit_len > 12) {
-                    const cap = util.nextPow2AtLeast(lit_len * 2 + 1, 8);
-                    if (self.out_slot_count + cap > max_slots) @compileError("PatternRadix slot overflow");
-                    const slot_start: u16 = @intCast(self.out_slot_count);
-                    self.out_nodes[out_idx].lit_slot_start = slot_start;
-                    self.out_nodes[out_idx].lit_slot_cap = @intCast(cap);
-                    var i: usize = 0;
-                    while (i < cap) : (i += 1) self.out_slots[self.out_slot_count + i] = 0;
-                    self.out_slot_count += cap;
+                const cap = util.nextPow2AtLeast(lit_len * 2 + 1, 8);
+                if (self.out_slot_count + cap > max_slots) @compileError("PatternRadix slot overflow");
+                const slot_start: u16 = @intCast(self.out_slot_count);
+                self.out_nodes[out_idx].lit_slot_start = slot_start;
+                self.out_nodes[out_idx].lit_slot_cap = @intCast(cap);
+                var i: usize = 0;
+                while (i < cap) : (i += 1) self.out_slots[self.out_slot_count + i] = 0;
+                self.out_slot_count += cap;
 
-                    var li: usize = lit_start_idx;
-                    while (li < self.out_lit_count) : (li += 1) {
-                        const lit = self.out_lits[li];
-                        const mask: u64 = cap - 1;
-                        var pos: u64 = lit.hash & mask;
-                        while (true) : (pos = (pos + 1) & mask) {
-                            const slot_i = @as(usize, slot_start) + @as(usize, @intCast(pos));
-                            if (self.out_slots[slot_i] == 0) {
-                                self.out_slots[slot_i] = @intCast(li + 1);
-                                break;
-                            }
+                var li: usize = lit_start_idx;
+                while (li < self.out_lit_count) : (li += 1) {
+                    const lit = self.out_lits[li];
+                    const mask: u64 = cap - 1;
+                    var pos: u64 = lit.hash & mask;
+                    while (true) : (pos = (pos + 1) & mask) {
+                        const slot_i = @as(usize, slot_start) + @as(usize, @intCast(pos));
+                        if (self.out_slots[slot_i] == 0) {
+                            self.out_slots[slot_i] = @intCast(li + 1);
+                            break;
                         }
                     }
                 }
@@ -715,22 +713,13 @@ fn PatternRadix(comptime all_patterns: []const Pattern, comptime route_ids: []co
             };
         }
 
-        /// Resolves a literal child using either tiny linear scan or hash slots.
+        /// Resolves a literal child via the node's open-addressing hash table.
         fn findLiteral(node: Node, key: []const u8) ?u16 {
             if (node.lit_len == 0) return null;
             const b0 = key[0];
             const bmask_i: usize = b0 >> 6;
             if ((node.first_byte_mask[bmask_i] & (@as(u64, 1) << @intCast(b0 & 63))) == 0) return null;
-
-            if (node.lit_len <= 12 or node.lit_slot_cap == 0) {
-                var i: usize = node.lit_start;
-                const end: usize = node.lit_start + node.lit_len;
-                while (i < end) : (i += 1) {
-                    const lit = built.lits[i];
-                    if (lit.key.len == key.len and std.mem.eql(u8, lit.key, key)) return lit.child;
-                }
-                return null;
-            }
+            if (node.lit_slot_cap == 0) return null;
 
             const hash = util.fnv1a64(key);
             const cap: usize = node.lit_slot_cap;

@@ -388,7 +388,9 @@ fn PatternRadix(comptime all_patterns: []const Pattern, comptime route_ids: []co
     const max_nodes = route_ids.len * max_segments + 1;
     const max_lits = route_ids.len * max_segments;
     const max_params = max_lits;
-    const max_slots = max_lits * 4 + 8;
+    // Worst-case slot footprint is sparse nodes where each literal group has one entry.
+    // In that case each group gets the minimum table size (8).
+    const max_slots = max_lits * 8 + 8;
 
     const TempLitEdge = struct {
         lit: []const u8 = "",
@@ -1390,6 +1392,21 @@ test "router: exact + param + glob" {
 
     var p4 = "/ng".*;
     try std.testing.expectEqual(@as(?u16, 3), S.match("GET", p4[0..]));
+}
+
+test "router: deep literal chain does not overflow pattern slot budget" {
+    const S = Compiled(void, .{
+        get("/a/b/c/d/e/f/g/h/i/j/k/l/m/n/o/p", struct {
+            pub const Info: EndpointInfo = .{};
+            pub fn call(comptime rctx: ReqCtx, req: rctx.T()) !Res {
+                _ = req;
+                return Res.text(200, "ok");
+            }
+        }),
+    }, .{});
+
+    var p = "/a/b/c/d/e/f/g/h/i/j/k/l/m/n/o/p".*;
+    try std.testing.expectEqual(@as(?u16, 0), S.match("GET", p[0..]));
 }
 
 test "router: trailing slash does not match exact literal" {

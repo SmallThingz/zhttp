@@ -355,8 +355,6 @@ const LiteLiteralMap = struct {
     mask: u64 = 0,
     first_byte_mask: [4]u64 = .{0} ** 4,
 
-    const linear_threshold = 12;
-
     fn init(a: Allocator, names: []const []const u8, children: []const u32) !LiteLiteralMap {
         var map: LiteLiteralMap = .{};
         if (names.len == 0) return map;
@@ -370,8 +368,6 @@ const LiteLiteralMap = struct {
             };
             map.markFirstByte(name);
         }
-
-        if (names.len <= linear_threshold) return map;
 
         const cap = nextPow2AtLeastRuntime(names.len * 2 + 1, 8);
         map.slots = try a.alloc(u32, cap);
@@ -395,12 +391,6 @@ const LiteLiteralMap = struct {
     fn get(self: *const LiteLiteralMap, key: []const u8, hash: u64) ?u32 {
         if (self.entries.len == 0) return null;
         if (!self.hasFirstByte(key)) return null;
-        if (self.entries.len <= linear_threshold) {
-            for (self.entries) |entry| {
-                if (entry.key.len == key.len and std.mem.eql(u8, entry.key, key)) return entry.child;
-            }
-            return null;
-        }
         var pos: u64 = hash & self.mask;
         var probe: usize = 0;
         while (probe < self.slots.len) : (probe += 1) {
@@ -416,12 +406,6 @@ const LiteLiteralMap = struct {
     fn getAuto(self: *const LiteLiteralMap, key: []const u8) ?u32 {
         if (self.entries.len == 0) return null;
         if (!self.hasFirstByte(key)) return null;
-        if (self.entries.len <= linear_threshold) {
-            for (self.entries) |entry| {
-                if (entry.key.len == key.len and std.mem.eql(u8, entry.key, key)) return entry.child;
-            }
-            return null;
-        }
         return self.get(key, util.fnv1a64(key));
     }
 
@@ -1135,6 +1119,7 @@ pub fn main() !void {
         \\
     , .{});
 
+    try runCase(a, 10, "10");
     try runCase(a, 50, "50");
     try runCase(a, 500, "0.5k");
     try runCase(a, 5_000, "5k");

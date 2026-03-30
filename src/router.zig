@@ -15,7 +15,7 @@ const util = @import("util.zig");
 const ReqCtx = req_ctx.ReqCtx;
 
 comptime {
-    @setEvalBranchQuota(200_000);
+    @setEvalBranchQuota(2_000_000);
 }
 
 pub const Action = enum {
@@ -368,6 +368,437 @@ fn ExactMap(comptime entries: anytype, comptime n: usize) type {
     };
 }
 
+fn PatternRadix(comptime all_patterns: []const Pattern, comptime route_ids: []const u16) type {
+    if (route_ids.len == 0) {
+        return struct {
+            pub fn match(_: []u8) ?u16 {
+                return null;
+            }
+        };
+    }
+
+    const max_segments = comptime blk: {
+        var m: usize = 1;
+        for (route_ids) |rid| {
+            const segs = all_patterns[rid].segments.len;
+            if (segs > m) m = segs;
+        }
+        break :blk m;
+    };
+    const max_nodes = route_ids.len * max_segments + 1;
+    const max_lits = route_ids.len * max_segments;
+    const max_params = max_lits;
+    const max_slots = max_lits * 4 + 8;
+
+    const TempLitEdge = struct {
+        lit: []const u8 = "",
+        child: u16 = 0,
+        next: ?u16 = null,
+    };
+    const TempNode = struct {
+        end_route: u16 = 0,
+        glob_route: u16 = 0,
+        param_child: ?u16 = null,
+        lit_head: ?u16 = null,
+    };
+    const ParamBranch = struct {
+        count: u8 = 0,
+        next_node: ?u16 = null,
+        end_route: u16 = 0,
+        glob_route: u16 = 0,
+    };
+    const LitEntry = struct {
+        key: []const u8 = "",
+        hash: u64 = 0,
+        child: u16 = 0,
+    };
+    const Node = struct {
+        end_route: u16 = 0,
+        glob_route: u16 = 0,
+        param_start: u16 = 0,
+        param_len: u16 = 0,
+        lit_frag_count: u8 = 0,
+        lit_start: u16 = 0,
+        lit_len: u16 = 0,
+        lit_slot_start: u16 = 0,
+        lit_slot_cap: u16 = 0,
+        first_byte_mask: [4]u64 = .{0} ** 4,
+    };
+
+    const Built = struct {
+        nodes: [max_nodes]Node,
+        lits: [max_lits]LitEntry,
+        params: [max_params]ParamBranch,
+        lit_slots: [max_slots]u16,
+    };
+
+    const Builder = struct {
+        temp_nodes: [max_nodes]TempNode = [_]TempNode{.{}} ** max_nodes,
+        temp_lits: [max_lits]TempLitEdge = [_]TempLitEdge{.{}} ** max_lits,
+        temp_node_count: usize = 1,
+        temp_lit_count: usize = 0,
+
+        out_nodes: [max_nodes]Node = [_]Node{.{}} ** max_nodes,
+        out_lits: [max_lits]LitEntry = [_]LitEntry{.{}} ** max_lits,
+        out_params: [max_params]ParamBranch = [_]ParamBranch{.{}} ** max_params,
+        out_slots: [max_slots]u16 = .{0} ** max_slots,
+        out_node_count: usize = 0,
+        out_lit_count: usize = 0,
+        out_param_count: usize = 0,
+        out_slot_count: usize = 0,
+        temp_to_out: [max_nodes]u16 = .{0} ** max_nodes, // stores index+1
+
+        fn setMinRoute(slot: *u16, value: u16) void {
+            if (slot.* == 0 or value < slot.*) slot.* = value;
+        }
+
+        /// Allocates a new transient trie node during route-shape ingestion.
+        fn newTempNode(self: *@This()) u16 {
+            if (self.temp_node_count >= max_nodes) @compileError("PatternRadix temp node overflow");
+            const idx: u16 = @intCast(self.temp_node_count);
+            self.temp_node_count += 1;
+            return idx;
+        }
+
+        /// Adds a literal edge in the temporary adjacency list.
+        fn addTempLitEdge(self: *@This(), lit: []const u8, child: u16, next: ?u16) u16 {
+            if (self.temp_lit_count >= max_lits) @compileError("PatternRadix temp lit overflow");
+            const idx: u16 = @intCast(self.temp_lit_count);
+            self.temp_lit_count += 1;
+            self.temp_lits[idx] = .{
+                .lit = lit,
+                .child = child,
+                .next = next,
+            };
+            return idx;
+        }
+
+        /// Looks up an existing literal branch so identical literals share nodes.
+        fn findTempLitChild(self: *@This(), node_idx: u16, lit: []const u8) ?u16 {
+            var edge_idx = self.temp_nodes[node_idx].lit_head;
+            while (edge_idx) |eidx| : (edge_idx = self.temp_lits[eidx].next) {
+                const edge = self.temp_lits[eidx];
+                if (std.mem.eql(u8, edge.lit, lit)) return edge.child;
+            }
+            return null;
+        }
+
+        /// Inserts one compiled route pattern into the temporary trie form.
+        fn insertPattern(self: *@This(), pattern: Pattern, route_index: u16) void {
+            const route_id = route_index + 1;
+            var node_idx: u16 = 0;
+            for (pattern.segments) |seg| {
+                switch (seg.kind) {
+                    .lit => {
+                        if (self.findTempLitChild(node_idx, seg.lit)) |child_idx| {
+                            node_idx = child_idx;
+                        } else {
+                            const child_idx = self.newTempNode();
+                            const lit_head = self.temp_nodes[node_idx].lit_head;
+                            const edge_idx = self.addTempLitEdge(seg.lit, child_idx, lit_head);
+                            self.temp_nodes[node_idx].lit_head = edge_idx;
+                            node_idx = child_idx;
+                        }
+                    },
+                    .param => {
+                        if (self.temp_nodes[node_idx].param_child) |child_idx| {
+                            node_idx = child_idx;
+                        } else {
+                            const child_idx = self.newTempNode();
+                            self.temp_nodes[node_idx].param_child = child_idx;
+                            node_idx = child_idx;
+                        }
+                    },
+                    .glob, .glob_param => {
+                        setMinRoute(&self.temp_nodes[node_idx].glob_route, route_id);
+                        return;
+                    },
+                }
+            }
+            setMinRoute(&self.temp_nodes[node_idx].end_route, route_id);
+        }
+
+        fn tempLitCount(self: *@This(), node_idx: u16) usize {
+            var c: usize = 0;
+            var edge_idx = self.temp_nodes[node_idx].lit_head;
+            while (edge_idx) |eidx| : (edge_idx = self.temp_lits[eidx].next) c += 1;
+            return c;
+        }
+
+        /// Returns how many literal fragments can be radix-compressed together.
+        fn edgeCompressionLen(self: *@This(), start_child: u16) u8 {
+            var count: u8 = 1;
+            var cur = start_child;
+            while (true) {
+                const node = self.temp_nodes[cur];
+                if (node.end_route != 0 or node.glob_route != 0 or node.param_child != null) break;
+                const lit_head = node.lit_head orelse break;
+                if (self.temp_lits[lit_head].next != null) break;
+                count += 1;
+                cur = self.temp_lits[lit_head].child;
+            }
+            return count;
+        }
+
+        /// Concatenates `frag_count` literal fragments (`a/b/c`) into one map key.
+        fn buildCompressedKey(self: *@This(), first_lit: []const u8, first_child: u16, frag_count: u8) struct { key: []const u8, next_temp_idx: u16 } {
+            var key: []const u8 = first_lit;
+            var cur = first_child;
+            var rem = frag_count;
+            rem -= 1;
+            while (rem != 0) : (rem -= 1) {
+                const lit_head = self.temp_nodes[cur].lit_head.?;
+                const edge = self.temp_lits[lit_head];
+                key = key ++ "/" ++ edge.lit;
+                cur = edge.child;
+            }
+            return .{
+                .key = key,
+                .next_temp_idx = cur,
+            };
+        }
+
+        /// Lowers one temporary trie node into the compact runtime lookup layout.
+        fn compileNode(self: *@This(), temp_idx: u16) u16 {
+            if (self.temp_to_out[temp_idx] != 0) return self.temp_to_out[temp_idx] - 1;
+            if (self.out_node_count >= max_nodes) @compileError("PatternRadix node overflow");
+            const out_idx: u16 = @intCast(self.out_node_count);
+            self.out_node_count += 1;
+            self.temp_to_out[temp_idx] = out_idx + 1;
+
+            const tnode = self.temp_nodes[temp_idx];
+            self.out_nodes[out_idx].end_route = tnode.end_route;
+            self.out_nodes[out_idx].glob_route = tnode.glob_route;
+
+            if (tnode.param_child) |param_start| {
+                const param_start_idx: u16 = @intCast(self.out_param_count);
+                var count: u8 = 1;
+                var walk_idx = param_start;
+                while (true) {
+                    const walk = self.temp_nodes[walk_idx];
+                    if (walk.end_route != 0 or walk.glob_route != 0 or walk.lit_head != null) {
+                        if (self.out_param_count >= max_params) @compileError("PatternRadix param overflow");
+                        var branch: ParamBranch = .{
+                            .count = count,
+                            .end_route = walk.end_route,
+                            .glob_route = walk.glob_route,
+                        };
+                        if (walk.lit_head != null or walk.param_child != null) {
+                            branch.next_node = self.compileNode(walk_idx);
+                        }
+                        self.out_params[self.out_param_count] = branch;
+                        self.out_param_count += 1;
+                    }
+                    if (walk.param_child) |next_param| {
+                        count += 1;
+                        walk_idx = next_param;
+                        continue;
+                    }
+                    break;
+                }
+                self.out_nodes[out_idx].param_start = param_start_idx;
+                self.out_nodes[out_idx].param_len = @intCast(self.out_param_count - param_start_idx);
+            }
+
+            const lit_count = self.tempLitCount(temp_idx);
+            if (lit_count != 0) {
+                var frag_count: u8 = std.math.maxInt(u8);
+                var edge_idx = tnode.lit_head;
+                while (edge_idx) |eidx| : (edge_idx = self.temp_lits[eidx].next) {
+                    const ec = self.edgeCompressionLen(self.temp_lits[eidx].child);
+                    if (ec < frag_count) frag_count = ec;
+                }
+                self.out_nodes[out_idx].lit_frag_count = frag_count;
+                const lit_start_idx: u16 = @intCast(self.out_lit_count);
+                self.out_nodes[out_idx].lit_start = lit_start_idx;
+
+                edge_idx = tnode.lit_head;
+                while (edge_idx) |eidx| : (edge_idx = self.temp_lits[eidx].next) {
+                    if (self.out_lit_count >= max_lits) @compileError("PatternRadix lit overflow");
+                    const edge = self.temp_lits[eidx];
+                    const built_key = self.buildCompressedKey(edge.lit, edge.child, frag_count);
+                    const child_idx = self.compileNode(built_key.next_temp_idx);
+                    self.out_lits[self.out_lit_count] = .{
+                        .key = built_key.key,
+                        .hash = util.fnv1a64(built_key.key),
+                        .child = child_idx,
+                    };
+                    const b0 = built_key.key[0];
+                    const bucket_i: usize = b0 >> 6;
+                    self.out_nodes[out_idx].first_byte_mask[bucket_i] |= @as(u64, 1) << @intCast(b0 & 63);
+                    self.out_lit_count += 1;
+                }
+
+                const lit_len: u16 = @intCast(self.out_lit_count - lit_start_idx);
+                self.out_nodes[out_idx].lit_len = lit_len;
+                if (lit_len > 12) {
+                    const cap = util.nextPow2AtLeast(lit_len * 2 + 1, 8);
+                    if (self.out_slot_count + cap > max_slots) @compileError("PatternRadix slot overflow");
+                    const slot_start: u16 = @intCast(self.out_slot_count);
+                    self.out_nodes[out_idx].lit_slot_start = slot_start;
+                    self.out_nodes[out_idx].lit_slot_cap = @intCast(cap);
+                    var i: usize = 0;
+                    while (i < cap) : (i += 1) self.out_slots[self.out_slot_count + i] = 0;
+                    self.out_slot_count += cap;
+
+                    var li: usize = lit_start_idx;
+                    while (li < self.out_lit_count) : (li += 1) {
+                        const lit = self.out_lits[li];
+                        const mask: u64 = cap - 1;
+                        var pos: u64 = lit.hash & mask;
+                        while (true) : (pos = (pos + 1) & mask) {
+                            const slot_i = @as(usize, slot_start) + @as(usize, @intCast(pos));
+                            if (self.out_slots[slot_i] == 0) {
+                                self.out_slots[slot_i] = @intCast(li + 1);
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+
+            return out_idx;
+        }
+
+        /// Finalizes builder storage into immutable compile-time tables.
+        fn finish(self: *@This()) Built {
+            return .{
+                .nodes = self.out_nodes,
+                .lits = self.out_lits,
+                .params = self.out_params,
+                .lit_slots = self.out_slots,
+            };
+        }
+    };
+
+    const built = comptime blk: {
+        var b = Builder{};
+        for (route_ids) |rid| {
+            b.insertPattern(all_patterns[rid], rid);
+        }
+        _ = b.compileNode(0);
+        break :blk b.finish();
+    };
+
+    const Self = struct {
+        /// Parses one non-empty raw path segment and returns the next cursor.
+        fn parseRawSeg(path: []const u8, pos: usize) ?usize {
+            if (pos > path.len) return null;
+            const slash = std.mem.indexOfScalarPos(u8, path, pos, '/') orelse path.len;
+            const seg = path[pos..slash];
+            if (seg.len == 0) return null;
+            return if (slash == path.len) path.len + 1 else slash + 1;
+        }
+
+        /// Advances by `count` raw segments without decoding/capturing.
+        fn skipRawSegs(path: []const u8, pos: usize, count: u8) ?usize {
+            var cur = pos;
+            var rem = count;
+            while (rem != 0) : (rem -= 1) {
+                cur = parseRawSeg(path, cur) orelse return null;
+            }
+            return cur;
+        }
+
+        /// Slices a radix-compressed literal group key from the incoming path.
+        fn consumeLiteralGroup(path: []const u8, pos: usize, frag_count: u8) ?struct { key: []const u8, next_pos: usize } {
+            if (frag_count == 0) return null;
+            var cur = pos;
+            var rem = frag_count;
+            while (rem != 0) : (rem -= 1) {
+                cur = parseRawSeg(path, cur) orelse return null;
+            }
+            const end = if (cur == path.len + 1) path.len else cur - 1;
+            return .{
+                .key = path[pos..end],
+                .next_pos = cur,
+            };
+        }
+
+        /// Resolves a literal child using either tiny linear scan or hash slots.
+        fn findLiteral(node: Node, key: []const u8) ?u16 {
+            if (node.lit_len == 0) return null;
+            const b0 = key[0];
+            const bmask_i: usize = b0 >> 6;
+            if ((node.first_byte_mask[bmask_i] & (@as(u64, 1) << @intCast(b0 & 63))) == 0) return null;
+
+            if (node.lit_len <= 12 or node.lit_slot_cap == 0) {
+                var i: usize = node.lit_start;
+                const end: usize = node.lit_start + node.lit_len;
+                while (i < end) : (i += 1) {
+                    const lit = built.lits[i];
+                    if (lit.key.len == key.len and std.mem.eql(u8, lit.key, key)) return lit.child;
+                }
+                return null;
+            }
+
+            const hash = util.fnv1a64(key);
+            const cap: usize = node.lit_slot_cap;
+            const mask: u64 = cap - 1;
+            var pos: u64 = hash & mask;
+            var probe: usize = 0;
+            while (probe < cap) : (probe += 1) {
+                const slot_i = @as(usize, node.lit_slot_start) + @as(usize, @intCast(pos));
+                const slot = built.lit_slots[slot_i];
+                if (slot == 0) return null;
+                const lit = built.lits[slot - 1];
+                if (lit.hash == hash and lit.key.len == key.len and std.mem.eql(u8, lit.key, key)) return lit.child;
+                pos = (pos + 1) & mask;
+            }
+            return null;
+        }
+
+        /// Recursive matcher that enforces literal > param-chain > glob precedence.
+        fn matchNode(path: []const u8, pos: usize, node_idx: u16) u16 {
+            const node = built.nodes[node_idx];
+            if (pos == path.len + 1) {
+                if (node.end_route != 0) return node.end_route;
+                return node.glob_route;
+            }
+
+            if (node.lit_frag_count != 0) {
+                if (consumeLiteralGroup(path, pos, node.lit_frag_count)) |group| {
+                    if (findLiteral(node, group.key)) |child_idx| {
+                        const m = matchNode(path, group.next_pos, child_idx);
+                        if (m != 0) return m;
+                    }
+                }
+            }
+
+            var last_eligible: isize = -1;
+            var i: usize = node.param_start;
+            const pend: usize = node.param_start + node.param_len;
+            while (i < pend) : (i += 1) {
+                const branch = built.params[i];
+                const next_pos = skipRawSegs(path, pos, branch.count) orelse break;
+                last_eligible = @intCast(i);
+
+                if (branch.next_node) |next_node| {
+                    const m = matchNode(path, next_pos, next_node);
+                    if (m != 0) return m;
+                }
+                if (branch.end_route != 0 and next_pos == path.len + 1) return branch.end_route;
+            }
+
+            var j = last_eligible;
+            while (j >= @as(isize, @intCast(node.param_start))) : (j -= 1) {
+                const branch = built.params[@intCast(j)];
+                if (branch.glob_route != 0) return branch.glob_route;
+            }
+            return node.glob_route;
+        }
+
+        pub fn match(path: []u8) ?u16 {
+            if (path.len == 0 or path[0] != '/') return null;
+            const start_pos = if (path.len == 1) path.len + 1 else 1;
+            const route_id = matchNode(path, start_pos, 0);
+            return if (route_id == 0) null else route_id - 1;
+        }
+    };
+
+    return Self;
+}
+
 pub fn Compiled(
     comptime _: type,
     comptime routes: anytype,
@@ -611,15 +1042,11 @@ pub fn Compiled(
             const mid_usize: usize = mid;
             const Exact = ExactMap(compiled.exact_storage[mid_usize], compiled.exact_counts[mid_usize]);
             if (Exact.find(path)) |rid| return rid;
-
-            const n: usize = compiled.pattern_counts[mid_usize];
-            var j: usize = 0;
-            while (j < n) : (j += 1) {
-                const rid = compiled.pattern_storage[mid_usize][j];
-                const p = compiled.patterns[rid];
-                if (matchPatternNoCapture(p, path)) return rid;
-            }
-            return null;
+            const PatternMatcher = PatternRadix(
+                compiled.patterns[0..],
+                compiled.pattern_storage[mid_usize][0..compiled.pattern_counts[mid_usize]],
+            );
+            return PatternMatcher.match(path);
         }
 
         fn eqLiteral(bytes: []const u8, comptime lit: []const u8) bool {

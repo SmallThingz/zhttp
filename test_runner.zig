@@ -434,6 +434,7 @@ const WorkerCtx = struct {
 };
 
 fn clearDashboardLocked(ctx: *WorkerCtx) void {
+    // Rewind and erase previously rendered "running ..." lines.
     if (ctx.dashboard.rendered_lines == 0) return;
     print("\x1b[{d}F", .{ctx.dashboard.rendered_lines});
     var i: usize = 0;
@@ -447,6 +448,7 @@ fn clearDashboardLocked(ctx: *WorkerCtx) void {
 fn renderDashboardLocked(ctx: *WorkerCtx) void {
     clearDashboardLocked(ctx);
 
+    // Render only active slots so finished workers disappear immediately.
     var rendered: usize = 0;
     for (ctx.dashboard.running) |name_opt| {
         if (name_opt) |name| {
@@ -459,6 +461,7 @@ fn renderDashboardLocked(ctx: *WorkerCtx) void {
 }
 
 fn worker(ctx: *WorkerCtx, slot: usize) void {
+    // Each worker claims the next index atomically and executes exactly one test at a time.
     while (true) {
         const idx = ctx.next_index.fetchAdd(1, .seq_cst);
         if (idx >= ctx.tests.len) break;
@@ -550,6 +553,7 @@ fn runChildTest(ctx: *WorkerCtx, test_name: []const u8) !ChildResult {
 }
 
 fn classifyStatus(term: std.process.Child.Term) Status {
+    // The child protocol maps exit code 2 => skip and 3 => leak; signals are crashes.
     switch (term) {
         .exited => |code| return switch (code) {
             0 => .pass,

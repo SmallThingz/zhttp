@@ -1274,7 +1274,11 @@ pub fn Compiled(
                     const res = rctx.run(req0) catch |err| {
                         req_tail.discardUnreadBody() catch return .close;
                         const ServerT = @TypeOf(server.*);
-                        return ServerT.handleHandlerError(server, w, @TypeOf(err), err);
+                        const action = ServerT.handleHandlerError(server, w, @TypeOf(err), err);
+                        if (action != .upgraded) {
+                            w.flush() catch return .close;
+                        }
+                        return action;
                     };
 
                     // Ensure unread body is discarded before next request.

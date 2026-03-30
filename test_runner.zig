@@ -14,10 +14,14 @@ fn print(comptime fmt: []const u8, args: anytype) void {
     var buf: [4096]u8 = undefined;
     const msg = std.fmt.bufPrint(&buf, fmt, args) catch return;
     var rest = msg;
-    while (rest.len != 0) {
-        const wrote = std.c.write(std.posix.STDERR_FILENO, rest.ptr, rest.len);
-        if (wrote <= 0) return;
-        rest = rest[@intCast(wrote)..];
+    rest_loop: switch (rest.len != 0) {
+        true => {
+            const wrote = std.c.write(std.posix.STDERR_FILENO, rest.ptr, rest.len);
+            if (wrote <= 0) return;
+            rest = rest[@intCast(wrote)..];
+            continue :rest_loop rest.len != 0;
+        },
+        false => {},
     }
 }
 
@@ -312,13 +316,17 @@ fn runAllTests(
     try reordered.ensureTotalCapacity(gpa, tests.items.len);
 
     var remaining = tests.items.len;
-    while (remaining != 0) {
-        for (buckets.items) |*bucket| {
-            if (bucket.next >= bucket.items.items.len) continue;
-            try reordered.append(gpa, bucket.items.items[bucket.next]);
-            bucket.next += 1;
-            remaining -= 1;
-        }
+    reorder_loop: switch (remaining != 0) {
+        true => {
+            for (buckets.items) |*bucket| {
+                if (bucket.next >= bucket.items.items.len) continue;
+                try reordered.append(gpa, bucket.items.items[bucket.next]);
+                bucket.next += 1;
+                remaining -= 1;
+            }
+            continue :reorder_loop remaining != 0;
+        },
+        false => {},
     }
 
     @memcpy(tests.items, reordered.items);
@@ -332,7 +340,7 @@ fn runAllTests(
     var summary: Summary = .{};
     var print_mutex: std.Io.Mutex = .init;
     var count_mutex: std.Io.Mutex = .init;
-    const slot_count: usize = if (builtin.single_threaded or job_count == 1) 1 else job_count;
+    const slot_count: usize = if (builtin.single_threaded or job_count <= 2) 1 else job_count;
     const running = try gpa.alloc(?[]const u8, slot_count);
     defer gpa.free(running);
     @memset(running, null);
@@ -349,9 +357,10 @@ fn runAllTests(
         .print_mutex = &print_mutex,
         .count_mutex = &count_mutex,
         .dashboard = &dashboard,
+        .allow_fork = builtin.os.tag != .windows and builtin.link_libc and (builtin.single_threaded or job_count <= 2),
     };
 
-    if (builtin.single_threaded or job_count == 1) {
+    if (builtin.single_threaded or job_count <= 2) {
         for (tests.items) |t| {
             print_mutex.lockUncancelable(io);
             ctx.dashboard.running[0] = t.name;
@@ -404,9 +413,14 @@ fn runAllTests(
 fn shuffleSlice(comptime T: type, random: *std.Random, items: []T) void {
     if (items.len <= 1) return;
     var i: usize = items.len - 1;
-    while (i != 0) : (i -= 1) {
-        const j = random.uintLessThan(usize, i + 1);
-        std.mem.swap(T, &items[i], &items[j]);
+    shuffle_loop: switch (i != 0) {
+        true => {
+            const j = random.uintLessThan(usize, i + 1);
+            std.mem.swap(T, &items[i], &items[j]);
+            i -= 1;
+            continue :shuffle_loop i != 0;
+        },
+        false => {},
     }
 }
 
@@ -431,6 +445,8 @@ const WorkerCtx = struct {
     count_mutex: *std.Io.Mutex,
     /// Stores running dashboard state.
     dashboard: *Dashboard,
+    /// Whether this runner may use the low-overhead fork path.
+    allow_fork: bool,
 };
 
 fn clearDashboardLocked(ctx: *WorkerCtx) void {
@@ -438,8 +454,13 @@ fn clearDashboardLocked(ctx: *WorkerCtx) void {
     if (ctx.dashboard.rendered_lines == 0) return;
     print("\x1b[{d}F", .{ctx.dashboard.rendered_lines});
     var i: usize = 0;
-    while (i < ctx.dashboard.rendered_lines) : (i += 1) {
-        print("\x1b[2K\n", .{});
+    clear_loop: switch (i < ctx.dashboard.rendered_lines) {
+        true => {
+            print("\x1b[2K\n", .{});
+            i += 1;
+            continue :clear_loop i < ctx.dashboard.rendered_lines;
+        },
+        false => {},
     }
     print("\x1b[{d}F", .{ctx.dashboard.rendered_lines});
     ctx.dashboard.rendered_lines = 0;
@@ -462,9 +483,14 @@ fn renderDashboardLocked(ctx: *WorkerCtx) void {
 
 fn worker(ctx: *WorkerCtx, slot: usize) void {
     // Each worker claims the next index atomically and executes exactly one test at a time.
-    while (true) {
+    var keep_running = true;
+    worker_loop: switch (keep_running) {
+        true => {
         const idx = ctx.next_index.fetchAdd(1, .seq_cst);
-        if (idx >= ctx.tests.len) break;
+        if (idx >= ctx.tests.len) {
+            keep_running = false;
+            continue :worker_loop keep_running;
+        }
 
         const test_name = ctx.tests[idx].name;
 
@@ -483,7 +509,7 @@ fn worker(ctx: *WorkerCtx, slot: usize) void {
             ctx.count_mutex.lockUncancelable(ctx.io);
             noteStatus(ctx.summary, .fail);
             ctx.count_mutex.unlock(ctx.io);
-            continue;
+            continue :worker_loop keep_running;
         };
 
         ctx.print_mutex.lockUncancelable(ctx.io);
@@ -497,6 +523,9 @@ fn worker(ctx: *WorkerCtx, slot: usize) void {
         ctx.count_mutex.lockUncancelable(ctx.io);
         noteStatus(ctx.summary, result.status);
         ctx.count_mutex.unlock(ctx.io);
+        continue :worker_loop keep_running;
+        },
+        false => {},
     }
 }
 
@@ -512,6 +541,11 @@ const ChildResult = struct {
 };
 
 fn runChildTest(ctx: *WorkerCtx, test_name: []const u8) !ChildResult {
+    if (ctx.allow_fork) return runForkedTest(ctx, test_name);
+    return runExecTest(ctx, test_name);
+}
+
+fn runExecTest(ctx: *WorkerCtx, test_name: []const u8) !ChildResult {
     var argv: std.ArrayList([]const u8) = .empty;
     defer argv.deinit(ctx.gpa);
 
@@ -550,6 +584,117 @@ fn runChildTest(ctx: *WorkerCtx, test_name: []const u8) !ChildResult {
         .stdout = run_result.stdout,
         .stderr = run_result.stderr,
     };
+}
+
+fn runForkedTest(ctx: *WorkerCtx, test_name: []const u8) !ChildResult {
+    var stdout_pipe: [2]std.c.fd_t = undefined;
+    if (std.c.pipe(&stdout_pipe) != 0) return error.PipeFailed;
+    errdefer {
+        _ = std.c.close(stdout_pipe[0]);
+        _ = std.c.close(stdout_pipe[1]);
+    }
+
+    var stderr_pipe: [2]std.c.fd_t = undefined;
+    if (std.c.pipe(&stderr_pipe) != 0) return error.PipeFailed;
+    errdefer {
+        _ = std.c.close(stderr_pipe[0]);
+        _ = std.c.close(stderr_pipe[1]);
+    }
+
+    const pid = std.c.fork();
+    if (pid < 0) return error.ForkFailed;
+    if (pid == 0) {
+        _ = std.c.close(stdout_pipe[0]);
+        _ = std.c.close(stderr_pipe[0]);
+
+        if (std.c.dup2(stdout_pipe[1], std.posix.STDOUT_FILENO) < 0) std.c._exit(126);
+        if (std.c.dup2(stderr_pipe[1], std.posix.STDERR_FILENO) < 0) std.c._exit(126);
+
+        _ = std.c.close(stdout_pipe[1]);
+        _ = std.c.close(stderr_pipe[1]);
+        std.c._exit(runSingleTest(test_name, ctx.seed));
+    }
+
+    _ = std.c.close(stdout_pipe[1]);
+    _ = std.c.close(stderr_pipe[1]);
+    errdefer {
+        _ = std.c.close(stdout_pipe[0]);
+        _ = std.c.close(stderr_pipe[0]);
+    }
+
+    const collected = try collectForkOutput(ctx.gpa, stdout_pipe[0], stderr_pipe[0]);
+    errdefer {
+        ctx.gpa.free(collected.stdout);
+        ctx.gpa.free(collected.stderr);
+    }
+
+    var status: c_int = 0;
+    if (std.c.waitpid(pid, &status, 0) < 0) return error.WaitPidFailed;
+
+    return .{
+        .status = classifyStatus(termFromWaitStatus(status)),
+        .term = termFromWaitStatus(status),
+        .stdout = collected.stdout,
+        .stderr = collected.stderr,
+    };
+}
+
+fn collectForkOutput(gpa: std.mem.Allocator, stdout_fd: std.c.fd_t, stderr_fd: std.c.fd_t) !struct { stdout: []u8, stderr: []u8 } {
+    var stdout_list: std.ArrayList(u8) = .empty;
+    errdefer stdout_list.deinit(gpa);
+    var stderr_list: std.ArrayList(u8) = .empty;
+    errdefer stderr_list.deinit(gpa);
+
+    try stdout_list.ensureTotalCapacity(gpa, 256);
+    try stderr_list.ensureTotalCapacity(gpa, 256);
+
+    var poll_fds = [_]std.posix.pollfd{
+        .{ .fd = stdout_fd, .events = std.posix.POLL.IN | std.posix.POLL.HUP | std.posix.POLL.ERR, .revents = 0 },
+        .{ .fd = stderr_fd, .events = std.posix.POLL.IN | std.posix.POLL.HUP | std.posix.POLL.ERR, .revents = 0 },
+    };
+    var open_count: usize = 2;
+    poll_loop: switch (open_count != 0) {
+        true => {
+            _ = try std.posix.poll(&poll_fds, -1);
+            if (poll_fds[0].fd >= 0 and (poll_fds[0].revents & (std.posix.POLL.IN | std.posix.POLL.HUP | std.posix.POLL.ERR)) != 0) {
+                if (try drainFdToList(stdout_fd, &stdout_list, gpa)) {
+                    _ = std.c.close(stdout_fd);
+                    poll_fds[0].fd = -1;
+                    open_count -= 1;
+                }
+            }
+            if (poll_fds[1].fd >= 0 and (poll_fds[1].revents & (std.posix.POLL.IN | std.posix.POLL.HUP | std.posix.POLL.ERR)) != 0) {
+                if (try drainFdToList(stderr_fd, &stderr_list, gpa)) {
+                    _ = std.c.close(stderr_fd);
+                    poll_fds[1].fd = -1;
+                    open_count -= 1;
+                }
+            }
+            continue :poll_loop open_count != 0;
+        },
+        false => {},
+    }
+
+    return .{
+        .stdout = try stdout_list.toOwnedSlice(gpa),
+        .stderr = try stderr_list.toOwnedSlice(gpa),
+    };
+}
+
+fn drainFdToList(fd: std.c.fd_t, list: *std.ArrayList(u8), gpa: std.mem.Allocator) !bool {
+    var buf: [8192]u8 = undefined;
+    const n = try std.posix.read(fd, &buf);
+    if (n == 0) return true;
+    try list.appendSlice(gpa, buf[0..n]);
+    return false;
+}
+
+fn termFromWaitStatus(status: c_int) std.process.Child.Term {
+    const s: u32 = @bitCast(status);
+    if (std.c.W.IFEXITED(s)) return .{ .exited = std.c.W.EXITSTATUS(s) };
+    if (std.c.W.IFSIGNALED(s)) return .{ .signal = std.c.W.TERMSIG(s) };
+    if (std.c.W.IFSTOPPED(s)) return .{ .stopped = std.c.W.STOPSIG(s) };
+    return .{ .unknown = s };
 }
 
 fn classifyStatus(term: std.process.Child.Term) Status {

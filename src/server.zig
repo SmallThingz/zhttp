@@ -1389,7 +1389,7 @@ test "custom error_handler handles handler errors only" {
         fn onError(_: anytype, w: *Io.Writer, comptime ErrorSet: type, _: ErrorSet) router.Action {
             const body = "custom boom";
             response.write(w, response.Res.text(499, body), false, true) catch unreachable;
-            w.flush() catch unreachable;
+            // Deliberately do not flush here; router dispatch must flush handler-error writes.
             return .close;
         }
     };

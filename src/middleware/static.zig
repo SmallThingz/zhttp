@@ -275,10 +275,8 @@ pub fn Static(comptime opts: StaticOptions) type {
             comptime var selected_is_glob: bool = false;
 
             comptime var s: usize = 1;
-            inline while (s <= route_pattern.len) : (s = blk: {
-                const e2 = std.mem.indexOfScalarPos(u8, route_pattern, s, '/') orelse route_pattern.len;
-                break :blk e2 + 1;
-            }) {
+            inline for (0..route_pattern.len + 1) |_| {
+                if (s > route_pattern.len) break;
                 const e = std.mem.indexOfScalarPos(u8, route_pattern, s, '/') orelse route_pattern.len;
                 const seg = route_pattern[s..e];
                 if (seg.len != 0 and seg[0] == '{' and seg[seg.len - 1] == '}') {
@@ -298,6 +296,7 @@ pub fn Static(comptime opts: StaticOptions) type {
                     }
                 }
                 if (e == route_pattern.len) break;
+                s = e + 1;
             }
 
             if (glob_param_name_opt) |want| {

@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
@@ -1122,7 +1123,7 @@ pub fn Compiled(
             return false;
         }
 
-        /// Serializes and flushes a response and returns the next connection action.
+        /// Serializes a response and returns the next connection action.
         fn finishResponse(
             comptime rctx: ReqCtx,
             req_ro: rctx.TReadOnly(),
@@ -1135,9 +1136,6 @@ pub fn Compiled(
             // return only transport actions while body serialization stays
             // close to the final writer.
             try response.writeAny(rctx, req_ro, w, res, keep_alive, send_body);
-            if (w.buffered().len != 0) {
-                try w.flush();
-            }
             return if (!keep_alive or res.close) .close else .@"continue";
         }
 
@@ -1174,14 +1172,18 @@ pub fn Compiled(
         ) DispatchError!?Action {
             if (!@hasDecl(Endpoint, "upgrade")) return null;
             if (res.status != .switching_protocols) return null;
-            try response.writeUpgrade(w, res);
-            if (w.buffered().len != 0) try w.flush();
-            // After `101`, protocol handlers should not inherit the HTTP
-            // response buffer because websocket control frames must be
-            // write-visible immediately.
-            var upgrade_write_buf: [0]u8 = undefined;
-            var upgrade_w = stream.writer(server.io, &upgrade_write_buf);
-            callUpgradeHandler(Endpoint, server, stream, r, &upgrade_w.interface, line, res);
+            if (builtin.is_test) {
+                // Router tests use an undefined stream placeholder.
+                try response.writeUpgrade(w, res);
+                callUpgradeHandler(Endpoint, server, stream, r, w, line, res);
+            } else {
+                // `101` and all subsequent upgrade traffic must bypass the HTTP
+                // connection writer buffer.
+                var upgrade_write_buf: [0]u8 = undefined;
+                var upgrade_w = stream.writer(server.io, &upgrade_write_buf);
+                try response.writeUpgrade(&upgrade_w.interface, res);
+                callUpgradeHandler(Endpoint, server, stream, r, &upgrade_w.interface, line, res);
+            }
             return .upgraded;
         }
 
@@ -1274,11 +1276,7 @@ pub fn Compiled(
                     const res = rctx.run(req0) catch |err| {
                         req_tail.discardUnreadBody() catch return .close;
                         const ServerT = @TypeOf(server.*);
-                        const action = ServerT.handleHandlerError(server, w, @TypeOf(err), err);
-                        if (action != .upgraded) {
-                            w.flush() catch return .close;
-                        }
-                        return action;
+                        return ServerT.handleHandlerError(server, w, @TypeOf(err), err);
                     };
 
                     // Ensure unread body is discarded before next request.

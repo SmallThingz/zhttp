@@ -289,7 +289,6 @@ pub fn Server(comptime def: anytype) type {
         fn writeSimple(self: *Self, w: *Io.Writer, status: u16, body: []const u8) void {
             const res = response.Res.text(status, body);
             response.write(w, res, false, true) catch {};
-            w.flush() catch {};
             _ = self;
         }
 
@@ -362,28 +361,35 @@ pub fn Server(comptime def: anytype) type {
                     const a = arena.allocator();
                     defer _ = arena.reset(.{ .retain_with_limit = config.arena_reset_limit });
 
-                    const line = request.parseRequestLineBorrowed(&sr.interface, Conf.max_request_line) catch |err| {
-                        continue :blk switch (err) {
-                            error.EndOfStream, error.ReadFailed => .close,
-                            error.UriTooLong => blk2: {
-                                self.writeSimple(&sw.interface, 414, "bad request");
-                                break :blk2 .close;
-                            },
-                            error.BadRequest => blk2: {
-                                self.writeSimple(&sw.interface, 400, "bad request");
-                                break :blk2 .close;
-                            },
-                            error.OutOfMemory => blk2: {
-                                self.writeSimple(&sw.interface, 500, "internal error");
-                                break :blk2 .close;
-                            },
+                    const action: Action = act: {
+                        const line = request.parseRequestLineBorrowed(&sr.interface, Conf.max_request_line) catch |err| {
+                            break :act switch (err) {
+                                error.EndOfStream, error.ReadFailed => .close,
+                                error.UriTooLong => blk2: {
+                                    self.writeSimple(&sw.interface, 414, "bad request");
+                                    break :blk2 .close;
+                                },
+                                error.BadRequest => blk2: {
+                                    self.writeSimple(&sw.interface, 400, "bad request");
+                                    break :blk2 .close;
+                                },
+                                error.OutOfMemory => blk2: {
+                                    self.writeSimple(&sw.interface, 500, "internal error");
+                                    break :blk2 .close;
+                                },
+                            };
                         };
+
+                        break :act if (Compiled.match(line.method, line.path)) |idx| switch (idx) {
+                            inline 0...(Compiled.RouteCount - 1) => |c_idx| routeAction(c_idx)(self, &sr.interface, &sw.interface, &stream, line, a) catch |err| self.handleDispatchServerError(&sw.interface, err),
+                            else => unreachable,
+                        } else notFoundAction()(self, &sr.interface, &sw.interface, &stream, line, a) catch |err| self.handleDispatchServerError(&sw.interface, err);
                     };
 
-                    continue :blk (if (Compiled.match(line.method, line.path)) |idx| switch (idx) {
-                        inline 0...(Compiled.RouteCount - 1) => |c_idx| routeAction(c_idx)(self, &sr.interface, &sw.interface, &stream, line, a) catch |err| self.handleDispatchServerError(&sw.interface, err),
-                        else => unreachable,
-                    } else notFoundAction()(self, &sr.interface, &sw.interface, &stream, line, a) catch |err| self.handleDispatchServerError(&sw.interface, err));
+                    if (sw.interface.buffered().len != 0) {
+                        sw.interface.flush() catch return;
+                    }
+                    continue :blk action;
                 },
                 .close => {
                     return;

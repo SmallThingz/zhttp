@@ -265,8 +265,7 @@ pub fn mergeHeaderStructs(comptime A: type, comptime B: type) type {
                 comptime name: []const u8,
                 comptime T: type,
             ) void {
-                comptime var i: usize = 0;
-                inline while (i < count_ptr.*) : (i += 1) {
+                inline for (0..count_ptr.*) |i| {
                     const existing = names_buf.*[i];
                     if (!headerFieldNamesClash(existing, name)) continue;
                     if (types_buf.*[i] != T) {

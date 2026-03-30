@@ -265,9 +265,8 @@ pub const ReqCtx = struct {
 
         // Walk backward through already-entered middleware layers so the most
         // recent override wins and `req.bodyAll()`-style calls chain correctly.
-        comptime var i: usize = self.idx;
-        inline while (i > 0) : (i -= 1) {
-            const mw_index: usize = i - 1;
+        inline for (0..self.idx) |offset| {
+            const mw_index: usize = self.idx - 1 - offset;
             const Mw = self.middlewares[mw_index];
             if (!@hasDecl(Mw, "Override")) continue;
 

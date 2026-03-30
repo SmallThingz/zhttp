@@ -386,9 +386,7 @@ pub fn Server(comptime def: anytype) type {
                         } else notFoundAction()(self, &sr.interface, &sw.interface, &stream, line, a) catch |err| self.handleDispatchServerError(&sw.interface, err);
                     };
 
-                    if (sw.interface.buffered().len != 0) {
-                        sw.interface.flush() catch return;
-                    }
+                    sw.interface.flush() catch return;
                     continue :blk action;
                 },
                 .close => {

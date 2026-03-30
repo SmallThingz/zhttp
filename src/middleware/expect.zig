@@ -120,9 +120,7 @@ pub fn Expect(comptime opts: ExpectOptions) type {
 
                     const w = req.raw().writer();
                     w.writeAll("HTTP/1.1 100 Continue\r\n\r\n") catch return;
-                    if (w.buffered().len != 0) {
-                        w.flush() catch return;
-                    }
+                    w.flush() catch return;
                     state.sent = true;
                 }
 

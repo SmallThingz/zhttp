@@ -14,20 +14,6 @@ pub const Static = struct {
         return base_route_count * 2;
     }
 
-    fn addRoutesForMiddleware(comptime r: anytype, comptime Mw: type) void {
-        if (!@hasDecl(Mw, "operationRoutes")) {
-            @compileError("operations.Static: middleware type " ++ @typeName(Mw) ++ " must expose `pub fn operationRoutes() ...`");
-        }
-        const extra = Mw.operationRoutes();
-        const fields = @typeInfo(@TypeOf(extra)).@"struct".fields;
-        inline for (fields) |f| {
-            const route_decl = @field(extra, f.name);
-            if (!r.hasMethodPath(route_decl.method, route_decl.pattern)) {
-                r.add(route_decl);
-            }
-        }
-    }
-
     /// Applies the operation to the mutable compile-time route table.
     pub fn operation(comptime opctx: OperationCtx, r: opctx.T()) void {
         const op_indices = opctx.filter(r);
@@ -35,7 +21,17 @@ pub const Static = struct {
             if (!r.hasMiddlewareDecl(idx, "operationRoutes")) continue;
             const selected_mw = r.firstMiddlewareWithDecl(idx, "operationRoutes") orelse
                 @compileError("operations.Static: expected at least one middleware exposing `operationRoutes()`");
-            addRoutesForMiddleware(r, selected_mw);
+            if (!@hasDecl(selected_mw, "operationRoutes")) {
+                @compileError("operations.Static: middleware type " ++ @typeName(selected_mw) ++ " must expose `pub fn operationRoutes() ...`");
+            }
+            const extra = selected_mw.operationRoutes();
+            const fields = @typeInfo(@TypeOf(extra)).@"struct".fields;
+            inline for (fields) |f| {
+                const route_decl = @field(extra, f.name);
+                if (!r.hasMethodPath(route_decl.method, route_decl.pattern)) {
+                    r.add(route_decl);
+                }
+            }
         }
     }
 };

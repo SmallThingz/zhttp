@@ -33,10 +33,6 @@ const ExpectState = struct {
     sent: bool = false,
 };
 
-fn is100Continue(value: []const u8) bool {
-    return util.asciiEqlLower(std.mem.trim(u8, value, " \t"), "100-continue");
-}
-
 fn framingHasReadableBody(framing: anytype) bool {
     return switch (framing) {
         .chunked, .content_length => true,
@@ -92,7 +88,7 @@ pub fn Expect(comptime opts: ExpectOptions) type {
             state.sent = false;
             const expect_value = req.header(.expect) orelse return rctx.next(req);
             const base = req.baseMut();
-            if (is100Continue(expect_value)) {
+            if (util.asciiEqlLower(std.mem.trim(u8, expect_value, " \t"), "100-continue")) {
                 if (!allow_without_body and !hasFramedBody(base)) {
                     return reject(@TypeOf(req), req);
                 }

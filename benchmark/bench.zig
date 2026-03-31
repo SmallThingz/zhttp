@@ -377,15 +377,20 @@ fn runZhttp(init: std.process.Init, cfg: Config) !void {
 
     const bind_port: u16 = cfg.port; // default 0 (ephemeral)
     const bind_addr: std.Io.net.IpAddress = .{ .ip4 = std.Io.net.Ip4Address.loopback(bind_port) };
-    var server = try SrvT.init(init.gpa, init.io, bind_addr, {});
-    defer server.deinit();
-
-    const actual_port: u16 = server.listener.socket.address.getPort();
-    if (actual_port == 0) return error.FailedToBindPort;
-
     var server_group: Io.Group = .init;
     defer server_group.cancel(init.io);
-    try server_group.concurrent(init.io, SrvT.run, .{&server});
+    var actual_port: u16 = 0;
+    try server_group.concurrent(init.io, struct {
+        fn runServer(args: SrvT.RunArgs) Io.Cancelable!void {
+            SrvT.run(args) catch |err| switch (err) {
+                error.Canceled => return error.Canceled,
+                else => std.debug.panic("benchmark server run failed: {s}", .{@errorName(err)}),
+            };
+        }
+    }.runServer, .{.{ .gpa = init.gpa, .io = init.io, .address = bind_addr, .ctx = {}, .actual_port_out = &actual_port }});
+    while (actual_port == 0) {
+        try std.Io.sleep(init.io, std.Io.Duration.fromMilliseconds(1), .awake);
+    }
 
     const addr: std.Io.net.IpAddress = .{ .ip4 = std.Io.net.Ip4Address.loopback(actual_port) };
     const host = "127.0.0.1";

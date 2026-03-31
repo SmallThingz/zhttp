@@ -29,6 +29,9 @@ fn setTcpNoDelay(stream: *const std.Io.net.Stream) void {
 pub const Config = struct {
     /// Kernel listen backlog used when creating the server socket.
     listen_backlog: u31 = 4096,
+    /// Number of listening sockets bound to the same address. On POSIX this
+    /// uses the std `reuse_address` path, which also enables `SO_REUSEPORT`.
+    listener_shards: usize = 1,
     /// Per-connection read buffer size.
     read_buffer: usize = 8 * 1024,
     /// Per-connection write buffer size. Zero disables buffering.
@@ -47,8 +50,6 @@ pub const Config = struct {
     arena_reset_limit: usize = 1024 * 1024,
     /// Maximum accepted connections handled by a temporary worker before it exits.
     temp_worker_connection_limit: usize = 1024,
-    /// Number of permanent accept workers. Zero means auto.
-    permanent_workers: usize = 0,
     /// Enables temporary worker spawning under sustained pressure.
     temp_workers: bool = true,
     /// Maximum number of temporary workers alive at once. Zero means auto (= permanent worker count).
@@ -77,6 +78,7 @@ pub fn Server(comptime def: anytype) type {
 
     const Conf: Config = .{
         .listen_backlog = configField(cfg, "listen_backlog"),
+        .listener_shards = configField(cfg, "listener_shards"),
         .read_buffer = configField(cfg, "read_buffer"),
         .write_buffer = configField(cfg, "write_buffer"),
         .tcp_nodelay = configField(cfg, "tcp_nodelay"),
@@ -86,11 +88,13 @@ pub fn Server(comptime def: anytype) type {
         .max_header_bytes = configField(cfg, "max_header_bytes"),
         .arena_reset_limit = configField(cfg, "arena_reset_limit"),
         .temp_worker_connection_limit = configField(cfg, "temp_worker_connection_limit"),
-        .permanent_workers = configField(cfg, "permanent_workers"),
         .temp_workers = configField(cfg, "temp_workers"),
         .max_temp_workers = configField(cfg, "max_temp_workers"),
     };
     comptime {
+        if (Conf.listener_shards == 0) {
+            @compileError("server config invalid: listener_shards must be >= 1");
+        }
         if (Conf.read_buffer < Conf.max_request_line) {
             @compileError("server config invalid: read_buffer must be >= max_request_line");
         }
@@ -133,8 +137,10 @@ pub fn Server(comptime def: anytype) type {
         io: Io,
         gpa: Allocator,
         listener: std.Io.net.Server,
+        extra_listeners: [Conf.listener_shards - 1]std.Io.net.Server,
         lifecycle: std.atomic.Value(Lifecycle),
         group: Io.Group = .init,
+        permanent_worker_count: std.atomic.Value(usize),
         busy_workers: std.atomic.Value(usize),
         live_temp_workers: std.atomic.Value(usize),
         ctx: if (Context == void) void else *Context,
@@ -142,6 +148,17 @@ pub fn Server(comptime def: anytype) type {
 
         const Self = @This();
         pub const config = Conf;
+        pub const RunArgs = struct {
+            gpa: Allocator,
+            io: Io,
+            address: std.Io.net.IpAddress,
+            ctx: if (Context == void) void else *Context,
+            /// Number of long-lived accept workers. Zero means auto.
+            permanent_workers: usize = 0,
+            /// When non-null, receives the bound local port after listen succeeds.
+            actual_port_out: ?*u16 = null,
+        };
+        const InitError = @typeInfo(@typeInfo(@TypeOf(initOwned)).@"fn".return_type.?).error_union.error_set;
         const Lifecycle = enum(u8) {
             running,
             stopping,
@@ -272,8 +289,8 @@ pub fn Server(comptime def: anytype) type {
             return out;
         }
 
-        /// Initializes this value.
-        pub fn init(
+        /// Initializes a bound server instance for internal use and white-box tests.
+        fn initOwned(
             gpa: Allocator,
             io: Io,
             address: std.Io.net.IpAddress,
@@ -284,12 +301,26 @@ pub fn Server(comptime def: anytype) type {
                 .reuse_address = true,
             });
             errdefer listener.deinit(io);
+            var extra_listeners: [Conf.listener_shards - 1]std.Io.net.Server = undefined;
+            errdefer {
+                inline for (0..Conf.listener_shards - 1) |i| {
+                    extra_listeners[i].deinit(io);
+                }
+            }
+            inline for (0..Conf.listener_shards - 1) |i| {
+                extra_listeners[i] = try std.Io.net.IpAddress.listen(&address, io, .{
+                    .kernel_backlog = Conf.listen_backlog,
+                    .reuse_address = true,
+                });
+            }
             const route_static_ctx = try initRouteStaticContexts(io, gpa);
             return .{
                 .io = io,
                 .gpa = gpa,
                 .listener = listener,
+                .extra_listeners = extra_listeners,
                 .lifecycle = std.atomic.Value(Lifecycle).init(.running),
+                .permanent_worker_count = std.atomic.Value(usize).init(0),
                 .busy_workers = std.atomic.Value(usize).init(0),
                 .live_temp_workers = std.atomic.Value(usize).init(0),
                 .ctx = ctx,
@@ -301,7 +332,7 @@ pub fn Server(comptime def: anytype) type {
         pub fn stop(self: *Self) void {
             if (self.lifecycle.cmpxchgStrong(.running, .stopping, .acq_rel, .acquire) != null) return;
 
-            const wake_count = permanentWorkerCount() + self.live_temp_workers.load(.acquire) + 1;
+            const wake_count = (self.permanent_worker_count.load(.acquire) + self.live_temp_workers.load(.acquire) + 1) * listenerShardCount();
             var i: usize = 0;
             while (i < wake_count) : (i += 1) {
                 var wake = std.Io.net.IpAddress.connect(&self.listener.socket.address, self.io, .{ .mode = .stream }) catch null;
@@ -316,33 +347,62 @@ pub fn Server(comptime def: anytype) type {
             // std.Io Group/Server resources must be released exactly once.
             if (self.lifecycle.swap(.closed, .acq_rel) != .closed) {
                 self.listener.deinit(self.io);
+                inline for (0..Conf.listener_shards - 1) |i| {
+                    self.extra_listeners[i].deinit(self.io);
+                }
             }
         }
 
-        /// Runs this component.
-        pub fn run(self: *Self) Io.Cancelable!void {
-            var i: usize = 0;
-            while (i < permanentWorkerCount()) : (i += 1) {
-                self.group.concurrent(self.io, worker, .{self}) catch return error.Canceled;
+        /// Binds, runs, and tears down the server in one call.
+        pub fn run(args: RunArgs) (InitError || Io.Cancelable)!void {
+            var self = try initOwned(args.gpa, args.io, args.address, args.ctx);
+            defer self.deinit();
+            if (args.actual_port_out) |port_out| {
+                port_out.* = self.listener.socket.address.getPort();
             }
-            if (Conf.temp_workers and maxTempWorkerCount() != 0) {
+            return self.serve(.{
+                .permanent_workers = args.permanent_workers,
+            });
+        }
+
+        const ServeOptions = struct {
+            permanent_workers: usize = 0,
+        };
+
+        fn serve(self: *Self, opts: ServeOptions) Io.Cancelable!void {
+            const permanent_workers = permanentWorkerCount(opts.permanent_workers);
+            self.permanent_worker_count.store(permanent_workers, .release);
+            var i: usize = 0;
+            while (i < permanent_workers) : (i += 1) {
+                self.group.concurrent(self.io, worker, .{ self, i % listenerShardCount() }) catch return error.Canceled;
+            }
+            if (Conf.temp_workers and maxTempWorkerCount(permanent_workers) != 0) {
                 self.group.concurrent(self.io, spawnTempWorkers, .{self}) catch return error.Canceled;
             }
             self.group.await(self.io) catch {};
         }
 
-        fn permanentWorkerCount() usize {
-            if (Conf.permanent_workers != 0) return Conf.permanent_workers;
+        fn listenerShardCount() usize {
+            return Conf.listener_shards;
+        }
+
+        fn permanentWorkerCount(runtime_count: usize) usize {
+            if (runtime_count != 0) return runtime_count;
             const cpu_count = std.Thread.getCpuCount() catch 1;
             return @max(cpu_count * 2 - 1, 1);
         }
 
-        fn maxTempWorkerCount() usize {
-            return if (Conf.max_temp_workers == 0) permanentWorkerCount() else Conf.max_temp_workers;
+        fn maxTempWorkerCount(permanent_workers: usize) usize {
+            return if (Conf.max_temp_workers == 0) permanent_workers else Conf.max_temp_workers;
         }
 
-        fn acceptOne(self: *Self) Io.Cancelable!?std.Io.net.Stream {
-            const stream = self.listener.accept(self.io) catch |err| switch (err) {
+        fn listenerAt(self: *Self, shard_idx: usize) *std.Io.net.Server {
+            if (comptime Conf.listener_shards == 1) return &self.listener;
+            return if (shard_idx == 0) &self.listener else &self.extra_listeners[shard_idx - 1];
+        }
+
+        fn acceptOne(self: *Self, shard_idx: usize) Io.Cancelable!?std.Io.net.Stream {
+            const stream = self.listenerAt(shard_idx).accept(self.io) catch |err| switch (err) {
                 error.ProcessFdQuotaExceeded, error.SystemFdQuotaExceeded, error.SystemResources => return null,
                 error.ConnectionAborted, error.BlockedByFirewall, error.ProtocolFailure => return null,
                 error.SocketNotListening, error.Canceled => return error.Canceled,
@@ -357,11 +417,11 @@ pub fn Server(comptime def: anytype) type {
             return stream;
         }
 
-        fn worker(self: *Self) Io.Cancelable!void {
+        fn worker(self: *Self, shard_idx: usize) Io.Cancelable!void {
             var state = WorkerState.init(self.gpa);
             defer state.deinit();
             while (self.lifecycle.load(.acquire) == .running) {
-                const stream = (try self.acceptOne()) orelse continue;
+                const stream = (try self.acceptOne(shard_idx)) orelse continue;
                 if (Conf.temp_workers) _ = self.busy_workers.fetchAdd(1, .acq_rel);
                 handleConn(self, &state, stream) catch |err| {
                     if (Conf.temp_workers) _ = self.busy_workers.fetchSub(1, .acq_rel);
@@ -381,8 +441,9 @@ pub fn Server(comptime def: anytype) type {
             defer state.deinit();
 
             var accepted: usize = 0;
+            const shard_idx = if (listenerShardCount() == 1) 0 else self.live_temp_workers.load(.acquire) % listenerShardCount();
             while (self.lifecycle.load(.acquire) == .running and accepted < Conf.temp_worker_connection_limit) {
-                const stream = (try self.acceptOne()) orelse continue;
+                const stream = (try self.acceptOne(shard_idx)) orelse continue;
                 accepted += 1;
                 _ = self.busy_workers.fetchAdd(1, .acq_rel);
                 handleConn(self, &state, stream) catch |err| {
@@ -400,8 +461,9 @@ pub fn Server(comptime def: anytype) type {
             while (self.lifecycle.load(.acquire) == .running) {
                 const live_temp = self.live_temp_workers.load(.acquire);
                 const busy = self.busy_workers.load(.acquire);
-                const total_workers = permanentWorkerCount() + live_temp;
-                if (live_temp < maxTempWorkerCount() and busy >= total_workers) {
+                const permanent_workers = self.permanent_worker_count.load(.acquire);
+                const total_workers = permanent_workers + live_temp;
+                if (live_temp < maxTempWorkerCount(permanent_workers) and busy >= total_workers) {
                     self.group.concurrent(self.io, tempWorker, .{self}) catch {};
                 }
                 std.Io.sleep(self.io, std.Io.Duration.fromMilliseconds(1), .awake) catch return;
@@ -994,6 +1056,25 @@ test "Server config: arena_reset_limit override is applied" {
     try std.testing.expectEqual(@as(usize, 12345), SrvT.config.arena_reset_limit);
 }
 
+test "Server config: listener_shards=1 compiles listener selection path" {
+    const SrvT = Server(.{
+        .routes = .{
+            router.get("/", struct {
+                pub const Info: router.EndpointInfo = .{};
+                pub fn call(comptime rctx: ReqCtx, req: rctx.T()) !response.Res {
+                    _ = req;
+                    return response.Res.text(200, "ok");
+                }
+            }),
+        },
+        .config = .{
+            .listener_shards = 1,
+        },
+    });
+    const listener_at: fn (*SrvT, usize) *std.Io.net.Server = SrvT.listenerAt;
+    _ = listener_at;
+}
+
 test "Server stop: stop after deinit is a no-op" {
     primeSocketBackend();
     const io = std.testing.io;
@@ -1011,7 +1092,7 @@ test "Server stop: stop after deinit is a no-op" {
     });
 
     const addr0: Io.net.IpAddress = .{ .ip4 = Io.net.Ip4Address.loopback(0) };
-    var server = try SrvT.init(std.testing.allocator, io, addr0, {});
+    var server = try SrvT.initOwned(std.testing.allocator, io, addr0, {});
     server.deinit();
     server.stop();
 }
@@ -1035,11 +1116,11 @@ test "Server stop: blocked accept loop shuts down cleanly" {
     for (0..64) |_| {
         const addr0: Io.net.IpAddress = .{ .ip4 = Io.net.Ip4Address.loopback(0) };
         var group: Io.Group = .init;
-        var server = try SrvT.init(std.testing.allocator, io, addr0, {});
+        var server = try SrvT.initOwned(std.testing.allocator, io, addr0, {});
         const port: u16 = server.listener.socket.address.getPort();
         try std.testing.expect(port != 0);
 
-        try group.concurrent(io, SrvT.run, .{&server});
+        try group.concurrent(io, SrvT.serve, .{&server, .{}});
 
         // Drive one full request so the accept loop returns to its steady-state
         // blocking-accept path before shutdown, without leaving a connection
@@ -1089,9 +1170,9 @@ test "Server stop: idle keepalive peer-close then shutdown is clean" {
     for (0..16) |_| {
         const addr0: Io.net.IpAddress = .{ .ip4 = Io.net.Ip4Address.loopback(0) };
         var group: Io.Group = .init;
-        var server = try SrvT.init(std.testing.allocator, io, addr0, {});
+        var server = try SrvT.initOwned(std.testing.allocator, io, addr0, {});
         const port: u16 = server.listener.socket.address.getPort();
-        try group.concurrent(io, SrvT.run, .{&server});
+        try group.concurrent(io, SrvT.serve, .{&server, .{}});
 
         var stream = try Io.net.IpAddress.connect(&.{ .ip4 = Io.net.Ip4Address.loopback(port) }, io, .{ .mode = .stream });
 
@@ -1145,8 +1226,8 @@ test "Server stop: concurrent stop calls are race-free and idempotent" {
 
     const addr0: Io.net.IpAddress = .{ .ip4 = Io.net.Ip4Address.loopback(0) };
     var group: Io.Group = .init;
-    var server = try SrvT.init(std.testing.allocator, io, addr0, {});
-    try group.concurrent(io, SrvT.run, .{&server});
+    var server = try SrvT.initOwned(std.testing.allocator, io, addr0, {});
+    try group.concurrent(io, SrvT.serve, .{&server, .{}});
 
     var stop_ctx = StopCtx{ .server = &server };
     const t1 = try std.Thread.spawn(.{}, StopCtx.run, .{&stop_ctx});
@@ -1192,13 +1273,13 @@ test "Connection: close header closes socket" {
 
     const addr0: Io.net.IpAddress = .{ .ip4 = Io.net.Ip4Address.loopback(0) };
     var group: Io.Group = .init;
-    var server = try SrvT.init(std.testing.allocator, io, addr0, {});
+    var server = try SrvT.initOwned(std.testing.allocator, io, addr0, {});
     defer stopServerTest(io, &group, &server);
 
     const port: u16 = server.listener.socket.address.getPort();
     try std.testing.expect(port != 0);
 
-    try group.concurrent(io, SrvT.run, .{&server});
+    try group.concurrent(io, SrvT.serve, .{&server, .{}});
 
     const addr: Io.net.IpAddress = .{ .ip4 = Io.net.Ip4Address.loopback(port) };
     var stream = try Io.net.IpAddress.connect(&addr, io, .{ .mode = .stream });
@@ -1259,11 +1340,11 @@ test "unknown path returns 404 and keeps connection" {
 
     const addr0: Io.net.IpAddress = .{ .ip4 = Io.net.Ip4Address.loopback(0) };
     var group: Io.Group = .init;
-    var server = try SrvT.init(std.testing.allocator, io, addr0, {});
+    var server = try SrvT.initOwned(std.testing.allocator, io, addr0, {});
     defer stopServerTest(io, &group, &server);
     const port: u16 = server.listener.socket.address.getPort();
 
-    try group.concurrent(io, SrvT.run, .{&server});
+    try group.concurrent(io, SrvT.serve, .{&server, .{}});
 
     const addr: Io.net.IpAddress = .{ .ip4 = Io.net.Ip4Address.loopback(port) };
     var stream = try Io.net.IpAddress.connect(&addr, io, .{ .mode = .stream });
@@ -1349,11 +1430,11 @@ test "not_found_handler can parse query headers and body" {
 
     const addr0: Io.net.IpAddress = .{ .ip4 = Io.net.Ip4Address.loopback(0) };
     var group: Io.Group = .init;
-    var server = try SrvT.init(std.testing.allocator, io, addr0, {});
+    var server = try SrvT.initOwned(std.testing.allocator, io, addr0, {});
     defer stopServerTest(io, &group, &server);
     const port: u16 = server.listener.socket.address.getPort();
 
-    try group.concurrent(io, SrvT.run, .{&server});
+    try group.concurrent(io, SrvT.serve, .{&server, .{}});
 
     const addr: Io.net.IpAddress = .{ .ip4 = Io.net.Ip4Address.loopback(port) };
     var stream = try Io.net.IpAddress.connect(&addr, io, .{ .mode = .stream });
@@ -1424,11 +1505,11 @@ test "HEAD response omits body" {
 
     const addr0: Io.net.IpAddress = .{ .ip4 = Io.net.Ip4Address.loopback(0) };
     var group: Io.Group = .init;
-    var server = try SrvT.init(std.testing.allocator, io, addr0, {});
+    var server = try SrvT.initOwned(std.testing.allocator, io, addr0, {});
     defer stopServerTest(io, &group, &server);
     const port: u16 = server.listener.socket.address.getPort();
 
-    try group.concurrent(io, SrvT.run, .{&server});
+    try group.concurrent(io, SrvT.serve, .{&server, .{}});
 
     const addr: Io.net.IpAddress = .{ .ip4 = Io.net.Ip4Address.loopback(port) };
     var stream = try Io.net.IpAddress.connect(&addr, io, .{ .mode = .stream });
@@ -1479,11 +1560,11 @@ test "bad request line returns 400" {
 
     const addr0: Io.net.IpAddress = .{ .ip4 = Io.net.Ip4Address.loopback(0) };
     var group: Io.Group = .init;
-    var server = try SrvT.init(std.testing.allocator, io, addr0, {});
+    var server = try SrvT.initOwned(std.testing.allocator, io, addr0, {});
     defer stopServerTest(io, &group, &server);
     const port: u16 = server.listener.socket.address.getPort();
 
-    try group.concurrent(io, SrvT.run, .{&server});
+    try group.concurrent(io, SrvT.serve, .{&server, .{}});
 
     const addr: Io.net.IpAddress = .{ .ip4 = Io.net.Ip4Address.loopback(port) };
     var stream = try Io.net.IpAddress.connect(&addr, io, .{ .mode = .stream });
@@ -1543,11 +1624,11 @@ test "custom error_handler handles handler errors only" {
 
     const addr0: Io.net.IpAddress = .{ .ip4 = Io.net.Ip4Address.loopback(0) };
     var group: Io.Group = .init;
-    var server = try SrvT.init(std.testing.allocator, io, addr0, {});
+    var server = try SrvT.initOwned(std.testing.allocator, io, addr0, {});
     defer stopServerTest(io, &group, &server);
     const port: u16 = server.listener.socket.address.getPort();
 
-    try group.concurrent(io, SrvT.run, .{&server});
+    try group.concurrent(io, SrvT.serve, .{&server, .{}});
 
     const addr: Io.net.IpAddress = .{ .ip4 = Io.net.Ip4Address.loopback(port) };
 
@@ -1625,11 +1706,11 @@ test "handler res.close closes socket" {
 
     const addr0: Io.net.IpAddress = .{ .ip4 = Io.net.Ip4Address.loopback(0) };
     var group: Io.Group = .init;
-    var server = try SrvT.init(std.testing.allocator, io, addr0, {});
+    var server = try SrvT.initOwned(std.testing.allocator, io, addr0, {});
     defer stopServerTest(io, &group, &server);
     const port: u16 = server.listener.socket.address.getPort();
 
-    try group.concurrent(io, SrvT.run, .{&server});
+    try group.concurrent(io, SrvT.serve, .{&server, .{}});
 
     const addr: Io.net.IpAddress = .{ .ip4 = Io.net.Ip4Address.loopback(port) };
     var stream = try Io.net.IpAddress.connect(&addr, io, .{ .mode = .stream });
@@ -1682,11 +1763,11 @@ test "HTTP/1.0 request does not keep-alive" {
 
     const addr0: Io.net.IpAddress = .{ .ip4 = Io.net.Ip4Address.loopback(0) };
     var group: Io.Group = .init;
-    var server = try SrvT.init(std.testing.allocator, io, addr0, {});
+    var server = try SrvT.initOwned(std.testing.allocator, io, addr0, {});
     defer stopServerTest(io, &group, &server);
     const port: u16 = server.listener.socket.address.getPort();
 
-    try group.concurrent(io, SrvT.run, .{&server});
+    try group.concurrent(io, SrvT.serve, .{&server, .{}});
 
     const addr: Io.net.IpAddress = .{ .ip4 = Io.net.Ip4Address.loopback(port) };
     var stream = try Io.net.IpAddress.connect(&addr, io, .{ .mode = .stream });
@@ -1759,11 +1840,11 @@ test "endpoint upgrade: 101 triggers upgrade callback and stream ownership" {
 
     const addr0: Io.net.IpAddress = .{ .ip4 = Io.net.Ip4Address.loopback(0) };
     var group: Io.Group = .init;
-    var server = try SrvT.init(std.testing.allocator, io, addr0, &state);
+    var server = try SrvT.initOwned(std.testing.allocator, io, addr0, &state);
     defer stopServerTest(io, &group, &server);
     const port: u16 = server.listener.socket.address.getPort();
 
-    try group.concurrent(io, SrvT.run, .{&server});
+    try group.concurrent(io, SrvT.serve, .{&server, .{}});
 
     const addr: Io.net.IpAddress = .{ .ip4 = Io.net.Ip4Address.loopback(port) };
     var stream = try Io.net.IpAddress.connect(&addr, io, .{ .mode = .stream });
@@ -1858,11 +1939,11 @@ test "middleware static_context: per-route init and request access" {
 
     const addr0: Io.net.IpAddress = .{ .ip4 = Io.net.Ip4Address.loopback(0) };
     var group: Io.Group = .init;
-    var server = try SrvT.init(std.testing.allocator, io, addr0, {});
+    var server = try SrvT.initOwned(std.testing.allocator, io, addr0, {});
     defer stopServerTest(io, &group, &server);
     const port: u16 = server.listener.socket.address.getPort();
 
-    try group.concurrent(io, SrvT.run, .{&server});
+    try group.concurrent(io, SrvT.serve, .{&server, .{}});
 
     const addr: Io.net.IpAddress = .{ .ip4 = Io.net.Ip4Address.loopback(port) };
     var stream = try Io.net.IpAddress.connect(&addr, io, .{ .mode = .stream });
@@ -1945,7 +2026,7 @@ test "middleware static_context: init errors propagate from Server.init" {
     });
 
     const addr0: Io.net.IpAddress = .{ .ip4 = Io.net.Ip4Address.loopback(0) };
-    try std.testing.expectError(error.StaticContextInitFailed, SrvT.init(std.testing.allocator, io, addr0, {}));
+    try std.testing.expectError(error.StaticContextInitFailed, SrvT.initOwned(std.testing.allocator, io, addr0, {}));
 }
 
 test "ReqCtx.Server allows cross-route static context access" {
@@ -2019,11 +2100,11 @@ test "ReqCtx.Server allows cross-route static context access" {
 
     const addr0: Io.net.IpAddress = .{ .ip4 = Io.net.Ip4Address.loopback(0) };
     var group: Io.Group = .init;
-    var server = try SrvT.init(std.testing.allocator, io, addr0, {});
+    var server = try SrvT.initOwned(std.testing.allocator, io, addr0, {});
     defer stopServerTest(io, &group, &server);
     const port: u16 = server.listener.socket.address.getPort();
 
-    try group.concurrent(io, SrvT.run, .{&server});
+    try group.concurrent(io, SrvT.serve, .{&server, .{}});
 
     var stream = try Io.net.IpAddress.connect(&.{ .ip4 = Io.net.Ip4Address.loopback(port) }, io, .{ .mode = .stream });
     defer stream.close(io);
@@ -2119,11 +2200,11 @@ test "server variation: global middleware applies to route and not_found handler
 
     const addr0: Io.net.IpAddress = .{ .ip4 = Io.net.Ip4Address.loopback(0) };
     var group: Io.Group = .init;
-    var server = try SrvT.init(std.testing.allocator, io, addr0, {});
+    var server = try SrvT.initOwned(std.testing.allocator, io, addr0, {});
     defer stopServerTest(io, &group, &server);
     const port: u16 = server.listener.socket.address.getPort();
 
-    try group.concurrent(io, SrvT.run, .{&server});
+    try group.concurrent(io, SrvT.serve, .{&server, .{}});
 
     const addr: Io.net.IpAddress = .{ .ip4 = Io.net.Ip4Address.loopback(port) };
 
@@ -2206,11 +2287,11 @@ test "server variation: operations.Cors generates runtime OPTIONS preflight rout
 
     const addr0: Io.net.IpAddress = .{ .ip4 = Io.net.Ip4Address.loopback(0) };
     var group: Io.Group = .init;
-    var server = try SrvT.init(std.testing.allocator, io, addr0, {});
+    var server = try SrvT.initOwned(std.testing.allocator, io, addr0, {});
     defer stopServerTest(io, &group, &server);
     const port: u16 = server.listener.socket.address.getPort();
 
-    try group.concurrent(io, SrvT.run, .{&server});
+    try group.concurrent(io, SrvT.serve, .{&server, .{}});
 
     var stream = try Io.net.IpAddress.connect(&.{ .ip4 = Io.net.Ip4Address.loopback(port) }, io, .{ .mode = .stream });
     defer stream.close(io);
@@ -2276,11 +2357,11 @@ test "server variation: operations.Static generates runtime GET and HEAD mount r
 
     const addr0: Io.net.IpAddress = .{ .ip4 = Io.net.Ip4Address.loopback(0) };
     var group: Io.Group = .init;
-    var server = try SrvT.init(std.testing.allocator, io, addr0, {});
+    var server = try SrvT.initOwned(std.testing.allocator, io, addr0, {});
     defer stopServerTest(io, &group, &server);
     const port: u16 = server.listener.socket.address.getPort();
 
-    try group.concurrent(io, SrvT.run, .{&server});
+    try group.concurrent(io, SrvT.serve, .{&server, .{}});
 
     {
         var stream = try Io.net.IpAddress.connect(&.{ .ip4 = Io.net.Ip4Address.loopback(port) }, io, .{ .mode = .stream });
@@ -2356,11 +2437,11 @@ test "server variation: unbuffered writer config works" {
 
     const addr0: Io.net.IpAddress = .{ .ip4 = Io.net.Ip4Address.loopback(0) };
     var group: Io.Group = .init;
-    var server = try SrvT.init(std.testing.allocator, io, addr0, {});
+    var server = try SrvT.initOwned(std.testing.allocator, io, addr0, {});
     defer stopServerTest(io, &group, &server);
     const port: u16 = server.listener.socket.address.getPort();
 
-    try group.concurrent(io, SrvT.run, .{&server});
+    try group.concurrent(io, SrvT.serve, .{&server, .{}});
 
     var stream = try Io.net.IpAddress.connect(&.{ .ip4 = Io.net.Ip4Address.loopback(port) }, io, .{ .mode = .stream });
     defer stream.close(io);
@@ -2447,11 +2528,11 @@ test "server adversarial malformed clients recover and keep serving" {
 
     const addr0: Io.net.IpAddress = .{ .ip4 = Io.net.Ip4Address.loopback(0) };
     var group: Io.Group = .init;
-    var server = try SrvT.init(std.testing.allocator, io, addr0, {});
+    var server = try SrvT.initOwned(std.testing.allocator, io, addr0, {});
     defer stopServerTest(io, &group, &server);
     const port: u16 = server.listener.socket.address.getPort();
 
-    try group.concurrent(io, SrvT.run, .{&server});
+    try group.concurrent(io, SrvT.serve, .{&server, .{}});
 
     var bad_400_buf: [256]u8 = undefined;
     const bad_400 = try renderTextResponse(400, "bad request", false, true, bad_400_buf[0..]);
@@ -2602,11 +2683,11 @@ test "server soak: deterministic real-socket variety including malformed keepali
 
     const addr0: Io.net.IpAddress = .{ .ip4 = Io.net.Ip4Address.loopback(0) };
     var group: Io.Group = .init;
-    var server = try SrvT.init(std.testing.allocator, io, addr0, &ctx);
+    var server = try SrvT.initOwned(std.testing.allocator, io, addr0, &ctx);
     defer stopServerTest(io, &group, &server);
     const port: u16 = server.listener.socket.address.getPort();
 
-    try group.concurrent(io, SrvT.run, .{&server});
+    try group.concurrent(io, SrvT.serve, .{&server, .{}});
 
     var prng = std.Random.DefaultPrng.init(0x5eed_cafe_1234_5678);
     const random = prng.random();
@@ -2740,11 +2821,11 @@ test "server websocket abuse: helper handshake and hostile frame mix" {
 
     const addr0: Io.net.IpAddress = .{ .ip4 = Io.net.Ip4Address.loopback(0) };
     var group: Io.Group = .init;
-    var server = try SrvT.init(std.testing.allocator, io, addr0, &ctx);
+    var server = try SrvT.initOwned(std.testing.allocator, io, addr0, &ctx);
     defer stopServerTest(io, &group, &server);
     const port: u16 = server.listener.socket.address.getPort();
 
-    try group.concurrent(io, SrvT.run, .{&server});
+    try group.concurrent(io, SrvT.serve, .{&server, .{}});
 
     var exercised: usize = 0;
 

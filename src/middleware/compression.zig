@@ -142,19 +142,6 @@ fn compressFlate(
     return list.items;
 }
 
-fn compressForScheme(
-    allocator: std.mem.Allocator,
-    body: []const u8,
-    scheme: CompressionScheme,
-    opts: CompressionOptions,
-) ![]u8 {
-    return switch (scheme) {
-        .br => brotli.compress(allocator, body, opts.brotli_options),
-        .zstd => zstd.compress(allocator, body, opts.zstd_level),
-        .gzip, .deflate => compressFlate(allocator, body, scheme, opts.level),
-    };
-}
-
 /// Configuration for `Compression`.
 pub const CompressionOptions = struct {
     /// Ordered whitelist of schemes the middleware is allowed to emit.
@@ -211,7 +198,11 @@ pub fn Compression(comptime opts: CompressionOptions) type {
             var selected: ?CompressionScheme = null;
             var compressed: []u8 = undefined;
             for (negotiated.items[0..negotiated.len]) |scheme| {
-                compressed = compressForScheme(a, res.body, scheme, opts) catch continue;
+                compressed = switch (scheme) {
+                    .br => brotli.compress(a, res.body, opts.brotli_options),
+                    .zstd => zstd.compress(a, res.body, opts.zstd_level),
+                    .gzip, .deflate => compressFlate(a, res.body, scheme, opts.level),
+                } catch continue;
                 selected = scheme;
                 break;
             }

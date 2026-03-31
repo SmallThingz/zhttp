@@ -159,21 +159,6 @@ fn initData(comptime Mw: type) dataType(Mw) {
     return std.mem.zeroes(Data);
 }
 
-fn initStaticContextValue(comptime StaticContext: type, io: std.Io, allocator: std.mem.Allocator, rd: StaticContextRouteDecl) !StaticContext {
-    if (@hasDecl(StaticContext, "init")) {
-        const init_fn = StaticContext.init;
-        const ret = @call(.auto, init_fn, .{ io, allocator, rd });
-        const RetT = @TypeOf(ret);
-        if (RetT == StaticContext) return ret;
-        if (@typeInfo(RetT) == .error_union and @typeInfo(RetT).error_union.payload == StaticContext) {
-            return try ret;
-        }
-        @compileError("middleware static context init must return StaticContext or !StaticContext");
-    }
-
-    return std.mem.zeroes(StaticContext);
-}
-
 /// Builds the middleware context struct type used by requests.
 pub fn contextType(comptime mws: anytype) type {
     const list = typeList(mws);
@@ -329,7 +314,20 @@ pub fn initStaticContext(
 ) !Ctx {
     var ctx: Ctx = std.mem.zeroes(Ctx);
     inline for (std.meta.fields(Ctx)) |f| {
-        @field(ctx, f.name) = try initStaticContextValue(f.type, io, allocator, rd);
+        if (@hasDecl(f.type, "init")) {
+            const init_fn = f.type.init;
+            const ret = @call(.auto, init_fn, .{ io, allocator, rd });
+            const RetT = @TypeOf(ret);
+            if (RetT == f.type) {
+                @field(ctx, f.name) = ret;
+            } else if (@typeInfo(RetT) == .error_union and @typeInfo(RetT).error_union.payload == f.type) {
+                @field(ctx, f.name) = try ret;
+            } else {
+                @compileError("middleware static context init must return StaticContext or !StaticContext");
+            }
+        } else {
+            @field(ctx, f.name) = std.mem.zeroes(f.type);
+        }
     }
     return ctx;
 }

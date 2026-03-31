@@ -279,40 +279,6 @@ fn matchPattern(p: Pattern, path: []u8, params_out: [][]u8) bool {
     return path_i >= path.len + 1;
 }
 
-/// Boolean-only variant of `matchPattern` for paths that do not need captures.
-fn matchPatternNoCapture(p: Pattern, path: []u8) bool {
-    if (p.segments.len == 0) return path.len == 1 and path[0] == '/';
-    var path_i: usize = 0;
-    if (path.len == 0 or path[0] != '/') return false;
-    path_i = 1;
-
-    var seg_index: usize = 0;
-    while (seg_index < p.segments.len) : (seg_index += 1) {
-        const seg = p.segments[seg_index];
-        if (seg.kind == .glob or seg.kind == .glob_param) {
-            return true;
-        }
-
-        if (path_i > path.len) return false;
-        const next_slash = std.mem.indexOfScalarPos(u8, path, path_i, '/') orelse path.len;
-        const part = path[path_i..next_slash];
-        if (part.len == 0) return false;
-
-        switch (seg.kind) {
-            .lit => {
-                if (!std.mem.eql(u8, part, seg.lit)) return false;
-            },
-            .param => {},
-            .glob => unreachable,
-            .glob_param => unreachable,
-        }
-
-        path_i = next_slash + 1;
-    }
-
-    return path_i > path.len;
-}
-
 const ExactEntry = struct {
     path: []const u8,
     hash: u64,

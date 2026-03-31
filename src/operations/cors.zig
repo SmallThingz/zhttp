@@ -24,24 +24,6 @@ pub const Cors = struct {
         }
     };
 
-    fn onGroup(comptime r: anytype, group: anytype) void {
-        if (group.indices.len == 0) return;
-        if (r.hasMethodPath("OPTIONS", group.path)) return;
-
-        const selected_mw = r.firstMiddlewareWithSignature(group.indices[0], CorsSignature) orelse
-            @compileError("operations.Cors: expected at least one middleware matching signature " ++ @typeName(CorsSignature));
-
-        const Endpoint = struct {
-            pub const Info: router.EndpointInfo = .{
-                .middlewares = &.{selected_mw},
-            };
-            pub fn call(comptime rctx: @import("../req_ctx.zig").ReqCtx, req: rctx.T()) !response.Res {
-                return DefaultOptionsEndpoint.call(rctx, req);
-            }
-        };
-        r.add(router.options(group.path, Endpoint));
-    }
-
     /// Applies the operation to the mutable compile-time route table.
     pub fn operation(comptime opctx: OperationCtx, r: opctx.T()) void {
         const op_indices = opctx.filter(r);
@@ -53,7 +35,25 @@ pub const Cors = struct {
                 n += 1;
             }
         }
-        r.forEachPathGroup(filtered[0..n], onGroup);
+        r.forEachPathGroup(filtered[0..n], struct {
+            fn onGroup(comptime r2: anytype, group: anytype) void {
+                if (group.indices.len == 0) return;
+                if (r2.hasMethodPath("OPTIONS", group.path)) return;
+
+                const selected_mw = r2.firstMiddlewareWithSignature(group.indices[0], CorsSignature) orelse
+                    @compileError("operations.Cors: expected at least one middleware matching signature " ++ @typeName(CorsSignature));
+
+                const Endpoint = struct {
+                    pub const Info: router.EndpointInfo = .{
+                        .middlewares = &.{selected_mw},
+                    };
+                    pub fn call(comptime rctx: @import("../req_ctx.zig").ReqCtx, req: rctx.T()) !response.Res {
+                        return DefaultOptionsEndpoint.call(rctx, req);
+                    }
+                };
+                r2.add(router.options(group.path, Endpoint));
+            }
+        }.onGroup);
     }
 };
 

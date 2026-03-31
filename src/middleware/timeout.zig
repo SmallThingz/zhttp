@@ -53,11 +53,15 @@ pub fn Timeout(comptime opts: TimeoutOptions) type {
             .name = info_name,
             .data = if (store) DataT else null,
         };
+    };
 
-        fn handle(comptime rctx: ReqCtx, req: rctx.T()) !Res {
+    return struct {
+        pub const Info = Common.Info;
+        /// Executes timeout middleware for the current request.
+        pub fn call(comptime rctx: ReqCtx, req: rctx.T()) !Res {
             const start = Io.Timestamp.now(req.io(), clock);
             if (store) {
-                const d = req.middlewareData(info_name);
+                const d = req.middlewareData(Common.info_name);
                 d.deadline = start.addDuration(timeout);
                 d.timeout = timeout;
             }
@@ -66,7 +70,7 @@ pub fn Timeout(comptime opts: TimeoutOptions) type {
             const elapsed = start.untilNow(req.io(), clock);
 
             if (store) {
-                const d = req.middlewareData(info_name);
+                const d = req.middlewareData(Common.info_name);
                 d.elapsed = elapsed;
                 d.timed_out = elapsed.nanoseconds > timeout.nanoseconds;
             }
@@ -75,14 +79,6 @@ pub fn Timeout(comptime opts: TimeoutOptions) type {
                 return Res.text(504, "timeout");
             }
             return res;
-        }
-    };
-
-    return struct {
-        pub const Info = Common.Info;
-        /// Executes timeout middleware for the current request.
-        pub fn call(comptime rctx: ReqCtx, req: rctx.T()) !Res {
-            return Common.handle(rctx, req);
         }
     };
 }

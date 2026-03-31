@@ -197,10 +197,6 @@ pub fn parseRequestLineBorrowed(r: *Io.Reader, max_line_len: usize) ParseLineErr
     };
 }
 
-fn headerIs(name: []const u8, comptime wanted: []const u8) bool {
-    return util.asciiEqlLower(name, wanted);
-}
-
 fn containsTokenIgnoreCase(value: []const u8, comptime token: []const u8) bool {
     if (util.asciiEqlLower(value, token)) return true;
 

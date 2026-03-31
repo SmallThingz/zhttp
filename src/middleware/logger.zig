@@ -31,20 +31,12 @@ fn testLog(method: []const u8, path: []const u8, status: u16, _: Io.Duration) vo
 fn discardLog(_: []const u8, _: []const u8, _: u16, _: Io.Duration) void {}
 
 fn defaultLog(method: []const u8, path: []const u8, status: u16, elapsed: Io.Duration) void {
-    var buf: [256]u8 = undefined;
-    const msg = std.fmt.bufPrint(&buf, "{s} {s} {d} {d}ms\n", .{
+    std.debug.print("{s} {s} {d} {d}ms\n", .{
         method,
         path,
         status,
         elapsed.toMilliseconds(),
-    }) catch return;
-
-    var rest = msg;
-    while (rest.len != 0) {
-        const wrote = std.c.write(std.posix.STDERR_FILENO, rest.ptr, rest.len);
-        if (wrote <= 0) return;
-        rest = rest[@intCast(wrote)..];
-    }
+    });
 }
 
 /// Configuration for `Logger`.
@@ -88,14 +80,18 @@ pub fn Logger(comptime opts: LoggerOptions) type {
             .name = info_name,
             .data = if (store) DataT else null,
         };
+    };
 
-        fn handle(comptime rctx: ReqCtx, req: rctx.T()) !Res {
+    return struct {
+        pub const Info = Common.Info;
+        /// Executes logger middleware for the current request.
+        pub fn call(comptime rctx: ReqCtx, req: rctx.T()) !Res {
             const start = Io.Timestamp.now(req.io(), clock);
             const res = try rctx.next(req);
             const elapsed = start.untilNow(req.io(), clock);
 
             if (store) {
-                const d = req.middlewareData(info_name);
+                const d = req.middlewareData(Common.info_name);
                 d.start = start;
                 d.elapsed = elapsed;
                 d.status = @intFromEnum(res.status);
@@ -107,14 +103,6 @@ pub fn Logger(comptime opts: LoggerOptions) type {
                 defaultLog(req.method, req.path, @intFromEnum(res.status), elapsed);
             }
             return res;
-        }
-    };
-
-    return struct {
-        pub const Info = Common.Info;
-        /// Executes logger middleware for the current request.
-        pub fn call(comptime rctx: ReqCtx, req: rctx.T()) !Res {
-            return Common.handle(rctx, req);
         }
     };
 }

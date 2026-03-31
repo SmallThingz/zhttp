@@ -3,6 +3,11 @@ const zhttp = @import("zhttp");
 const common = @import("common.zig");
 const ReqCtx = zhttp.ReqCtx;
 
+pub const std_options: std.Options = .{
+    .enable_segfault_handler = false,
+    .signal_stack_size = null,
+};
+
 fn usage() void {
     std.debug.print(
         \\basic_server
@@ -58,18 +63,11 @@ const User = struct {
 };
 
 /// Starts this executable.
-pub fn main(minimal: std.process.Init.Minimal) !void {
-    const gpa = std.heap.c_allocator;
-    var threaded = std.Io.Threaded.init(gpa, .{
-        .argv0 = .init(minimal.args),
-        .environ = minimal.environ,
-    });
-    const io = threaded.io();
-
+pub fn main(init: std.process.Init) !void {
     var port: u16 = 8080;
     var smoke: bool = false;
 
-    var it = try std.process.Args.Iterator.initAllocator(minimal.args, gpa);
+    var it = try std.process.Args.Iterator.initAllocator(init.minimal.args, init.gpa);
     defer it.deinit();
     _ = it.next(); // argv[0]
 
@@ -103,18 +101,28 @@ pub fn main(minimal: std.process.Init.Minimal) !void {
     });
 
     if (smoke) {
+        const io = init.io;
+
         const addr0: std.Io.net.IpAddress = .{ .ip4 = std.Io.net.Ip4Address.loopback(0) };
-        var server = try SrvT.init(gpa, io, addr0, {});
-        defer server.deinit();
-        const actual_port: u16 = server.listener.socket.address.getPort();
+        var actual_port: u16 = 0;
 
         var group: std.Io.Group = .init;
         var group_done = false;
         defer if (!group_done) {
-            server.stop();
+            group.cancel(io);
             group.await(io) catch {};
         };
-        try group.concurrent(io, SrvT.run, .{&server});
+        try group.concurrent(io, struct {
+            fn runServer(args: SrvT.RunArgs) std.Io.Cancelable!void {
+                SrvT.run(args) catch |err| switch (err) {
+                    error.Canceled => return error.Canceled,
+                    else => std.debug.panic("example server run failed: {s}", .{@errorName(err)}),
+                };
+            }
+        }.runServer, .{.{ .gpa = init.gpa, .io = io, .address = addr0, .ctx = {}, .actual_port_out = &actual_port }});
+        while (actual_port == 0) {
+            try std.Io.sleep(io, std.Io.Duration.fromMilliseconds(1), .awake);
+        }
 
         const addr: std.Io.net.IpAddress = .{ .ip4 = std.Io.net.Ip4Address.loopback(actual_port) };
         var stream = try std.Io.net.IpAddress.connect(&addr, io, .{ .mode = .stream });
@@ -158,16 +166,13 @@ pub fn main(minimal: std.process.Init.Minimal) !void {
 
         stream.close(io);
         close_stream = false;
-        server.stop();
+        group.cancel(io);
         group.await(io) catch {};
         group_done = true;
         return;
     }
 
     const addr: std.Io.net.IpAddress = .{ .ip4 = std.Io.net.Ip4Address.loopback(port) };
-    var server = try SrvT.init(gpa, io, addr, {});
-    defer server.deinit();
-
     std.debug.print("listening on http://127.0.0.1:{d}\n", .{port});
-    try server.run();
+    try SrvT.run(.{ .gpa = init.gpa, .io = init.io, .address = addr, .ctx = {} });
 }

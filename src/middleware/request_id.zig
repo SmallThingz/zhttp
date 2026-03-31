@@ -45,8 +45,12 @@ pub fn RequestId(comptime opts: RequestIdOptions) type {
             .name = info_name,
             .data = if (store) DataT else null,
         };
+    };
 
-        fn handle(comptime rctx: ReqCtx, req: rctx.T()) !Res {
+    return struct {
+        pub const Info = Common.Info;
+        /// Executes request-id middleware logic for the current request.
+        pub fn call(comptime rctx: ReqCtx, req: rctx.T()) !Res {
             var res = try rctx.next(req);
             if (!util.shouldAddHeader(res.headers, header_name, header_behavior)) return res;
 
@@ -56,7 +60,7 @@ pub fn RequestId(comptime opts: RequestIdOptions) type {
             const a = req.allocator();
             var id_buf: []u8 = undefined;
             if (store) {
-                id_buf = req.middlewareData(info_name).value[0..];
+                id_buf = req.middlewareData(Common.info_name).value[0..];
             } else {
                 id_buf = try a.alloc(u8, hex_len);
             }
@@ -65,14 +69,6 @@ pub fn RequestId(comptime opts: RequestIdOptions) type {
 
             res.headers = try util.appendHeaders(a, res.headers, &.{.{ .name = header_name, .value = id_buf }});
             return res;
-        }
-    };
-
-    return struct {
-        pub const Info = Common.Info;
-        /// Executes request-id middleware logic for the current request.
-        pub fn call(comptime rctx: ReqCtx, req: rctx.T()) !Res {
-            return Common.handle(rctx, req);
         }
     };
 }

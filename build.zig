@@ -59,7 +59,7 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
     const sanitize_thread = b.option(bool, "sanitize_thread", "Enable ThreadSanitizer instrumentation") orelse false;
-    const static_libc = b.option(bool, "static_libc", "Link libc statically (default: true)") orelse true;
+    const static_libc = b.option(bool, "static_libc", "Link libc statically (default: false)") orelse false;
     const effective_static_libc = if (sanitize_thread) false else static_libc;
     const mod = b.addModule("zhttp", .{
         .root_source_file = b.path("src/root.zig"),
@@ -69,6 +69,7 @@ pub fn build(b: *std.Build) void {
     const zws_dep = b.dependency("zwebsocket", .{
         .target = target,
         .optimize = optimize,
+        .static_libc = effective_static_libc,
     });
     const zstd_dep = b.dependency("libzstd", .{
         .target = target,

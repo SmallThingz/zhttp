@@ -62,7 +62,6 @@ pub fn main(init: std.process.Init) !void {
             .listen_backlog = 65_535,
             .tcp_nodelay = true,
             .abortive_close = true,
-            .permanent_workers = 16,
             .temp_workers = false,
             .max_temp_workers = 8,
             .temp_worker_connection_limit = 1_000_000,
@@ -70,7 +69,5 @@ pub fn main(init: std.process.Init) !void {
     });
 
     const addr: std.Io.net.IpAddress = .{ .ip4 = std.Io.net.Ip4Address.loopback(port) };
-    var server = try SrvT.init(init.gpa, init.io, addr, {});
-    defer server.deinit();
-    try server.run();
+    try SrvT.run(.{ .gpa = init.gpa, .io = init.io, .address = addr, .ctx = {} });
 }

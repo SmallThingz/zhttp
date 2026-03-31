@@ -51,10 +51,7 @@ const App = zhttp.Server(.{
 
 pub fn main(init: std.process.Init) !void {
     const addr: std.Io.net.IpAddress = .{ .ip4 = std.Io.net.Ip4Address.loopback(8080) };
-    var server = try App.init(init.gpa, init.io, addr, {});
-    defer server.deinit();
-
-    try server.run();
+    try App.run(.{ .gpa = init.gpa, .io = init.io, .address = addr, .ctx = {} });
 }
 ```
 
@@ -174,8 +171,8 @@ Config: host=`127.0.0.1` path=`/plaintext` conns=16 iters=20000 warmup=10000 ful
 
 | Target | req/s | ns/req | relative |
 |---|---:|---:|---:|
-| zhttp | 116663.63 | 8571.70 | 0.588x vs faf |
-| faf | 198555.05 | 5036.40 | 1.702x vs zhttp |
+| zhttp | 255297.41 | 3917.00 | 0.994x vs faf |
+| faf | 256818.97 | 3893.80 | 1.006x vs zhttp |
 
 No benchmark transport errors were reported.
 
@@ -193,8 +190,8 @@ Config: host=`127.0.0.1` path=`/plaintext` conns=16 iters=20000 warmup=10000 ful
 
 | Target | req/s | ns/req | relative |
 |---|---:|---:|---:|
-| zhttp | 441066.97 | 2267.20 | 2.924x vs faf |
-| faf | 150863.19 | 6628.50 | 0.342x vs zhttp |
+| zhttp | 917795.01 | 1089.60 | 0.982x vs faf |
+| faf | 934413.83 | 1070.20 | 1.018x vs zhttp |
 
 No benchmark transport errors were reported.
 

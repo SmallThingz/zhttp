@@ -4,8 +4,6 @@ Low-latency HTTP/1.1 server primitives for Zig with comptime routing, typed capt
 
 ![zig](https://img.shields.io/badge/zig-0.16.0--dev-f7a41d?logo=zig&logoColor=111)
 ![protocol](https://img.shields.io/badge/protocol-http%2F1.1-0f766e)
-![routing](https://img.shields.io/badge/routing-comptime-1d4ed8)
-![core](https://img.shields.io/badge/core-pure%20zig-111827)
 
 ## Features
 

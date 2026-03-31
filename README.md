@@ -163,7 +163,27 @@ See [`examples/builtin_middlewares.zig`](./examples/builtin_middlewares.zig) for
 
 Benchmark commands and modes are documented in [`benchmark/README.md`](./benchmark/README.md).
 
-### Reuse On (Default)
+### Reuse Off (`--reuse=0`)
+Use case: A server the handles client connections with no middleman \[NO proxy, NO load balancer, NO api gateway\] and short lived connections
+
+<!-- README_COMPARISON_NOREUSE:START -->
+
+Source: `benchmark/results/latest_noreuse.json`
+
+Config: host=`127.0.0.1` path=`/plaintext` conns=16 iters=5000 warmup=10000 full_request=true reuse=false
+
+| Target | req/s | ns/req | relative |
+|---|---:|---:|---:|
+| zhttp | 16013.68 | 62446.60 | 0.065x vs faf |
+| faf | 247501.67 | 4040.40 | 15.456x vs zhttp |
+
+No benchmark transport errors were reported.
+
+Fairness notes: both targets use the same benchmark client settings (host/path/conns/iters/warmup/full_request/reuse), and fixed response bytes are discovered twice then pinned per target before timed runs
+<!-- README_COMPARISON_NOREUSE:END -->
+
+### Reuse On (`--reuse=0`, Default)
+Use case: A server the uses any of proxy / load balancer / api gateway which have long lived connections
 
 <!-- README_COMPARISON:START -->
 
@@ -180,24 +200,6 @@ No benchmark transport errors were reported.
 
 Fairness notes: both targets use the same benchmark client settings (host/path/conns/iters/warmup/full_request/reuse), and fixed response bytes are discovered twice then pinned per target before timed runs
 <!-- README_COMPARISON:END -->
-
-### Reuse Off (`--no-reuse`)
-
-<!-- README_COMPARISON_NOREUSE:START -->
-
-Source: `benchmark/results/latest_noreuse.json`
-
-Config: host=`127.0.0.1` path=`/plaintext` conns=16 iters=20000 warmup=10000 full_request=true reuse=false
-
-| Target | req/s | ns/req | relative |
-|---|---:|---:|---:|
-| zhttp | 16836.08 | 59396.30 | 0.070x vs faf |
-| faf | 239869.24 | 4168.90 | 14.247x vs zhttp |
-
-No benchmark transport errors were reported.
-
-Fairness notes: both targets use the same benchmark client settings (host/path/conns/iters/warmup/full_request/reuse), and fixed response bytes are discovered twice then pinned per target before timed runs
-<!-- README_COMPARISON_NOREUSE:END -->
 
 ## Build and Validation
 

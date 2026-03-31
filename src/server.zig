@@ -41,6 +41,10 @@ pub const Config = struct {
     max_header_bytes: usize = 32 * 1024,
     /// Maximum bytes the arena can retain after a reset
     arena_reset_limit: usize = 1024 * 1024,
+    /// Maximum accepted connections handled by a temporary worker before it exits.
+    temp_worker_connection_limit: usize = 1024,
+    /// Maximum number of temporary workers alive at once. Zero means auto (= permanent worker count).
+    max_temp_workers: usize = 0,
 };
 
 fn configField(comptime cfg: anytype, comptime name: []const u8) @FieldType(Config, name) {
@@ -117,6 +121,8 @@ pub fn Server(comptime def: anytype) type {
         listener: std.Io.net.Server,
         lifecycle: std.atomic.Value(Lifecycle),
         group: Io.Group = .init,
+        busy_workers: std.atomic.Value(usize),
+        live_temp_workers: std.atomic.Value(usize),
         ctx: if (Context == void) void else *Context,
         route_static_ctx: RouteStaticCtxTuple,
 
@@ -242,6 +248,8 @@ pub fn Server(comptime def: anytype) type {
                 .gpa = gpa,
                 .listener = listener,
                 .lifecycle = std.atomic.Value(Lifecycle).init(.running),
+                .busy_workers = std.atomic.Value(usize).init(0),
+                .live_temp_workers = std.atomic.Value(usize).init(0),
                 .ctx = ctx,
                 .route_static_ctx = route_static_ctx,
             };
@@ -251,8 +259,12 @@ pub fn Server(comptime def: anytype) type {
         pub fn stop(self: *Self) void {
             if (self.lifecycle.cmpxchgStrong(.running, .stopping, .acq_rel, .acquire) != null) return;
 
-            var wake = std.Io.net.IpAddress.connect(&self.listener.socket.address, self.io, .{ .mode = .stream }) catch null;
-            if (wake) |*stream| stream.close(self.io);
+            const wake_count = permanentWorkerCount() + self.live_temp_workers.load(.acquire) + 1;
+            var i: usize = 0;
+            while (i < wake_count) : (i += 1) {
+                var wake = std.Io.net.IpAddress.connect(&self.listener.socket.address, self.io, .{ .mode = .stream }) catch null;
+                if (wake) |*stream| stream.close(self.io);
+            }
         }
 
         /// Releases resources held by this value.
@@ -267,22 +279,81 @@ pub fn Server(comptime def: anytype) type {
 
         /// Runs this component.
         pub fn run(self: *Self) Io.Cancelable!void {
-            while (true) {
-                const stream = self.listener.accept(self.io) catch |err| switch (err) {
-                    error.ProcessFdQuotaExceeded, error.SystemFdQuotaExceeded, error.SystemResources => continue, // maybe wait or smthng
-                    error.ConnectionAborted, error.BlockedByFirewall, error.ProtocolFailure => continue,
-                    error.SocketNotListening, error.Canceled => return error.Canceled,
-                    error.NetworkDown => return,
-                    error.WouldBlock => return,
-                    error.Unexpected => return,
+            var i: usize = 0;
+            while (i < permanentWorkerCount()) : (i += 1) {
+                self.group.concurrent(self.io, worker, .{self}) catch return error.Canceled;
+            }
+            self.group.concurrent(self.io, spawnTempWorkers, .{self}) catch return error.Canceled;
+            self.group.await(self.io) catch {};
+        }
+
+        fn permanentWorkerCount() usize {
+            const cpu_count = std.Thread.getCpuCount() catch 1;
+            return @max(cpu_count * 2 - 1, 1);
+        }
+
+        fn maxTempWorkerCount() usize {
+            return if (Conf.max_temp_workers == 0) permanentWorkerCount() else Conf.max_temp_workers;
+        }
+
+        fn acceptOne(self: *Self) Io.Cancelable!?std.Io.net.Stream {
+            const stream = self.listener.accept(self.io) catch |err| switch (err) {
+                error.ProcessFdQuotaExceeded, error.SystemFdQuotaExceeded, error.SystemResources => return null,
+                error.ConnectionAborted, error.BlockedByFirewall, error.ProtocolFailure => return null,
+                error.SocketNotListening, error.Canceled => return error.Canceled,
+                error.NetworkDown => return error.Canceled,
+                error.WouldBlock => return error.Canceled,
+                error.Unexpected => return error.Canceled,
+            };
+            if (self.lifecycle.load(.acquire) != .running) {
+                stream.close(self.io);
+                return error.Canceled;
+            }
+            return stream;
+        }
+
+        fn worker(self: *Self) Io.Cancelable!void {
+            while (self.lifecycle.load(.acquire) == .running) {
+                const stream = (try self.acceptOne()) orelse continue;
+                _ = self.busy_workers.fetchAdd(1, .acq_rel);
+                handleConn(self, stream) catch |err| {
+                    _ = self.busy_workers.fetchSub(1, .acq_rel);
+                    switch (err) {
+                        error.Canceled => return,
+                    }
                 };
-                if (self.lifecycle.load(.acquire) != .running) {
-                    stream.close(self.io);
-                    return;
+                _ = self.busy_workers.fetchSub(1, .acq_rel);
+            }
+        }
+
+        fn tempWorker(self: *Self) Io.Cancelable!void {
+            _ = self.live_temp_workers.fetchAdd(1, .acq_rel);
+            defer _ = self.live_temp_workers.fetchSub(1, .acq_rel);
+
+            var accepted: usize = 0;
+            while (self.lifecycle.load(.acquire) == .running and accepted < Conf.temp_worker_connection_limit) {
+                const stream = (try self.acceptOne()) orelse continue;
+                accepted += 1;
+                _ = self.busy_workers.fetchAdd(1, .acq_rel);
+                handleConn(self, stream) catch |err| {
+                    _ = self.busy_workers.fetchSub(1, .acq_rel);
+                    switch (err) {
+                        error.Canceled => return,
+                    }
+                };
+                _ = self.busy_workers.fetchSub(1, .acq_rel);
+            }
+        }
+
+        fn spawnTempWorkers(self: *Self) Io.Cancelable!void {
+            while (self.lifecycle.load(.acquire) == .running) {
+                const live_temp = self.live_temp_workers.load(.acquire);
+                const busy = self.busy_workers.load(.acquire);
+                const total_workers = permanentWorkerCount() + live_temp;
+                if (live_temp < maxTempWorkerCount() and busy >= total_workers) {
+                    self.group.concurrent(self.io, tempWorker, .{self}) catch {};
                 }
-                self.group.concurrent(self.io, handleConn, .{ self, stream }) catch {
-                    stream.close(self.io);
-                };
+                std.Io.sleep(self.io, std.Io.Duration.fromMilliseconds(1), .awake) catch return;
             }
         }
 
@@ -456,7 +527,6 @@ pub fn Server(comptime def: anytype) type {
                 }
             }.call;
         }
-
     };
 }
 

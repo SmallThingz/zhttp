@@ -167,12 +167,12 @@ Use case: A server the handles client connections with no middleman \[NO proxy, 
 
 Source: `benchmark/results/latest_noreuse.json`
 
-Config: host=`127.0.0.1` path=`/plaintext` conns=16 iters=20000 warmup=10000 full_request=true reuse=false
+Config: host=`127.0.0.1` path=`/plaintext` conns=16 iters=100000 warmup=10000 full_request=true reuse=false
 
 | Target | req/s | ns/req | relative |
 |---|---:|---:|---:|
-| zhttp | 255297.41 | 3917.00 | 0.994x vs faf |
-| faf | 256818.97 | 3893.80 | 1.006x vs zhttp |
+| zhttp | 221185.74 | 4521.10 | 0.941x vs faf |
+| faf | 234996.46 | 4255.40 | 1.062x vs zhttp |
 
 No benchmark transport errors were reported.
 
@@ -186,12 +186,12 @@ Use case: A server the uses any of proxy / load balancer / api gateway which hav
 
 Source: `benchmark/results/latest.json`
 
-Config: host=`127.0.0.1` path=`/plaintext` conns=16 iters=20000 warmup=10000 full_request=true reuse=true
+Config: host=`127.0.0.1` path=`/plaintext` conns=16 iters=100000 warmup=10000 full_request=true reuse=true
 
 | Target | req/s | ns/req | relative |
 |---|---:|---:|---:|
-| zhttp | 917795.01 | 1089.60 | 0.982x vs faf |
-| faf | 934413.83 | 1070.20 | 1.018x vs zhttp |
+| zhttp | 896833.36 | 1115.00 | 1.059x vs faf |
+| faf | 846536.83 | 1181.30 | 0.944x vs zhttp |
 
 No benchmark transport errors were reported.
 

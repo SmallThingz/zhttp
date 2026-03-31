@@ -165,21 +165,41 @@ See [`examples/builtin_middlewares.zig`](./examples/builtin_middlewares.zig) for
 
 Benchmark commands and modes are documented in [`benchmark/README.md`](./benchmark/README.md).
 
+### Reuse On (Default)
+
 <!-- README_COMPARISON:START -->
 
 Source: `benchmark/results/latest.json`
 
-Config: host=`127.0.0.1` path=`/plaintext` conns=16 iters=200000 warmup=10000 full_request=true
+Config: host=`127.0.0.1` path=`/plaintext` conns=16 iters=200000 warmup=10000 full_request=true reuse=true
 
 | Target | req/s | ns/req | relative |
 |---|---:|---:|---:|
-| zhttp | 501750.76 | 1993.00 | 1.087x vs faf |
-| faf | 461434.41 | 2167.20 | 0.920x vs zhttp |
+| zhttp | 979338.94 | 1021.10 | 1.421x vs faf |
+| faf | 688947.97 | 1451.50 | 0.703x vs zhttp |
 
 No benchmark transport errors were reported.
 
-Fairness notes: both targets use the same benchmark client settings (host/path/conns/iters/warmup/full_request), and fixed response bytes are discovered twice then pinned per target before timed runs
+Fairness notes: both targets use the same benchmark client settings (host/path/conns/iters/warmup/full_request/reuse), and fixed response bytes are discovered twice then pinned per target before timed runs
 <!-- README_COMPARISON:END -->
+
+### Reuse Off (`--no-reuse`)
+
+<!-- README_COMPARISON_NOREUSE:START -->
+
+Source: `benchmark/results/latest_noreuse.json`
+
+Config: host=`127.0.0.1` path=`/plaintext` conns=16 iters=20000 warmup=10000 full_request=true reuse=false
+
+| Target | req/s | ns/req | relative |
+|---|---:|---:|---:|
+| zhttp | 16836.08 | 59396.30 | 0.070x vs faf |
+| faf | 239869.24 | 4168.90 | 14.247x vs zhttp |
+
+No benchmark transport errors were reported.
+
+Fairness notes: both targets use the same benchmark client settings (host/path/conns/iters/warmup/full_request/reuse), and fixed response bytes are discovered twice then pinned per target before timed runs
+<!-- README_COMPARISON_NOREUSE:END -->
 
 ## Build and Validation
 

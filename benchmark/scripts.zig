@@ -3,11 +3,15 @@ const builtin = @import("builtin");
 
 const ReadmeComparisonStartMarker = "<!-- README_COMPARISON:START -->";
 const ReadmeComparisonEndMarker = "<!-- README_COMPARISON:END -->";
+const ReadmeComparisonNoReuseStartMarker = "<!-- README_COMPARISON_NOREUSE:START -->";
+const ReadmeComparisonNoReuseEndMarker = "<!-- README_COMPARISON_NOREUSE:END -->";
 const BenchmarkResultsRelDir = "benchmark/results";
 const BenchmarkLatestJsonRelPath = "benchmark/results/bench_latest.json";
 const BenchmarkLatestMdRelPath = "benchmark/results/bench_latest.md";
 const ComparisonLatestJsonRelPath = "benchmark/results/latest.json";
 const ComparisonLatestMdRelPath = "benchmark/results/latest.md";
+const ComparisonLatestNoReuseJsonRelPath = "benchmark/results/latest_noreuse.json";
+const ComparisonLatestNoReuseMdRelPath = "benchmark/results/latest_noreuse.md";
 
 pub const BenchConfig = struct {
     /// Stores `port`.
@@ -1148,19 +1152,9 @@ pub fn runFaf(
     const port_arg = try std.fmt.bufPrint(&port_buf, "--port={d}", .{cfg.port});
     const path_arg = try std.fmt.bufPrint(&path_buf, "--path={s}", .{cfg.path});
 
-    var bench_path: []const u8 = undefined;
-    if (bench_bin_opt) |p| {
-        bench_path = p;
-    } else {
-        bench_path = "./zig-out/bin/zhttp-bench";
-        const abs_bench = try std.fs.path.join(allocator, &.{ root, "zig-out", "bin", "zhttp-bench" });
-        defer allocator.free(abs_bench);
-        if (std.Io.Dir.openFileAbsolute(io, abs_bench, .{})) |file| {
-            file.close(io);
-        } else |_| {
-            return error.BenchBinaryMissing;
-        }
-    }
+    _ = bench_bin_opt;
+    try ensureBenchBinary(io, allocator, root);
+    const bench_path: []const u8 = "./zig-out/bin/zhttp-bench";
 
     var bench_args: std.ArrayList([]const u8) = .empty;
     defer bench_args.deinit(allocator);
@@ -1307,7 +1301,11 @@ fn renderCompareMarkdown(allocator: std.mem.Allocator, snap: CompareSnapshot) ![
     return out.toOwnedSlice();
 }
 
-fn renderReadmeComparisonSummary(allocator: std.mem.Allocator, snap: CompareSnapshot) ![]u8 {
+fn renderReadmeComparisonSummary(
+    allocator: std.mem.Allocator,
+    snap: CompareSnapshot,
+    source_json_rel_path: []const u8,
+) ![]u8 {
     var out: std.Io.Writer.Allocating = .init(allocator);
     errdefer out.deinit();
     const w = &out.writer;
@@ -1315,7 +1313,7 @@ fn renderReadmeComparisonSummary(allocator: std.mem.Allocator, snap: CompareSnap
     const z_rel = if (snap.faf.req_per_s == 0.0) 0.0 else snap.zhttp.req_per_s / snap.faf.req_per_s;
     const f_rel = if (snap.zhttp.req_per_s == 0.0) 0.0 else snap.faf.req_per_s / snap.zhttp.req_per_s;
 
-    try w.writeAll("Source: `benchmark/results/latest.json`\n\n");
+    try w.print("Source: `{s}`\n\n", .{source_json_rel_path});
     try w.print(
         "Config: host=`{s}` path=`{s}` conns={d} iters={d} warmup={d} full_request={} reuse={}\n\n",
         .{ snap.config.host, snap.config.path, snap.config.conns, snap.config.iters, snap.config.warmup, snap.config.full_request, snap.config.reuse },
@@ -1334,21 +1332,34 @@ fn renderReadmeComparisonSummary(allocator: std.mem.Allocator, snap: CompareSnap
     return out.toOwnedSlice();
 }
 
-fn syncReadmeComparisonSummary(io: std.Io, allocator: std.mem.Allocator, root: []const u8) !void {
+fn syncReadmeComparisonSummary(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    root: []const u8,
+    reuse: bool,
+) !void {
+    const json_rel_path = if (reuse) ComparisonLatestJsonRelPath else ComparisonLatestNoReuseJsonRelPath;
+    const readme_start = if (reuse) ReadmeComparisonStartMarker else ReadmeComparisonNoReuseStartMarker;
+    const readme_end = if (reuse) ReadmeComparisonEndMarker else ReadmeComparisonNoReuseEndMarker;
+    const missing_hint = if (reuse)
+        "Run `zig build bench-compare` to generate comparison summary."
+    else
+        "Run `zig build bench-compare -- --no-reuse` to generate no-reuse comparison summary.";
+
     const replacement = blk: {
-        const json_path = try std.fs.path.join(allocator, &.{ root, ComparisonLatestJsonRelPath });
+        const json_path = try std.fs.path.join(allocator, &.{ root, json_rel_path });
         defer allocator.free(json_path);
         const json = try readFileMaybe(io, allocator, json_path);
-        if (json == null) break :blk try allocator.dupe(u8, "Run `zig build bench-compare` to generate comparison summary.");
+        if (json == null) break :blk try allocator.dupe(u8, missing_hint);
         defer allocator.free(json.?);
         const parsed = try std.json.parseFromSlice(CompareSnapshot, allocator, json.?, .{
             .ignore_unknown_fields = true,
         });
         defer parsed.deinit();
-        break :blk try renderReadmeComparisonSummary(allocator, parsed.value);
+        break :blk try renderReadmeComparisonSummary(allocator, parsed.value, json_rel_path);
     };
     defer allocator.free(replacement);
-    try updateReadmeSection(io, allocator, root, ReadmeComparisonStartMarker, ReadmeComparisonEndMarker, replacement);
+    try updateReadmeSection(io, allocator, root, readme_start, readme_end, replacement);
 }
 
 /// Writes benchmark snapshot files.
@@ -1409,6 +1420,8 @@ pub fn writeCompareSnapshotAndSyncReadme(
     const results_dir = try std.fs.path.join(allocator, &.{ root, BenchmarkResultsRelDir });
     defer allocator.free(results_dir);
     try std.Io.Dir.createDirPath(.cwd(), io, results_dir);
+    const json_rel_path = if (cfg.reuse) ComparisonLatestJsonRelPath else ComparisonLatestNoReuseJsonRelPath;
+    const md_rel_path = if (cfg.reuse) ComparisonLatestMdRelPath else ComparisonLatestNoReuseMdRelPath;
 
     const snap: CompareSnapshot = .{
         .generated_unix = nowUnixSeconds(),
@@ -1427,23 +1440,23 @@ pub fn writeCompareSnapshotAndSyncReadme(
     };
     try json_stream.write(snap);
 
-    const json_path = try std.fs.path.join(allocator, &.{ root, ComparisonLatestJsonRelPath });
+    const json_path = try std.fs.path.join(allocator, &.{ root, json_rel_path });
     defer allocator.free(json_path);
     _ = try writeFileIfChanged(io, allocator, json_path, json_writer.written());
 
     const md = try renderCompareMarkdown(allocator, snap);
     defer allocator.free(md);
-    const md_path = try std.fs.path.join(allocator, &.{ root, ComparisonLatestMdRelPath });
+    const md_path = try std.fs.path.join(allocator, &.{ root, md_rel_path });
     defer allocator.free(md_path);
     _ = try writeFileIfChanged(io, allocator, md_path, md);
 
-    try syncReadmeComparisonSummary(io, allocator, root);
+    try syncReadmeComparisonSummary(io, allocator, root, cfg.reuse);
 
     const z_rel = if (faf.req_per_s == 0.0) 0.0 else zhttp.req_per_s / faf.req_per_s;
     const summary = try std.fmt.allocPrint(
         allocator,
-        "benchmark/results/latest.json updated\nzhttp: req/s={d:.2} ns/req={d:.2} MiB/s={d:.2} fixed_bytes={d}\nfaf: req/s={d:.2} ns/req={d:.2} MiB/s={d:.2} fixed_bytes={d}\nrelative: {d:.3}x (zhttp vs faf)\n",
-        .{ zhttp.req_per_s, zhttp.ns_per_req, zhttp.mib_per_s, zhttp.fixed_bytes, faf.req_per_s, faf.ns_per_req, faf.mib_per_s, faf.fixed_bytes, z_rel },
+        "{s} updated\nzhttp: req/s={d:.2} ns/req={d:.2} MiB/s={d:.2} fixed_bytes={d}\nfaf: req/s={d:.2} ns/req={d:.2} MiB/s={d:.2} fixed_bytes={d}\nrelative: {d:.3}x (zhttp vs faf)\n",
+        .{ json_rel_path, zhttp.req_per_s, zhttp.ns_per_req, zhttp.mib_per_s, zhttp.fixed_bytes, faf.req_per_s, faf.ns_per_req, faf.mib_per_s, faf.fixed_bytes, z_rel },
     );
     defer allocator.free(summary);
     try writeStdout(io, summary);

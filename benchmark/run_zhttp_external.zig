@@ -107,7 +107,7 @@ pub fn main(init: std.process.Init) !void {
         .host = host orelse scripts.envString(env, "HOST", "127.0.0.1"),
         .path = path orelse scripts.envString(env, "PATH_NAME", scripts.envString(env, "BENCH_PATH", "/plaintext")),
         .conns = conns orelse scripts.envInt(env, "CONNS", 1),
-        .iters = iters orelse scripts.envInt(env, "ITERS", 200000),
+        .iters = iters orelse scripts.envInt(env, "ITERS", 20000),
         .warmup = warmup orelse scripts.envInt(env, "WARMUP", 10000),
         .full_request = full_request orelse scripts.envBool(env, "FULL_REQUEST", false),
         .reuse = reuse orelse scripts.envBool(env, "REUSE", true),

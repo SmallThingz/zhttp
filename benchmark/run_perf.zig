@@ -44,7 +44,7 @@ pub fn main(init: std.process.Init) !void {
     const mode = scripts.envString(env, "MODE", "zhttp");
     const path = scripts.envString(env, "PATH_NAME", scripts.envString(env, "BENCH_PATH", "/plaintext"));
     const conns = scripts.envInt(env, "CONNS", 1);
-    const iters = scripts.envInt(env, "ITERS", 200000);
+    const iters = scripts.envInt(env, "ITERS", 20000);
     const warmup = scripts.envInt(env, "WARMUP", 10000);
     const quiet = scripts.envBool(env, "QUIET", false);
     const full_request = scripts.envBool(env, "FULL_REQUEST", false);

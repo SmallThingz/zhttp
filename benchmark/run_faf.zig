@@ -93,7 +93,7 @@ pub fn main(init: std.process.Init) !void {
     const env = init.environ_map;
     const port_val = port orelse @as(u16, @intCast(scripts.envInt(env, "PORT", 8080)));
     const conns_val = conns orelse scripts.envInt(env, "CONNS", 1);
-    const iters_val = iters orelse scripts.envInt(env, "ITERS", 200000);
+    const iters_val = iters orelse scripts.envInt(env, "ITERS", 20000);
     const warmup_val = warmup orelse scripts.envInt(env, "WARMUP", 10000);
     const full_request_val = full_request orelse scripts.envBool(env, "FULL_REQUEST", false);
     const reuse_val = reuse orelse scripts.envBool(env, "REUSE", true);

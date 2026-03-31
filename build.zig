@@ -169,11 +169,9 @@ pub fn build(b: *std.Build) void {
         }),
     });
     const bench_compare_run = b.addRunArtifact(bench_compare_exe);
-    bench_compare_run.addPrefixedArtifactArg("--bench-bin=", bench_exe);
     if (b.args) |args| {
         bench_compare_run.addArgs(args);
     }
-    bench_compare_run.step.dependOn(&bench_exe.step);
     const bench_compare_step = b.step("bench-compare", "Run fair zhttp-vs-FaF benchmark and sync README summary");
     bench_compare_step.dependOn(&bench_compare_run.step);
 

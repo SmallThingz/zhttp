@@ -22,7 +22,7 @@ const Config = struct {
     /// Stores `conns`.
     conns: usize = 1,
     /// Stores `iters`.
-    iters: u64 = 200_000,
+    iters: u64 = 20_000,
     /// Stores `warmup`.
     warmup: u64 = 10_000,
     /// Stores `fixed_bytes`.
@@ -90,7 +90,7 @@ fn usage(io: Io) void {
         \\  --port=8080         Port (external mode; zhttp mode uses 0 by default)
         \\  --path=/plaintext   Request path
         \\  --conns=1           Concurrent connections
-        \\  --iters=200000      Requests per connection
+        \\  --iters=20000       Requests per connection
         \\  --warmup=10000      Warmup requests per connection
         \\  --fixed-bytes=N     Skip auto-discovery; discard exactly N bytes/response
         \\  --full-request      Send Host/Connection headers (default is minimal request)

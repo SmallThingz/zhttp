@@ -32,6 +32,7 @@ pub fn main(init: std.process.Init) !void {
     var iters_arg: ?usize = null;
     var warmup_arg: ?usize = null;
     var full_request_arg: ?bool = null;
+    var reuse_arg: ?bool = null;
 
     var it = try std.process.Args.Iterator.initAllocator(init.minimal.args, allocator);
     defer it.deinit();
@@ -44,6 +45,10 @@ pub fn main(init: std.process.Init) !void {
         }
         if (std.mem.eql(u8, arg, "--full-request")) {
             full_request_arg = true;
+            continue;
+        }
+        if (std.mem.eql(u8, arg, "--no-reuse")) {
+            reuse_arg = false;
             continue;
         }
         if (scripts.parseKeyVal(arg)) |kv| {
@@ -71,6 +76,10 @@ pub fn main(init: std.process.Init) !void {
                 full_request_arg = !std.mem.eql(u8, kv.val, "0");
                 continue;
             }
+            if (std.mem.eql(u8, kv.key, "reuse")) {
+                reuse_arg = !std.mem.eql(u8, kv.val, "0");
+                continue;
+            }
             if (std.mem.eql(u8, kv.key, "mode")) continue;
         }
         if (std.mem.eql(u8, arg, "--help")) return;
@@ -84,6 +93,7 @@ pub fn main(init: std.process.Init) !void {
     const iters = iters_arg orelse scripts.envInt(env, "ITERS", 200000);
     const warmup = warmup_arg orelse scripts.envInt(env, "WARMUP", 10000);
     const full_request = full_request_arg orelse scripts.envBool(env, "FULL_REQUEST", true);
+    const reuse = reuse_arg orelse scripts.envBool(env, "REUSE", true);
 
     const zhttp_cfg: scripts.BenchConfig = .{
         .port = 8081,
@@ -93,6 +103,7 @@ pub fn main(init: std.process.Init) !void {
         .iters = iters,
         .warmup = warmup,
         .full_request = full_request,
+        .reuse = reuse,
     };
     const zhttp_res = scripts.runZhttpExternal(init.io, allocator, zhttp_cfg, root, init.minimal.environ) catch |err| {
         if (err == error.NetworkRestricted) reportNetworkRestricted();
@@ -108,6 +119,7 @@ pub fn main(init: std.process.Init) !void {
         .iters = iters,
         .warmup = warmup,
         .full_request = full_request,
+        .reuse = reuse,
         .fixed_bytes = zhttp_res.fixed_bytes,
     };
 
@@ -141,6 +153,7 @@ pub fn main(init: std.process.Init) !void {
         .iters = iters,
         .warmup = warmup,
         .full_request = full_request,
+        .reuse = reuse,
     };
     scripts.writeCompareSnapshotAndSyncReadme(init.io, allocator, root, compare_cfg, zhttp_res, faf_res) catch |err| {
         reportContextError("writeCompareSnapshotAndSyncReadme", err);

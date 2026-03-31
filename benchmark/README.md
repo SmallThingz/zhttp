@@ -45,8 +45,8 @@ BENCH_BIN=./zig-out/bin/zhttp-bench zig run benchmark/run_faf.zig
 
 ## Compare (external)
 
-Runs both servers with the same benchmark client settings (defaults: `FULL_REQUEST=1`, `CONNS=16`):
-- identical `host/path/conns/iters/warmup/full_request`
+Runs both servers with the same benchmark client settings (defaults: `FULL_REQUEST=1`, `CONNS=16`, `REUSE=1`):
+- identical `host/path/conns/iters/warmup/full_request/reuse`
 - fixed response bytes discovered twice per target and pinned for the timed run
 
 ```sh
@@ -72,9 +72,13 @@ Notes:
 - If `--fixed-bytes` is not provided, the benchmark auto-discovers `Content-Length` once (outside the hot loop).
 - `run_zhttp_external.zig` and `run_faf.zig` both validate response size stability by discovering fixed bytes twice before timing.
 - Use `--full-request` to send `Host:` and `Connection:` headers (default is the minimal `GET ...\r\n\r\n` request).
+- `--reuse=1` (default) reuses one keep-alive connection per worker; use `--reuse=0` / `--no-reuse` to reconnect every request.
 - For the helper scripts, set `FULL_REQUEST=1` to pass `--full-request`:
   - `FULL_REQUEST=1 zig run benchmark/run_zhttp_external.zig`
   - `FULL_REQUEST=1 zig run benchmark/run_faf.zig`
+- For helper scripts, set `REUSE=0` to disable reuse:
+  - `REUSE=0 zig run benchmark/run_zhttp_external.zig`
+  - `REUSE=0 zig run benchmark/run_faf.zig`
 
 ## perf helper
 

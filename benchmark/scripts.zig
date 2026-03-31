@@ -24,6 +24,8 @@ pub const BenchConfig = struct {
     warmup: usize,
     /// Stores `full_request`.
     full_request: bool,
+    /// Stores `reuse`.
+    reuse: bool = true,
     /// Stores `fixed_bytes`.
     fixed_bytes: ?usize = null,
     /// Stores `quiet`.
@@ -62,6 +64,8 @@ pub const CompareConfig = struct {
     warmup: usize,
     /// Stores `full_request`.
     full_request: bool,
+    /// Stores `reuse`.
+    reuse: bool = true,
 };
 
 /// Implements trim cr.
@@ -153,6 +157,7 @@ fn discoverFixedResponseBytes(io: std.Io, address: std.Io.net.IpAddress, request
     while (remaining != 0) {
         const got = try sr.interface.discard(.limited(remaining));
         if (got == 0) return error.EndOfStream;
+        if (got > remaining) return error.InvalidDiscardCount;
         remaining -= got;
     }
     return header_bytes + body_len;
@@ -623,6 +628,7 @@ pub fn runZhttpExternal(
         warmup_arg,
         fixed_arg,
     });
+    try bench_args.append(allocator, if (cfg.reuse) "--reuse=1" else "--reuse=0");
     if (cfg.full_request) try bench_args.append(allocator, "--full-request");
     if (cfg.quiet) try bench_args.append(allocator, "--quiet");
     var env = try std.process.Environ.createMap(environ, allocator);
@@ -1168,6 +1174,7 @@ pub fn runFaf(
         iters_arg,
         warmup_arg,
     });
+    try bench_args.append(allocator, if (cfg.reuse) "--reuse=1" else "--reuse=0");
     if (cfg.full_request) try bench_args.append(allocator, "--full-request");
     if (cfg.quiet) try bench_args.append(allocator, "--quiet");
     const fixed_bytes = cfg.fixed_bytes orelse fixed_first;
@@ -1250,8 +1257,8 @@ fn renderBenchmarkMarkdown(allocator: std.mem.Allocator, snap: BenchmarkSnapshot
     try w.writeAll("# zhttp Benchmark Snapshot\n\n");
     try w.print("Generated (unix): {d}\n\n", .{snap.generated_unix});
     try w.print(
-        "Config: host=`{s}` path=`{s}` conns={d} iters={d} warmup={d} full_request={}\n\n",
-        .{ snap.config.host, snap.config.path, snap.config.conns, snap.config.iters, snap.config.warmup, snap.config.full_request },
+        "Config: host=`{s}` path=`{s}` conns={d} iters={d} warmup={d} full_request={} reuse={}\n\n",
+        .{ snap.config.host, snap.config.path, snap.config.conns, snap.config.iters, snap.config.warmup, snap.config.full_request, snap.config.reuse },
     );
     try w.writeAll("| Target | req/s | ns/req | MiB/s | fixed_bytes | ok | elapsed_ns |\n");
     try w.writeAll("|---|---:|---:|---:|---:|---:|---:|\n");
@@ -1277,8 +1284,8 @@ fn renderCompareMarkdown(allocator: std.mem.Allocator, snap: CompareSnapshot) ![
     try w.writeAll("# zhttp vs FaF Benchmark Snapshot\n\n");
     try w.print("Generated (unix): {d}\n\n", .{snap.generated_unix});
     try w.print(
-        "Config: host=`{s}` path=`{s}` conns={d} iters={d} warmup={d} full_request={}\n\n",
-        .{ snap.config.host, snap.config.path, snap.config.conns, snap.config.iters, snap.config.warmup, snap.config.full_request },
+        "Config: host=`{s}` path=`{s}` conns={d} iters={d} warmup={d} full_request={} reuse={}\n\n",
+        .{ snap.config.host, snap.config.path, snap.config.conns, snap.config.iters, snap.config.warmup, snap.config.full_request, snap.config.reuse },
     );
     try w.writeAll("| Target | req/s | ns/req | MiB/s | fixed_bytes | ok | elapsed_ns | relative |\n");
     try w.writeAll("|---|---:|---:|---:|---:|---:|---:|---:|\n");
@@ -1310,8 +1317,8 @@ fn renderReadmeComparisonSummary(allocator: std.mem.Allocator, snap: CompareSnap
 
     try w.writeAll("Source: `benchmark/results/latest.json`\n\n");
     try w.print(
-        "Config: host=`{s}` path=`{s}` conns={d} iters={d} warmup={d} full_request={}\n\n",
-        .{ snap.config.host, snap.config.path, snap.config.conns, snap.config.iters, snap.config.warmup, snap.config.full_request },
+        "Config: host=`{s}` path=`{s}` conns={d} iters={d} warmup={d} full_request={} reuse={}\n\n",
+        .{ snap.config.host, snap.config.path, snap.config.conns, snap.config.iters, snap.config.warmup, snap.config.full_request, snap.config.reuse },
     );
     try w.writeAll("| Target | req/s | ns/req | relative |\n");
     try w.writeAll("|---|---:|---:|---:|\n");
@@ -1358,7 +1365,7 @@ pub fn writeBenchmarkSnapshotAndSyncFetch(
 
     const snap: BenchmarkSnapshot = .{
         .generated_unix = nowUnixSeconds(),
-        .fairness = "benchmark uses fixed response bytes discovered twice and pinned before timed runs",
+        .fairness = "benchmark uses fixed response bytes discovered twice and pinned before timed runs; benchmark client settings include reuse",
         .config = cfg,
         .zhttp = zhttp,
     };
@@ -1405,7 +1412,7 @@ pub fn writeCompareSnapshotAndSyncReadme(
 
     const snap: CompareSnapshot = .{
         .generated_unix = nowUnixSeconds(),
-        .fairness = "both targets use the same benchmark client settings (host/path/conns/iters/warmup/full_request), and fixed response bytes are discovered twice then pinned per target before timed runs",
+        .fairness = "both targets use the same benchmark client settings (host/path/conns/iters/warmup/full_request/reuse), and fixed response bytes are discovered twice then pinned per target before timed runs",
         .config = cfg,
         .zhttp = zhttp,
         .faf = faf,

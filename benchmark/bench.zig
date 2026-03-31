@@ -31,6 +31,8 @@ const Config = struct {
     minimal_request: bool = true,
     /// Stores `quiet`.
     quiet: bool = false,
+    /// Stores `reuse`.
+    reuse: bool = true,
 };
 
 const ConnResult = struct {
@@ -92,6 +94,9 @@ fn usage(io: Io) void {
         \\  --warmup=10000      Warmup requests per connection
         \\  --fixed-bytes=N     Skip auto-discovery; discard exactly N bytes/response
         \\  --full-request      Send Host/Connection headers (default is minimal request)
+        \\  --reuse=1           Reuse one keep-alive connection per worker (default)
+        \\  --reuse=0           Reconnect for every request
+        \\  --no-reuse          Alias for --reuse=0
         \\  --quiet             Print a single summary line
         \\  --help              Show this help
         \\
@@ -128,8 +133,24 @@ fn discardExact(r: *Io.Reader, n: usize) !void {
     while (remaining != 0) {
         const got = try r.discard(.limited(remaining));
         if (got == 0) return error.EndOfStream;
+        if (got > remaining) return error.InvalidDiscardCount;
         remaining -= got;
     }
+}
+
+fn runOneRequest(
+    io: Io,
+    stream: *std.Io.net.Stream,
+    read_buf: []u8,
+    write_buf: []u8,
+    request_bytes: []const u8,
+    fixed_bytes: usize,
+) !void {
+    var sr = stream.reader(io, read_buf);
+    var sw = stream.writer(io, write_buf);
+    try sw.interface.writeAll(request_bytes);
+    try sw.interface.flush();
+    try discardExact(&sr.interface, fixed_bytes);
 }
 
 fn discoverFixedResponseBytes(io: Io, address: std.Io.net.IpAddress, request_bytes: []const u8) !usize {
@@ -171,25 +192,42 @@ fn discoverFixedResponseBytes(io: Io, address: std.Io.net.IpAddress, request_byt
     return header_bytes + body_len;
 }
 
-fn benchConn(io: Io, state: *ConnState, request_bytes: []const u8, fixed_bytes: usize, iters: u64) Io.Cancelable!void {
-    var sr = state.stream.reader(io, state.read_buf);
-    var sw = state.stream.writer(io, state.write_buf);
-    defer state.stream.close(io);
+fn benchConn(
+    io: Io,
+    state: *ConnState,
+    address: std.Io.net.IpAddress,
+    request_bytes: []const u8,
+    fixed_bytes: usize,
+    iters: u64,
+    reuse: bool,
+) Io.Cancelable!void {
+    if (reuse) {
+        defer state.stream.close(io);
+        var i: u64 = 0;
+        while (i < iters) : (i += 1) {
+            runOneRequest(io, &state.stream, state.read_buf, state.write_buf, request_bytes, fixed_bytes) catch |err| {
+                state.result.err = err;
+                return;
+            };
+            state.result.completed += 1;
+        }
+        return;
+    }
 
     var i: u64 = 0;
     while (i < iters) : (i += 1) {
-        sw.interface.writeAll(request_bytes) catch |err| {
-            state.result.err = err;
-            return;
-        };
-        sw.interface.flush() catch |err| {
-            state.result.err = err;
-            return;
-        };
-        discardExact(&sr.interface, fixed_bytes) catch |err| {
-            state.result.err = err;
-            return;
-        };
+        {
+            var stream = std.Io.net.IpAddress.connect(&address, io, .{ .mode = .stream }) catch |err| {
+                state.result.err = err;
+                return;
+            };
+            defer stream.close(io);
+            setTcpNoDelay(&stream);
+            runOneRequest(io, &stream, state.read_buf, state.write_buf, request_bytes, fixed_bytes) catch |err| {
+                state.result.err = err;
+                return;
+            };
+        }
         state.result.completed += 1;
     }
 }
@@ -218,22 +256,29 @@ fn connectAndWarmup(
     request_bytes: []const u8,
     fixed_bytes: usize,
     warmup: u64,
+    reuse: bool,
 ) !void {
     for (states) |*st| {
         st.read_buf = try a.alloc(u8, 64 * 1024);
         st.write_buf = try a.alloc(u8, 4096);
-        st.stream = try std.Io.net.IpAddress.connect(&address, io, .{ .mode = .stream });
-        setTcpNoDelay(&st.stream);
-
-        if (warmup != 0) {
-            var sr = st.stream.reader(io, st.read_buf);
-            var sw = st.stream.writer(io, st.write_buf);
-
-            var i: u64 = 0;
-            while (i < warmup) : (i += 1) {
-                try sw.interface.writeAll(request_bytes);
-                try sw.interface.flush();
-                try discardExact(&sr.interface, fixed_bytes);
+        if (reuse) {
+            st.stream = try std.Io.net.IpAddress.connect(&address, io, .{ .mode = .stream });
+            setTcpNoDelay(&st.stream);
+            if (warmup != 0) {
+                var i: u64 = 0;
+                while (i < warmup) : (i += 1) {
+                    try runOneRequest(io, &st.stream, st.read_buf, st.write_buf, request_bytes, fixed_bytes);
+                }
+            }
+        } else {
+            if (warmup != 0) {
+                var i: u64 = 0;
+                while (i < warmup) : (i += 1) {
+                    var stream = try std.Io.net.IpAddress.connect(&address, io, .{ .mode = .stream });
+                    defer stream.close(io);
+                    setTcpNoDelay(&stream);
+                    try runOneRequest(io, &stream, st.read_buf, st.write_buf, request_bytes, fixed_bytes);
+                }
             }
         }
     }
@@ -255,14 +300,14 @@ fn runBenchmark(init: std.process.Init, address: std.Io.net.IpAddress, request_b
     @memset(states, .{});
     defer freeStates(a, states);
 
-    try connectAndWarmup(a, init.io, address, states, request_bytes, fixed_bytes, cfg.warmup);
+    try connectAndWarmup(a, init.io, address, states, request_bytes, fixed_bytes, cfg.warmup, cfg.reuse);
 
     var group: Io.Group = .init;
     defer group.cancel(init.io);
 
     const start = Io.Clock.Timestamp.now(init.io, .awake);
     for (states) |*st| {
-        try group.concurrent(init.io, benchConn, .{ init.io, st, request_bytes, fixed_bytes, cfg.iters });
+        try group.concurrent(init.io, benchConn, .{ init.io, st, address, request_bytes, fixed_bytes, cfg.iters, cfg.reuse });
     }
     group.await(init.io) catch {};
     const end = Io.Clock.Timestamp.now(init.io, .awake);
@@ -289,7 +334,7 @@ fn runBenchmark(init: std.process.Init, address: std.Io.net.IpAddress, request_b
         "";
 
     if (!cfg.quiet) {
-        outPrint(init.io, "{s}conns={d} iters={d} warmup={d} fixed_bytes={d}\n", .{ prefix, cfg.conns, cfg.iters, cfg.warmup, fixed_bytes });
+        outPrint(init.io, "{s}conns={d} iters={d} warmup={d} reuse={} fixed_bytes={d}\n", .{ prefix, cfg.conns, cfg.iters, cfg.warmup, cfg.reuse, fixed_bytes });
         outPrint(init.io, "{s}ok={d} elapsed_ns={d}\n", .{ prefix, total_ok, elapsed_ns });
         outPrint(init.io, "{s}req/s={d:.2} ns/req={d:.1} MiB/s={d:.2}\n", .{ prefix, rps, ns_per_req, mib_per_s });
         if (first_err) |e| outPrint(init.io, "first_error={s}\n", .{@errorName(e)});
@@ -385,6 +430,10 @@ pub fn main(init: std.process.Init) !void {
             cfg.minimal_request = false;
             continue;
         }
+        if (parseBoolFlag(arg, "no-reuse")) {
+            cfg.reuse = false;
+            continue;
+        }
 
         if (scripts.parseKeyVal(arg)) |kv| {
             if (std.mem.eql(u8, kv.key, "mode")) {
@@ -404,6 +453,8 @@ pub fn main(init: std.process.Init) !void {
                 cfg.warmup = try std.fmt.parseInt(u64, kv.val, 10);
             } else if (std.mem.eql(u8, kv.key, "fixed-bytes")) {
                 cfg.fixed_bytes = try std.fmt.parseInt(usize, kv.val, 10);
+            } else if (std.mem.eql(u8, kv.key, "reuse")) {
+                cfg.reuse = !std.mem.eql(u8, kv.val, "0");
             } else {
                 return error.UnknownArg;
             }

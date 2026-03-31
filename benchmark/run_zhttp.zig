@@ -15,6 +15,7 @@ pub fn main(init: std.process.Init) !void {
     const warmup = scripts.envInt(env, "WARMUP", 10000);
     const path = scripts.envString(env, "PATH_NAME", scripts.envString(env, "BENCH_PATH", "/plaintext"));
     const full_request = scripts.envBool(env, "FULL_REQUEST", false);
+    const reuse = scripts.envBool(env, "REUSE", true);
     const quiet = scripts.envBool(env, "QUIET", false);
     const fixed_bytes = scripts.envOptionalInt(env, "FIXED_BYTES");
 
@@ -28,6 +29,7 @@ pub fn main(init: std.process.Init) !void {
     try args.append(allocator, try std.fmt.allocPrint(allocator, "--iters={d}", .{iters}));
     try args.append(allocator, try std.fmt.allocPrint(allocator, "--warmup={d}", .{warmup}));
     try args.append(allocator, try std.fmt.allocPrint(allocator, "--path={s}", .{path}));
+    try args.append(allocator, if (reuse) "--reuse=1" else "--reuse=0");
     if (full_request) try args.append(allocator, "--full-request");
     if (quiet) try args.append(allocator, "--quiet");
     if (fixed_bytes) |v| {

@@ -18,6 +18,7 @@ pub fn main(init: std.process.Init) !void {
     var warmup: ?usize = null;
     var fixed_bytes: ?usize = null;
     var full_request: ?bool = null;
+    var reuse: ?bool = null;
     var quiet: ?bool = null;
     var it = try std.process.Args.Iterator.initAllocator(init.minimal.args, allocator);
     defer it.deinit();
@@ -30,6 +31,10 @@ pub fn main(init: std.process.Init) !void {
         }
         if (std.mem.eql(u8, arg, "--full-request")) {
             full_request = true;
+            continue;
+        }
+        if (std.mem.eql(u8, arg, "--no-reuse")) {
+            reuse = false;
             continue;
         }
         if (std.mem.eql(u8, arg, "--quiet")) {
@@ -69,6 +74,10 @@ pub fn main(init: std.process.Init) !void {
                 full_request = !std.mem.eql(u8, kv.val, "0");
                 continue;
             }
+            if (std.mem.eql(u8, kv.key, "reuse")) {
+                reuse = !std.mem.eql(u8, kv.val, "0");
+                continue;
+            }
             if (std.mem.eql(u8, kv.key, "quiet")) {
                 quiet = !std.mem.eql(u8, kv.val, "0");
                 continue;
@@ -87,6 +96,7 @@ pub fn main(init: std.process.Init) !void {
     const iters_val = iters orelse scripts.envInt(env, "ITERS", 200000);
     const warmup_val = warmup orelse scripts.envInt(env, "WARMUP", 10000);
     const full_request_val = full_request orelse scripts.envBool(env, "FULL_REQUEST", false);
+    const reuse_val = reuse orelse scripts.envBool(env, "REUSE", true);
     const quiet_val = quiet orelse scripts.envBool(env, "QUIET", false);
     const host_val = host orelse scripts.envString(env, "HOST", "127.0.0.1");
     const path_val = path orelse (env.get("PATH_NAME") orelse env.get("BENCH_PATH") orelse "/plaintext");
@@ -107,6 +117,7 @@ pub fn main(init: std.process.Init) !void {
         .iters = iters_val,
         .warmup = warmup_val,
         .full_request = full_request_val,
+        .reuse = reuse_val,
         .fixed_bytes = fixed_val,
         .quiet = quiet_val,
     };

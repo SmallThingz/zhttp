@@ -33,6 +33,7 @@ pub fn main(init: std.process.Init) !void {
     var warmup: ?usize = null;
     var fixed_bytes: ?usize = null;
     var full_request: ?bool = null;
+    var reuse: ?bool = null;
     var quiet: ?bool = null;
     var it = try std.process.Args.Iterator.initAllocator(init.minimal.args, allocator);
     defer it.deinit();
@@ -41,6 +42,10 @@ pub fn main(init: std.process.Init) !void {
         const arg: []const u8 = arg_z;
         if (std.mem.eql(u8, arg, "--full-request")) {
             full_request = true;
+            continue;
+        }
+        if (std.mem.eql(u8, arg, "--no-reuse")) {
+            reuse = false;
             continue;
         }
         if (std.mem.eql(u8, arg, "--quiet")) {
@@ -80,6 +85,10 @@ pub fn main(init: std.process.Init) !void {
                 full_request = !std.mem.eql(u8, kv.val, "0");
                 continue;
             }
+            if (std.mem.eql(u8, kv.key, "reuse")) {
+                reuse = !std.mem.eql(u8, kv.val, "0");
+                continue;
+            }
             if (std.mem.eql(u8, kv.key, "quiet")) {
                 quiet = !std.mem.eql(u8, kv.val, "0");
                 continue;
@@ -101,6 +110,7 @@ pub fn main(init: std.process.Init) !void {
         .iters = iters orelse scripts.envInt(env, "ITERS", 200000),
         .warmup = warmup orelse scripts.envInt(env, "WARMUP", 10000),
         .full_request = full_request orelse scripts.envBool(env, "FULL_REQUEST", false),
+        .reuse = reuse orelse scripts.envBool(env, "REUSE", true),
         .fixed_bytes = fixed_bytes,
         .quiet = quiet orelse false,
     };
@@ -116,6 +126,7 @@ pub fn main(init: std.process.Init) !void {
         .iters = cfg.iters,
         .warmup = cfg.warmup,
         .full_request = cfg.full_request,
+        .reuse = cfg.reuse,
     };
     scripts.writeBenchmarkSnapshotAndSyncFetch(init.io, allocator, root, readme_cfg, result) catch |err| {
         reportContextError("writeBenchmarkSnapshotAndSyncFetch", err);

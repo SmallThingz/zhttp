@@ -48,6 +48,7 @@ pub fn main(init: std.process.Init) !void {
     const warmup = scripts.envInt(env, "WARMUP", 10000);
     const quiet = scripts.envBool(env, "QUIET", false);
     const full_request = scripts.envBool(env, "FULL_REQUEST", false);
+    const reuse = scripts.envBool(env, "REUSE", true);
     const fixed_bytes = scripts.envOptionalInt(env, "FIXED_BYTES");
 
     try scripts.ensureBenchBinary(init.io, allocator, root);
@@ -60,6 +61,7 @@ pub fn main(init: std.process.Init) !void {
     try bench_args.append(allocator, try std.fmt.allocPrint(allocator, "--iters={d}", .{iters}));
     try bench_args.append(allocator, try std.fmt.allocPrint(allocator, "--warmup={d}", .{warmup}));
     try bench_args.append(allocator, try std.fmt.allocPrint(allocator, "--path={s}", .{path}));
+    try bench_args.append(allocator, if (reuse) "--reuse=1" else "--reuse=0");
     if (quiet) try bench_args.append(allocator, "--quiet");
     if (full_request) try bench_args.append(allocator, "--full-request");
     if (fixed_bytes) |v| {

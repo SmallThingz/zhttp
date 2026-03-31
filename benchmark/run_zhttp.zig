@@ -11,7 +11,7 @@ pub fn main(init: std.process.Init) !void {
     const env = init.environ_map;
 
     const conns = scripts.envInt(env, "CONNS", 1);
-    const iters = scripts.envInt(env, "ITERS", 20000);
+    const iters = scripts.envInt(env, "ITERS", 100000);
     const warmup = scripts.envInt(env, "WARMUP", 10000);
     const path = scripts.envString(env, "PATH_NAME", scripts.envString(env, "BENCH_PATH", "/plaintext"));
     const full_request = scripts.envBool(env, "FULL_REQUEST", false);

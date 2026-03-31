@@ -1,12 +1,28 @@
 const std = @import("std");
 const scripts = @import("scripts.zig");
 
+fn resolveRoot(init: std.process.Init, allocator: std.mem.Allocator) ![]u8 {
+    if (init.environ_map.get("PWD")) |pwd| return allocator.dupe(u8, pwd);
+    return std.process.currentPathAlloc(init.io, allocator);
+}
+
+fn reportContextError(context: []const u8, err: anyerror) void {
+    std.debug.print("{s} failed: {s}\n", .{ context, @errorName(err) });
+}
+
+fn reportNetworkRestricted() void {
+    std.debug.print(
+        "benchmark socket operations are blocked in this environment (NetworkRestricted / EPERM)\n",
+        .{},
+    );
+}
+
 /// Starts this executable.
 pub fn main(init: std.process.Init) !void {
     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer arena.deinit();
     const allocator = arena.allocator();
-    const root = try std.process.currentPathAlloc(init.io, allocator);
+    const root = try resolveRoot(init, allocator);
     defer allocator.free(root);
 
     var bench_bin_arg: ?[]const u8 = null;
@@ -78,7 +94,11 @@ pub fn main(init: std.process.Init) !void {
         .warmup = warmup,
         .full_request = full_request,
     };
-    const zhttp_res = try scripts.runZhttpExternal(init.io, allocator, zhttp_cfg, root, init.minimal.environ);
+    const zhttp_res = scripts.runZhttpExternal(init.io, allocator, zhttp_cfg, root, init.minimal.environ) catch |err| {
+        if (err == error.NetworkRestricted) reportNetworkRestricted();
+        reportContextError("runZhttpExternal", err);
+        return err;
+    };
 
     const faf_cfg: scripts.BenchConfig = .{
         .port = 8080,
@@ -106,7 +126,11 @@ pub fn main(init: std.process.Init) !void {
             try stderr.interface.writeAll("Install Rust (cargo + rustc), then re-run.\n");
             return err;
         },
-        else => return err,
+        else => {
+            if (err == error.NetworkRestricted) reportNetworkRestricted();
+            reportContextError("runFaf", err);
+            return err;
+        },
     };
     if (zhttp_res.fixed_bytes != faf_res.fixed_bytes) return error.FixedBytesMismatch;
 
@@ -118,5 +142,8 @@ pub fn main(init: std.process.Init) !void {
         .warmup = warmup,
         .full_request = full_request,
     };
-    try scripts.writeCompareSnapshotAndSyncReadme(init.io, allocator, root, compare_cfg, zhttp_res, faf_res);
+    scripts.writeCompareSnapshotAndSyncReadme(init.io, allocator, root, compare_cfg, zhttp_res, faf_res) catch |err| {
+        reportContextError("writeCompareSnapshotAndSyncReadme", err);
+        return err;
+    };
 }

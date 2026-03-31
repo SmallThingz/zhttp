@@ -1172,17 +1172,30 @@ pub fn Compiled(
         ) DispatchError!?Action {
             if (!@hasDecl(Endpoint, "upgrade")) return null;
             if (res.status != .switching_protocols) return null;
-            if (builtin.is_test) {
-                // Router tests use an undefined stream placeholder.
-                try response.writeUpgrade(w, res);
-                callUpgradeHandler(Endpoint, server, stream, r, w, line, res);
-            } else {
+            const use_stream_writer = if (builtin.is_test) blk: {
+                // Router unit tests pass an undefined stream placeholder.
+                // Real server tests pass a valid connected stream.
+                const handle = stream.socket.handle;
+                const T = @TypeOf(handle);
+                break :blk switch (@typeInfo(T)) {
+                    .int, .comptime_int => handle > 0,
+                    .pointer => @intFromPtr(handle) != 0,
+                    else => true,
+                };
+            } else true;
+
+            if (use_stream_writer) {
                 // `101` and all subsequent upgrade traffic must bypass the HTTP
                 // connection writer buffer.
                 var upgrade_write_buf: [0]u8 = undefined;
                 var upgrade_w = stream.writer(server.io, &upgrade_write_buf);
                 try response.writeUpgrade(&upgrade_w.interface, res);
                 callUpgradeHandler(Endpoint, server, stream, r, &upgrade_w.interface, line, res);
+            } else {
+                // Fixed-writer router unit tests do not provide a real stream.
+                try response.writeUpgrade(w, res);
+                try w.flush();
+                callUpgradeHandler(Endpoint, server, stream, r, w, line, res);
             }
             return .upgraded;
         }

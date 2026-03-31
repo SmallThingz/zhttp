@@ -1,12 +1,28 @@
 const std = @import("std");
 const scripts = @import("scripts.zig");
 
+fn resolveRoot(init: std.process.Init, allocator: std.mem.Allocator) ![]u8 {
+    if (init.environ_map.get("PWD")) |pwd| return allocator.dupe(u8, pwd);
+    return std.process.currentPathAlloc(init.io, allocator);
+}
+
+fn reportContextError(context: []const u8, err: anyerror) void {
+    std.debug.print("{s} failed: {s}\n", .{ context, @errorName(err) });
+}
+
+fn reportNetworkRestricted() void {
+    std.debug.print(
+        "benchmark socket operations are blocked in this environment (NetworkRestricted / EPERM)\n",
+        .{},
+    );
+}
+
 /// Starts this executable.
 pub fn main(init: std.process.Init) !void {
     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer arena.deinit();
     const allocator = arena.allocator();
-    const root = try std.process.currentPathAlloc(init.io, allocator);
+    const root = try resolveRoot(init, allocator);
     defer allocator.free(root);
 
     var host: ?[]const u8 = null;
@@ -88,7 +104,11 @@ pub fn main(init: std.process.Init) !void {
         .fixed_bytes = fixed_bytes,
         .quiet = quiet orelse false,
     };
-    const result = try scripts.runZhttpExternal(init.io, allocator, cfg, root, init.minimal.environ);
+    const result = scripts.runZhttpExternal(init.io, allocator, cfg, root, init.minimal.environ) catch |err| {
+        if (err == error.NetworkRestricted) reportNetworkRestricted();
+        reportContextError("runZhttpExternal", err);
+        return err;
+    };
     const readme_cfg: scripts.CompareConfig = .{
         .host = cfg.host,
         .path = cfg.path,
@@ -97,5 +117,8 @@ pub fn main(init: std.process.Init) !void {
         .warmup = cfg.warmup,
         .full_request = cfg.full_request,
     };
-    try scripts.writeBenchmarkSnapshotAndSyncFetch(init.io, allocator, root, readme_cfg, result);
+    scripts.writeBenchmarkSnapshotAndSyncFetch(init.io, allocator, root, readme_cfg, result) catch |err| {
+        reportContextError("writeBenchmarkSnapshotAndSyncFetch", err);
+        return err;
+    };
 }

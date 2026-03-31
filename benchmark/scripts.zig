@@ -112,7 +112,10 @@ fn buildRequest(a: std.mem.Allocator, host: []const u8, path: []const u8, full: 
 }
 
 fn discoverFixedResponseBytes(io: std.Io, address: std.Io.net.IpAddress, request_bytes: []const u8) !usize {
-    var stream = try std.Io.net.IpAddress.connect(&address, io, .{ .mode = .stream });
+    var stream = std.Io.net.IpAddress.connect(&address, io, .{ .mode = .stream }) catch |err| switch (err) {
+        error.Unexpected => return error.NetworkRestricted,
+        else => return err,
+    };
     defer stream.close(io);
     setTcpNoDelay(&stream);
 
@@ -155,12 +158,43 @@ fn discoverFixedResponseBytes(io: std.Io, address: std.Io.net.IpAddress, request
     return header_bytes + body_len;
 }
 
+fn isRetryableProbeError(err: anyerror) bool {
+    return err == error.ConnectionRefused or
+        err == error.ConnectionResetByPeer or
+        err == error.ConnectionTimedOut or
+        err == error.NetworkUnreachable or
+        err == error.HostUnreachable or
+        err == error.BrokenPipe or
+        err == error.EndOfStream;
+}
+
+fn discoverFixedResponseBytesWithRetries(
+    io: std.Io,
+    address: std.Io.net.IpAddress,
+    request_bytes: []const u8,
+    max_attempts: usize,
+    retry_delay_ms: i64,
+) !usize {
+    var attempt: usize = 0;
+    while (attempt < max_attempts) : (attempt += 1) {
+        const fixed = discoverFixedResponseBytes(io, address, request_bytes) catch |err| {
+            if (err == error.NetworkRestricted) return err;
+            if (!isRetryableProbeError(err) or attempt + 1 >= max_attempts) return err;
+            try std.Io.sleep(io, std.Io.Duration.fromMilliseconds(retry_delay_ms), .awake);
+            continue;
+        };
+        return fixed;
+    }
+    unreachable;
+}
+
 fn printLabel(io: std.Io, label: []const u8) void {
     var buffer: [256]u8 = undefined;
     const stdout_file = std.Io.File.stdout();
     var stdout = stdout_file.writer(io, &buffer);
     stdout.interface.writeAll(label) catch {};
     stdout.interface.writeAll("\n") catch {};
+    stdout.interface.flush() catch {};
 }
 
 /// Implements env int.
@@ -274,6 +308,14 @@ fn runCapturedBenchWithRetries(
         if (ok) return captured;
 
         if (attempt + 1 == max_attempts) {
+            var term_buf: [96]u8 = undefined;
+            const term_line = switch (captured.term) {
+                .exited => |code| std.fmt.bufPrint(&term_buf, "benchmark child exited with code={d}\n", .{code}) catch "benchmark child exited\n",
+                .signal => |sig| std.fmt.bufPrint(&term_buf, "benchmark child terminated by signal={d} ({s})\n", .{ @intFromEnum(sig), @tagName(sig) }) catch "benchmark child terminated by signal\n",
+                .stopped => |sig| std.fmt.bufPrint(&term_buf, "benchmark child stopped by signal={d}\n", .{sig}) catch "benchmark child stopped\n",
+                .unknown => |v| std.fmt.bufPrint(&term_buf, "benchmark child ended with unknown term={d}\n", .{v}) catch "benchmark child ended (unknown)\n",
+            };
+            try writeStderr(io, term_line);
             if (captured.stdout.len != 0) try writeStdout(io, captured.stdout);
             if (captured.stderr.len != 0) try writeStderr(io, captured.stderr);
             deinitCapturedRun(allocator, captured);
@@ -543,12 +585,11 @@ pub fn runZhttpExternal(
     );
     defer terminateChild(io, &server);
 
-    try std.Io.sleep(io, std.Io.Duration.fromMilliseconds(200), .awake);
     const addr = try std.Io.net.IpAddress.parseIp4(cfg.host, cfg.port);
     const req_bytes = try buildRequest(allocator, cfg.host, cfg.path, cfg.full_request);
     defer allocator.free(req_bytes);
-    const fixed_first = try discoverFixedResponseBytes(io, addr, req_bytes);
-    const fixed_second = try discoverFixedResponseBytes(io, addr, req_bytes);
+    const fixed_first = try discoverFixedResponseBytesWithRetries(io, addr, req_bytes, 120, 25);
+    const fixed_second = try discoverFixedResponseBytesWithRetries(io, addr, req_bytes, 40, 25);
     if (fixed_first != fixed_second) return error.ResponseSizeChanged;
     const fixed_bytes = cfg.fixed_bytes orelse fixed_first;
     if (cfg.fixed_bytes != null and fixed_bytes != fixed_first) return error.FixedBytesMismatch;
@@ -1068,8 +1109,8 @@ pub fn runFaf(
         };
         const term = try child.wait(io);
         switch (term) {
-            .exited => |code| if (code != 0) return error.ProcessFailed,
-            else => return error.ProcessFailed,
+            .exited => |code| if (code != 0) return error.FafCargoBuildFailed,
+            else => return error.FafCargoBuildFailed,
         }
     }
 
@@ -1081,12 +1122,11 @@ pub fn runFaf(
     );
     defer terminateChild(io, &server);
 
-    try std.Io.sleep(io, std.Io.Duration.fromMilliseconds(200), .awake);
     const addr = try std.Io.net.IpAddress.parseIp4(cfg.host, cfg.port);
     const req_bytes = try buildRequest(allocator, cfg.host, cfg.path, cfg.full_request);
     defer allocator.free(req_bytes);
-    const fixed_first = try discoverFixedResponseBytes(io, addr, req_bytes);
-    const fixed_second = try discoverFixedResponseBytes(io, addr, req_bytes);
+    const fixed_first = try discoverFixedResponseBytesWithRetries(io, addr, req_bytes, 120, 25);
+    const fixed_second = try discoverFixedResponseBytesWithRetries(io, addr, req_bytes, 40, 25);
     if (fixed_first != fixed_second) return error.ResponseSizeChanged;
 
     var conns_buf: [32]u8 = undefined;
@@ -1136,7 +1176,10 @@ pub fn runFaf(
     const fixed_arg = try std.fmt.bufPrint(&fixed_buf, "--fixed-bytes={d}", .{fixed_bytes});
     try bench_args.append(allocator, fixed_arg);
     try env.put("BENCH_LABEL", "faf ");
-    const captured = try runCapturedBenchWithRetries(io, allocator, bench_args.items, root, &env);
+    const captured = runCapturedBenchWithRetries(io, allocator, bench_args.items, root, &env) catch |err| switch (err) {
+        error.ProcessFailed => return error.FafBenchClientFailed,
+        else => return err,
+    };
     defer allocator.free(captured.stdout);
     defer allocator.free(captured.stderr);
     if (captured.stdout.len != 0) try writeStdout(io, captured.stdout);

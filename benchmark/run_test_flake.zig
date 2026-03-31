@@ -6,6 +6,7 @@ const Config = struct {
     start_seed: u32 = 1,
     jobs: usize = 1,
     retries: usize = 3,
+    timeout_seconds: u32 = 120,
     test_filter: ?[]const u8 = null,
     include_loopback_preflight: bool = false,
     verbose: bool = false,
@@ -41,6 +42,7 @@ fn usage() void {
         \\  --start-seed=<u32>               default: 1
         \\  --jobs=<n>                       default: 1
         \\  --retries=<n>                    default: 3
+        \\  --timeout-seconds=<n>            default: 120
         \\  --test-filter=<substring>        optional
         \\  --include-loopback-preflight     include that preflight test
         \\  --verbose                        print full stdout/stderr on failure
@@ -64,6 +66,15 @@ fn classify(term: std.process.Child.Term) []const u8 {
         .signal => "signal",
         .stopped => "stopped",
         .unknown => "unknown",
+    };
+}
+
+fn runTimeout(cfg: Config) std.Io.Timeout {
+    return .{
+        .duration = .{
+            .raw = std.Io.Duration.fromSeconds(@as(i64, cfg.timeout_seconds)),
+            .clock = .awake,
+        },
     };
 }
 
@@ -219,6 +230,7 @@ fn runWithSeed(
         .stdout_limit = .limited(16 * 1024 * 1024),
         .stderr_limit = .limited(16 * 1024 * 1024),
         .reserve_amount = 64 * 1024,
+        .timeout = runTimeout(cfg),
     });
 
     return .{
@@ -252,6 +264,7 @@ fn runSingleTestWithSeed(
         .stdout_limit = .limited(2 * 1024 * 1024),
         .stderr_limit = .limited(2 * 1024 * 1024),
         .reserve_amount = 16 * 1024,
+        .timeout = runTimeout(cfg),
     });
 
     return .{
@@ -329,6 +342,10 @@ pub fn main(init: std.process.Init) !void {
             cfg.retries = try parseUnsigned(usize, v);
             continue;
         }
+        if (startsWithValue(arg, "--timeout-seconds=")) |v| {
+            cfg.timeout_seconds = try parseUnsigned(u32, v);
+            continue;
+        }
         if (startsWithValue(arg, "--test-filter=")) |v| {
             cfg.test_filter = v;
             continue;
@@ -340,10 +357,11 @@ pub fn main(init: std.process.Init) !void {
     if (cfg.jobs == 0) return error.InvalidJobs;
     if (cfg.iterations == 0) return error.InvalidIterations;
     if (cfg.retries == 0) return error.InvalidRetries;
+    if (cfg.timeout_seconds == 0) return error.InvalidTimeout;
 
     std.debug.print(
-        "test-flake: iterations={d} start_seed={d} jobs={d} retries={d}\n",
-        .{ cfg.iterations, cfg.start_seed, cfg.jobs, cfg.retries },
+        "test-flake: iterations={d} start_seed={d} jobs={d} retries={d} timeout={d}s\n",
+        .{ cfg.iterations, cfg.start_seed, cfg.jobs, cfg.retries, cfg.timeout_seconds },
     );
 
     var i: usize = 0;
@@ -353,13 +371,22 @@ pub fn main(init: std.process.Init) !void {
         if (seed_u64 > std.math.maxInt(u32)) return error.SeedOverflow;
         const seed: u32 = @intCast(seed_u64);
 
-        const run = try runWithSeed(init.gpa, init.io, cfg, seed);
+        std.debug.print("  seed {d}/{d} (seed={d})\n", .{ i + 1, cfg.iterations, seed });
+
+        const run = runWithSeed(init.gpa, init.io, cfg, seed) catch |err| switch (err) {
+            error.Timeout => {
+                std.debug.print(
+                    "\nflaky failure caught at seed={d} (timeout after {d}s)\n",
+                    .{ seed, cfg.timeout_seconds },
+                );
+                printRepro(cfg, seed);
+                return error.FlakyFailureFound;
+            },
+            else => return err,
+        };
         defer freeOutcome(init.gpa, run);
 
         if (!failed(run.term)) {
-            if (((i + 1) % 10) == 0 or i + 1 == cfg.iterations) {
-                std.debug.print("  progress: {d}/{d}\n", .{ i + 1, cfg.iterations });
-            }
             continue;
         }
 
@@ -391,7 +418,13 @@ pub fn main(init: std.process.Init) !void {
         var reproduced: usize = 0;
         var r: usize = 0;
         while (r < cfg.retries) : (r += 1) {
-            const retry = try runWithSeed(init.gpa, init.io, cfg, seed);
+            const retry = runWithSeed(init.gpa, init.io, cfg, seed) catch |err| switch (err) {
+                error.Timeout => {
+                    reproduced += 1;
+                    continue;
+                },
+                else => return err,
+            };
             defer freeOutcome(init.gpa, retry);
             if (failed(retry.term)) reproduced += 1;
         }
@@ -411,7 +444,14 @@ pub fn main(init: std.process.Init) !void {
             for (failures) |f| {
                 printSingleTestRepro(seed, f.test_name);
 
-                const single = try runSingleTestWithSeed(init.gpa, init.io, cfg, seed, f.test_name);
+                const single = runSingleTestWithSeed(init.gpa, init.io, cfg, seed, f.test_name) catch |err| switch (err) {
+                    error.Timeout => {
+                        isolated_failures += 1;
+                        std.debug.print("    isolate status: timeout\n", .{});
+                        continue;
+                    },
+                    else => return err,
+                };
                 defer freeOutcome(init.gpa, single);
                 if (failed(single.term)) isolated_failures += 1;
                 std.debug.print(

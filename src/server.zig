@@ -386,6 +386,10 @@ pub fn Server(comptime def: anytype) type {
                         } else notFoundAction()(self, &sr.interface, &sw.interface, &stream, line, a) catch |err| self.handleDispatchServerError(&sw.interface, err);
                     };
 
+                    if (action == .upgraded) {
+                        close_stream = false;
+                        return;
+                    }
                     sw.interface.flush() catch return;
                     continue :blk action;
                 },
@@ -2710,7 +2714,6 @@ test "server websocket abuse: helper handshake and hostile frame mix" {
         try expectClosed(&sr.interface);
         exercised += 1;
     }
-
     try std.testing.expectEqual(@as(usize, 4), exercised);
     try std.testing.expect(ctx.upgrades >= exercised);
 }

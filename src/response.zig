@@ -91,7 +91,7 @@ pub fn Response(comptime Body: type) type {
                 try w.writeAll("\r\n");
             }
 
-            if (self.format_send_body and self.body.len != 0) {
+            if (self.format_send_body) {
                 try w.writeAll(self.body);
             }
         }
@@ -162,7 +162,7 @@ pub fn writeAny(
 
     if (Body == []const u8) {
         try writeContentLength(w, res.body.len);
-        if (send_body and res.body.len != 0) {
+        if (send_body) {
             try w.writeAll(res.body);
         }
         return;
@@ -170,7 +170,7 @@ pub fn writeAny(
 
     if (Body == [][]const u8) {
         try writeContentLength(w, segmentedContentLength(res.body));
-        if (send_body and res.body.len != 0) {
+        if (send_body) {
             try w.writeVecAll(res.body);
         }
         return;

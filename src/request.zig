@@ -202,13 +202,39 @@ fn headerIs(name: []const u8, comptime wanted: []const u8) bool {
 }
 
 fn containsTokenIgnoreCase(value: []const u8, comptime token: []const u8) bool {
-    // A minimal token scanner split on commas.
-    var it = std.mem.splitScalar(u8, value, ',');
-    while (it.next()) |part| {
-        const t = std.mem.trim(u8, part, " \t");
+    if (util.asciiEqlLower(value, token)) return true;
+
+    var i: usize = 0;
+    while (i < value.len) {
+        while (i < value.len and (value[i] == ',' or value[i] == ' ' or value[i] == '\t')) : (i += 1) {}
+        const start = i;
+        while (i < value.len and value[i] != ',') : (i += 1) {}
+        var end = i;
+        while (end > start and (value[end - 1] == ' ' or value[end - 1] == '\t')) : (end -= 1) {}
+        const t = value[start..end];
         if (util.asciiEqlLower(t, token)) return true;
     }
     return false;
+}
+
+const ParsedHeader = enum {
+    other,
+    connection,
+    content_length,
+    transfer_encoding,
+};
+
+fn asciiLower(c: u8) u8 {
+    return c | 0x20;
+}
+
+fn classifyParsedHeader(name: []const u8) ParsedHeader {
+    return switch (name.len) {
+        10 => if (asciiLower(name[0]) == 'c' and util.asciiEqlLower(name, "connection")) .connection else .other,
+        14 => if (asciiLower(name[0]) == 'c' and util.asciiEqlLower(name, "content-length")) .content_length else .other,
+        17 => if (asciiLower(name[0]) == 't' and util.asciiEqlLower(name, "transfer-encoding")) .transfer_encoding else .other,
+        else => .other,
+    };
 }
 
 fn routeParamNames(comptime pattern: []const u8) []const []const u8 {
@@ -635,17 +661,22 @@ pub fn RequestPWithPatternExt(
                 var value: []const u8 = line[col + 1 ..];
                 value = trimSpaces(value);
 
-                if (headerIs(name, "connection")) {
-                    if (containsTokenIgnoreCase(value, "close")) self._base.connection_close = true;
-                } else if (headerIs(name, "content-length")) {
-                    const parsed = std.fmt.parseInt(usize, value, 10) catch return error.BadRequest;
-                    if (content_length) |prev| {
-                        if (prev != parsed) return error.BadRequest;
-                    } else {
-                        content_length = parsed;
-                    }
-                } else if (headerIs(name, "transfer-encoding")) {
-                    if (containsTokenIgnoreCase(value, "chunked")) has_chunked = true;
+                switch (classifyParsedHeader(name)) {
+                    .connection => {
+                        if (containsTokenIgnoreCase(value, "close")) self._base.connection_close = true;
+                    },
+                    .content_length => {
+                        const parsed = std.fmt.parseInt(usize, value, 10) catch return error.BadRequest;
+                        if (content_length) |prev| {
+                            if (prev != parsed) return error.BadRequest;
+                        } else {
+                            content_length = parsed;
+                        }
+                    },
+                    .transfer_encoding => {
+                        if (containsTokenIgnoreCase(value, "chunked")) has_chunked = true;
+                    },
+                    .other => {},
                 }
 
                 if (HeaderLookup.count != 0) {

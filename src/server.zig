@@ -27,12 +27,16 @@ fn setTcpNoDelay(stream: *const std.Io.net.Stream) void {
 }
 
 pub const Config = struct {
+    /// Kernel listen backlog used when creating the server socket.
+    listen_backlog: u31 = 4096,
     /// Per-connection read buffer size.
     read_buffer: usize = 8 * 1024,
     /// Per-connection write buffer size. Zero disables buffering.
     write_buffer: usize = 4 * 1024,
     /// Enable TCP_NODELAY (disables Nagle). Off by default.
     tcp_nodelay: bool = false,
+    /// Use abortive close (`SO_LINGER {on=1, linger=0}`) for transport closes.
+    abortive_close: bool = false,
     /// Maximum request line length (bytes, including `\r\n`).
     max_request_line: usize = 8 * 1024,
     /// Maximum bytes allowed for a single header line (including line ending).
@@ -43,6 +47,10 @@ pub const Config = struct {
     arena_reset_limit: usize = 1024 * 1024,
     /// Maximum accepted connections handled by a temporary worker before it exits.
     temp_worker_connection_limit: usize = 1024,
+    /// Number of permanent accept workers. Zero means auto.
+    permanent_workers: usize = 0,
+    /// Enables temporary worker spawning under sustained pressure.
+    temp_workers: bool = true,
     /// Maximum number of temporary workers alive at once. Zero means auto (= permanent worker count).
     max_temp_workers: usize = 0,
 };
@@ -68,13 +76,19 @@ pub fn Server(comptime def: anytype) type {
     const cfg = if (@hasField(@TypeOf(def), "config")) def.config else .{};
 
     const Conf: Config = .{
+        .listen_backlog = configField(cfg, "listen_backlog"),
         .read_buffer = configField(cfg, "read_buffer"),
         .write_buffer = configField(cfg, "write_buffer"),
         .tcp_nodelay = configField(cfg, "tcp_nodelay"),
+        .abortive_close = configField(cfg, "abortive_close"),
         .max_request_line = configField(cfg, "max_request_line"),
         .max_single_header_size = configField(cfg, "max_single_header_size"),
         .max_header_bytes = configField(cfg, "max_header_bytes"),
         .arena_reset_limit = configField(cfg, "arena_reset_limit"),
+        .temp_worker_connection_limit = configField(cfg, "temp_worker_connection_limit"),
+        .permanent_workers = configField(cfg, "permanent_workers"),
+        .temp_workers = configField(cfg, "temp_workers"),
+        .max_temp_workers = configField(cfg, "max_temp_workers"),
     };
     comptime {
         if (Conf.read_buffer < Conf.max_request_line) {
@@ -134,8 +148,32 @@ pub fn Server(comptime def: anytype) type {
             closed,
         };
         const Action = router.Action;
+        const WorkerState = struct {
+            arena: std.heap.ArenaAllocator,
+            read_buf: [Conf.read_buffer]u8 = undefined,
+            write_buf: [Conf.write_buffer]u8 = undefined,
+
+            fn init(gpa: Allocator) WorkerState {
+                return .{
+                    .arena = std.heap.ArenaAllocator.init(gpa),
+                };
+            }
+
+            fn deinit(self: *WorkerState) void {
+                self.arena.deinit();
+            }
+
+            fn allocator(self: *WorkerState) Allocator {
+                return self.arena.allocator();
+            }
+
+            fn reset(self: *WorkerState) void {
+                _ = self.arena.reset(.{ .retain_with_limit = config.arena_reset_limit });
+            }
+        };
         const RouteFn = *const fn (
             server: *Self,
+            state: *WorkerState,
             r: *Io.Reader,
             w: *Io.Writer,
             stream: *const std.Io.net.Stream,
@@ -144,6 +182,7 @@ pub fn Server(comptime def: anytype) type {
         ) Compiled.DispatchError!Action;
         const NotFoundFn = *const fn (
             server: *Self,
+            state: *WorkerState,
             r: *Io.Reader,
             w: *Io.Writer,
             stream: *const std.Io.net.Stream,
@@ -240,7 +279,10 @@ pub fn Server(comptime def: anytype) type {
             address: std.Io.net.IpAddress,
             ctx: if (Context == void) void else *Context,
         ) !Self {
-            var listener = try std.Io.net.IpAddress.listen(&address, io, .{ .reuse_address = true });
+            var listener = try std.Io.net.IpAddress.listen(&address, io, .{
+                .kernel_backlog = Conf.listen_backlog,
+                .reuse_address = true,
+            });
             errdefer listener.deinit(io);
             const route_static_ctx = try initRouteStaticContexts(io, gpa);
             return .{
@@ -283,11 +325,14 @@ pub fn Server(comptime def: anytype) type {
             while (i < permanentWorkerCount()) : (i += 1) {
                 self.group.concurrent(self.io, worker, .{self}) catch return error.Canceled;
             }
-            self.group.concurrent(self.io, spawnTempWorkers, .{self}) catch return error.Canceled;
+            if (Conf.temp_workers and maxTempWorkerCount() != 0) {
+                self.group.concurrent(self.io, spawnTempWorkers, .{self}) catch return error.Canceled;
+            }
             self.group.await(self.io) catch {};
         }
 
         fn permanentWorkerCount() usize {
+            if (Conf.permanent_workers != 0) return Conf.permanent_workers;
             const cpu_count = std.Thread.getCpuCount() catch 1;
             return @max(cpu_count * 2 - 1, 1);
         }
@@ -313,35 +358,41 @@ pub fn Server(comptime def: anytype) type {
         }
 
         fn worker(self: *Self) Io.Cancelable!void {
+            var state = WorkerState.init(self.gpa);
+            defer state.deinit();
             while (self.lifecycle.load(.acquire) == .running) {
                 const stream = (try self.acceptOne()) orelse continue;
-                _ = self.busy_workers.fetchAdd(1, .acq_rel);
-                handleConn(self, stream) catch |err| {
-                    _ = self.busy_workers.fetchSub(1, .acq_rel);
+                if (Conf.temp_workers) _ = self.busy_workers.fetchAdd(1, .acq_rel);
+                handleConn(self, &state, stream) catch |err| {
+                    if (Conf.temp_workers) _ = self.busy_workers.fetchSub(1, .acq_rel);
                     switch (err) {
                         error.Canceled => return,
                     }
                 };
-                _ = self.busy_workers.fetchSub(1, .acq_rel);
+                if (Conf.temp_workers) _ = self.busy_workers.fetchSub(1, .acq_rel);
+                state.reset();
             }
         }
 
         fn tempWorker(self: *Self) Io.Cancelable!void {
             _ = self.live_temp_workers.fetchAdd(1, .acq_rel);
             defer _ = self.live_temp_workers.fetchSub(1, .acq_rel);
+            var state = WorkerState.init(self.gpa);
+            defer state.deinit();
 
             var accepted: usize = 0;
             while (self.lifecycle.load(.acquire) == .running and accepted < Conf.temp_worker_connection_limit) {
                 const stream = (try self.acceptOne()) orelse continue;
                 accepted += 1;
                 _ = self.busy_workers.fetchAdd(1, .acq_rel);
-                handleConn(self, stream) catch |err| {
+                handleConn(self, &state, stream) catch |err| {
                     _ = self.busy_workers.fetchSub(1, .acq_rel);
                     switch (err) {
                         error.Canceled => return,
                     }
                 };
                 _ = self.busy_workers.fetchSub(1, .acq_rel);
+                state.reset();
             }
         }
 
@@ -361,6 +412,14 @@ pub fn Server(comptime def: anytype) type {
             const res = response.Res.text(status, body);
             response.write(w, res, false, true) catch {};
             _ = self;
+        }
+
+        fn closeStream(self: *Self, stream: *const std.Io.net.Stream) void {
+            if (Conf.abortive_close and builtin.os.tag != .windows) {
+                const linger: std.posix.linger = .{ .onoff = 1, .linger = 0 };
+                std.posix.setsockopt(stream.socket.handle, std.posix.SOL.SOCKET, std.posix.SO.LINGER, std.mem.asBytes(&linger)) catch {};
+            }
+            stream.close(self.io);
         }
 
         fn validateErrorHandler() void {
@@ -410,27 +469,18 @@ pub fn Server(comptime def: anytype) type {
             };
         }
 
-        fn handleConn(self: *Self, stream: std.Io.net.Stream) Io.Cancelable!void {
+        fn handleConn(self: *Self, state: *WorkerState, stream: std.Io.net.Stream) Io.Cancelable!void {
             if (Conf.tcp_nodelay) setTcpNoDelay(&stream);
 
             var close_stream = true;
-            defer if (close_stream) stream.close(self.io);
+            defer if (close_stream) self.closeStream(&stream);
 
-            var read_buf: [Conf.read_buffer]u8 = undefined;
-            var write_buf: [Conf.write_buffer]u8 = undefined;
-
-            var sr = stream.reader(self.io, &read_buf);
-            var sw = stream.writer(self.io, &write_buf);
-
-            var arena = std.heap.ArenaAllocator.init(self.gpa);
-            defer arena.deinit();
+            var sr = stream.reader(self.io, &state.read_buf);
+            var sw = stream.writer(self.io, &state.write_buf);
             blk: switch (Action.@"continue") {
                 .@"continue" => {
-                    // Reuse one arena across the keep-alive loop and reset it
-                    // after each request so per-request allocations stay cheap
-                    // without leaking across requests on the same connection.
-                    const a = arena.allocator();
-                    defer _ = arena.reset(.{ .retain_with_limit = config.arena_reset_limit });
+                    const a = state.allocator();
+                    defer state.reset();
 
                     const action: Action = act: {
                         const line = request.parseRequestLineBorrowed(&sr.interface, Conf.max_request_line) catch |err| {
@@ -452,9 +502,9 @@ pub fn Server(comptime def: anytype) type {
                         };
 
                         break :act if (Compiled.match(line.method, line.path)) |idx| switch (idx) {
-                            inline 0...(Compiled.RouteCount - 1) => |c_idx| routeAction(c_idx)(self, &sr.interface, &sw.interface, &stream, line, a) catch |err| self.handleDispatchServerError(&sw.interface, err),
+                            inline 0...(Compiled.RouteCount - 1) => |c_idx| routeAction(c_idx)(self, state, &sr.interface, &sw.interface, &stream, line, a) catch |err| self.handleDispatchServerError(&sw.interface, err),
                             else => unreachable,
-                        } else notFoundAction()(self, &sr.interface, &sw.interface, &stream, line, a) catch |err| self.handleDispatchServerError(&sw.interface, err);
+                        } else notFoundAction()(self, state, &sr.interface, &sw.interface, &stream, line, a) catch |err| self.handleDispatchServerError(&sw.interface, err);
                     };
 
                     if (action == .upgraded) {
@@ -478,12 +528,14 @@ pub fn Server(comptime def: anytype) type {
             return struct {
                 fn call(
                     server: *Self,
+                    state: *WorkerState,
                     r: *Io.Reader,
                     w: *Io.Writer,
                     stream: *const std.Io.net.Stream,
                     line: request.RequestLine,
                     a: Allocator,
                 ) Compiled.DispatchError!Action {
+                    _ = state;
                     var params_buf: [Compiled.RouteParamCounts[route_index]][]u8 = undefined;
                     return Compiled.dispatch(
                         server,
@@ -505,12 +557,14 @@ pub fn Server(comptime def: anytype) type {
             return struct {
                 fn call(
                     server: *Self,
+                    state: *WorkerState,
                     r: *Io.Reader,
                     w: *Io.Writer,
                     stream: *const std.Io.net.Stream,
                     line: request.RequestLine,
                     a: Allocator,
                 ) NotFoundCompiled.DispatchError!Action {
+                    _ = state;
                     var params_buf: [NotFoundCompiled.RouteParamCounts[0]][]u8 = undefined;
                     return NotFoundCompiled.dispatch(
                         server,

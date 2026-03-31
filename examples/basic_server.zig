@@ -57,20 +57,19 @@ const User = struct {
     }
 };
 
-const SrvT = zhttp.Server(.{
-    .routes = .{
-        zhttp.get("/health", Health),
-        zhttp.get("/hello", Hello),
-        zhttp.get("/users/{id}", User),
-    },
-});
-
 /// Starts this executable.
-pub fn main(init: std.process.Init) !void {
+pub fn main(minimal: std.process.Init.Minimal) !void {
+    const gpa = std.heap.c_allocator;
+    var threaded = std.Io.Threaded.init(gpa, .{
+        .argv0 = .init(minimal.args),
+        .environ = minimal.environ,
+    });
+    const io = threaded.io();
+
     var port: u16 = 8080;
     var smoke: bool = false;
 
-    var it = try std.process.Args.Iterator.initAllocator(init.minimal.args, init.gpa);
+    var it = try std.process.Args.Iterator.initAllocator(minimal.args, gpa);
     defer it.deinit();
     _ = it.next(); // argv[0]
 
@@ -95,13 +94,17 @@ pub fn main(init: std.process.Init) !void {
         return error.UnknownArg;
     }
 
-    if (smoke) {
-        var threaded = std.Io.Threaded.init(init.gpa, .{});
-        defer threaded.deinit();
-        const io = threaded.io();
+    const SrvT = zhttp.Server(.{
+        .routes = .{
+            zhttp.get("/health", Health),
+            zhttp.get("/hello", Hello),
+            zhttp.get("/users/{id}", User),
+        },
+    });
 
+    if (smoke) {
         const addr0: std.Io.net.IpAddress = .{ .ip4 = std.Io.net.Ip4Address.loopback(0) };
-        var server = try SrvT.init(init.gpa, io, addr0, {});
+        var server = try SrvT.init(gpa, io, addr0, {});
         defer server.deinit();
         const actual_port: u16 = server.listener.socket.address.getPort();
 
@@ -162,7 +165,7 @@ pub fn main(init: std.process.Init) !void {
     }
 
     const addr: std.Io.net.IpAddress = .{ .ip4 = std.Io.net.Ip4Address.loopback(port) };
-    var server = try SrvT.init(init.gpa, init.io, addr, {});
+    var server = try SrvT.init(gpa, io, addr, {});
     defer server.deinit();
 
     std.debug.print("listening on http://127.0.0.1:{d}\n", .{port});

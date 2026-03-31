@@ -58,7 +58,15 @@ pub fn main(init: std.process.Init) !void {
         .routes = .{
             zhttp.get("/plaintext", Plaintext),
         },
-        .config = .{},
+        .config = .{
+            .listen_backlog = 65_535,
+            .tcp_nodelay = true,
+            .abortive_close = true,
+            .permanent_workers = 16,
+            .temp_workers = false,
+            .max_temp_workers = 8,
+            .temp_worker_connection_limit = 1_000_000,
+        },
     });
 
     const addr: std.Io.net.IpAddress = .{ .ip4 = std.Io.net.Ip4Address.loopback(port) };

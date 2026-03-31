@@ -105,17 +105,21 @@ fn setTcpNoDelay(stream: *const std.Io.net.Stream) void {
     }
 }
 
-fn buildRequest(a: std.mem.Allocator, host: []const u8, path: []const u8, full: bool) ![]const u8 {
+fn buildRequest(a: std.mem.Allocator, host: []const u8, path: []const u8, full: bool, reuse: bool) ![]const u8 {
     if (!full) {
-        return std.fmt.allocPrint(a, "GET {s} HTTP/1.1\r\n\r\n", .{path});
+        return if (reuse)
+            std.fmt.allocPrint(a, "GET {s} HTTP/1.1\r\n\r\n", .{path})
+        else
+            std.fmt.allocPrint(a, "GET {s} HTTP/1.1\r\nConnection: close\r\n\r\n", .{path});
     }
+    const connection = if (reuse) "keep-alive" else "close";
     return std.fmt.allocPrint(
         a,
         "GET {s} HTTP/1.1\r\n" ++
             "Host: {s}\r\n" ++
-            "Connection: keep-alive\r\n" ++
+            "Connection: {s}\r\n" ++
             "\r\n",
-        .{ path, host },
+        .{ path, host, connection },
     );
 }
 
@@ -595,7 +599,7 @@ pub fn runZhttpExternal(
     defer terminateChild(io, &server);
 
     const addr = try std.Io.net.IpAddress.parseIp4(cfg.host, cfg.port);
-    const req_bytes = try buildRequest(allocator, cfg.host, cfg.path, cfg.full_request);
+    const req_bytes = try buildRequest(allocator, cfg.host, cfg.path, cfg.full_request, cfg.reuse);
     defer allocator.free(req_bytes);
     const fixed_first = try discoverFixedResponseBytesWithRetries(io, addr, req_bytes, 120, 25);
     const fixed_second = try discoverFixedResponseBytesWithRetries(io, addr, req_bytes, 40, 25);
@@ -1133,7 +1137,7 @@ pub fn runFaf(
     defer terminateChild(io, &server);
 
     const addr = try std.Io.net.IpAddress.parseIp4(cfg.host, cfg.port);
-    const req_bytes = try buildRequest(allocator, cfg.host, cfg.path, cfg.full_request);
+    const req_bytes = try buildRequest(allocator, cfg.host, cfg.path, cfg.full_request, cfg.reuse);
     defer allocator.free(req_bytes);
     const fixed_first = try discoverFixedResponseBytesWithRetries(io, addr, req_bytes, 120, 25);
     const fixed_second = try discoverFixedResponseBytesWithRetries(io, addr, req_bytes, 40, 25);
@@ -1430,7 +1434,7 @@ pub fn writeCompareSnapshotAndSyncReadme(
         .zhttp = zhttp,
         .faf = faf,
     };
-    try ensureFixedBytesParity(snap.zhttp, snap.faf);
+    if (cfg.reuse) try ensureFixedBytesParity(snap.zhttp, snap.faf);
 
     var json_writer: std.Io.Writer.Allocating = .init(allocator);
     defer json_writer.deinit();

@@ -3,6 +3,11 @@ const zhttp = @import("zhttp");
 const common = @import("common.zig");
 const ReqCtx = zhttp.ReqCtx;
 
+pub const std_options: std.Options = .{
+    .enable_segfault_handler = false,
+    .signal_stack_size = null,
+};
+
 fn usage() void {
     std.debug.print(
         \\echo_body
@@ -70,9 +75,7 @@ pub fn main(init: std.process.Init) !void {
     }
 
     if (smoke) {
-        var threaded = std.Io.Threaded.init(init.gpa, .{});
-        defer threaded.deinit();
-        const io = threaded.io();
+        const io = init.io;
 
         const addr0: std.Io.net.IpAddress = .{ .ip4 = std.Io.net.Ip4Address.loopback(0) };
         var server = try SrvT.init(init.gpa, io, addr0, {});

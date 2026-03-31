@@ -73,9 +73,9 @@ fn refAllDeclsRecursiveSeen(comptime T: type, comptime seen: []const type) void 
 }
 
 test "loopback listen preflight" {
-    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
-    defer threaded.deinit();
-    const io = threaded.io();
+    // Use the runner-provided test IO instance directly; constructing and
+    // tearing down a fresh Threaded IO here has been unstable in ReleaseFast.
+    const io = std.testing.io;
 
     const addr0: std.Io.net.IpAddress = .{ .ip4 = std.Io.net.Ip4Address.loopback(0) };
     var listener = try std.Io.net.IpAddress.listen(&addr0, io, .{ .reuse_address = true });

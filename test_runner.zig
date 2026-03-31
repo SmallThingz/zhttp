@@ -2,8 +2,11 @@ const std = @import("std");
 const builtin = @import("builtin");
 
 pub const std_options: std.Options = .{
-    .enable_segfault_handler = true,
-    .signal_stack_size = 64 * 1024,
+    // ReleaseFast test binaries were crashing during std's segfault-handler
+    // bootstrap on this target; keep the runner stable and let the OS default
+    // signal handling terminate hard crashes.
+    .enable_segfault_handler = false,
+    .signal_stack_size = null,
 };
 
 pub const panic = std.debug.FullPanic(panicHandler);
@@ -92,31 +95,33 @@ fn fuzzBuiltin(
 }
 
 /// Starts this executable.
-pub fn main(init: std.process.Init) !void {
-    std.debug.attachSegfaultHandler();
+pub fn main(init: std.process.Init) void {
+    const code = mainImpl(init) catch |err| blk: {
+        print("test-runner fatal: {s}\n", .{@errorName(err)});
+        break :blk @as(u8, 1);
+    };
+    std.process.exit(code);
+}
 
+fn mainImpl(init: std.process.Init) !u8 {
     const threaded = std.Io.Threaded.init(init.gpa, .{
         .argv0 = .init(init.minimal.args),
         .environ = init.minimal.environ,
     });
     std.testing.io_instance = threaded;
-    defer std.testing.io_instance.deinit();
+    // NOTE: ReleaseFast teardown currently crashes in std.Io.Threaded.deinit()
+    // for this runner path after all tests have completed. Keep process-exit
+    // cleanup implicit (OS reclaim) so successful test runs do not false-fail.
     std.testing.environ = init.minimal.environ;
 
     var arg_it = try std.process.Args.Iterator.initAllocator(init.minimal.args, init.gpa);
-    defer arg_it.deinit();
 
     const argv0_z = arg_it.next() orelse "test-runner";
-    const argv0 = try init.gpa.dupe(u8, argv0_z[0..argv0_z.len]);
-    defer init.gpa.free(argv0);
+    const argv0 = argv0_z[0..argv0_z.len];
 
     var child_test_name: ?[]const u8 = null;
     var filter: ?[]const u8 = null;
-    var exclude_filters: std.ArrayList([]u8) = .empty;
-    defer {
-        for (exclude_filters.items) |f| init.gpa.free(f);
-        exclude_filters.deinit(init.gpa);
-    }
+    var exclude_filters: std.ArrayList([]const u8) = .empty;
     var jobs: ?usize = null;
     var seed: ?u32 = null;
 
@@ -124,23 +129,23 @@ pub fn main(init: std.process.Init) !void {
         const arg = arg_z[0..arg_z.len];
         if (std.mem.startsWith(u8, arg, "--zhttp-match=")) {
             const idx = std.mem.indexOfScalar(u8, arg, '=') orelse unreachable;
-            filter = try init.gpa.dupe(u8, arg[idx + 1 ..]);
+            filter = arg[idx + 1 ..];
             continue;
         }
         if (std.mem.startsWith(u8, arg, "--zhttp-skip=")) {
             const idx = std.mem.indexOfScalar(u8, arg, '=') orelse unreachable;
-            try exclude_filters.append(init.gpa, try init.gpa.dupe(u8, arg[idx + 1 ..]));
+            try exclude_filters.append(init.gpa, arg[idx + 1 ..]);
             continue;
         }
         if (std.mem.eql(u8, arg, "--zhttp-run-test")) {
             const name_z = arg_it.next() orelse return error.MissingTestName;
-            child_test_name = try init.gpa.dupe(u8, name_z[0..name_z.len]);
+            child_test_name = name_z[0..name_z.len];
         } else if (std.mem.eql(u8, arg, "--zhttp-match")) {
             const f_z = arg_it.next() orelse return error.MissingFilter;
-            filter = try init.gpa.dupe(u8, f_z[0..f_z.len]);
+            filter = f_z[0..f_z.len];
         } else if (std.mem.eql(u8, arg, "--zhttp-skip")) {
             const f_z = arg_it.next() orelse return error.MissingFilter;
-            try exclude_filters.append(init.gpa, try init.gpa.dupe(u8, f_z[0..f_z.len]));
+            try exclude_filters.append(init.gpa, f_z[0..f_z.len]);
         } else if (std.mem.eql(u8, arg, "--jobs")) {
             const j_z = arg_it.next() orelse return error.MissingJobs;
             jobs = try parseUsize(j_z[0..j_z.len]);
@@ -149,22 +154,19 @@ pub fn main(init: std.process.Init) !void {
             seed = try parseU32(s_z[0..s_z.len]);
         } else if (std.mem.eql(u8, arg, "--help")) {
             printHelp();
-            return;
+            return 0;
         } else {
             // Ignore unknown args to stay compatible with Zig's test flags.
         }
     }
 
     if (child_test_name) |name| {
-        defer init.gpa.free(name);
         const code = runSingleTest(name, seed);
-        std.process.exit(code);
+        return code;
     }
 
-    if (filter) |f| {
-        defer init.gpa.free(f);
-    }
     try runAllTests(init.gpa, init.io, argv0, filter, exclude_filters.items, jobs, seed);
+    return 0;
 }
 
 fn panicHandler(msg: []const u8, first_trace_addr: ?usize) noreturn {

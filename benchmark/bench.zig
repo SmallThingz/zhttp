@@ -232,19 +232,23 @@ fn benchConn(
     }
 }
 
-fn buildRequest(a: std.mem.Allocator, host: []const u8, path: []const u8) ![]const u8 {
+fn buildRequest(a: std.mem.Allocator, host: []const u8, path: []const u8, reuse: bool) ![]const u8 {
     _ = host;
-    return std.fmt.allocPrint(a, "GET {s} HTTP/1.1\r\n\r\n", .{path});
+    return if (reuse)
+        std.fmt.allocPrint(a, "GET {s} HTTP/1.1\r\n\r\n", .{path})
+    else
+        std.fmt.allocPrint(a, "GET {s} HTTP/1.1\r\nConnection: close\r\n\r\n", .{path});
 }
 
-fn buildFullRequest(a: std.mem.Allocator, host: []const u8, path: []const u8) ![]const u8 {
+fn buildFullRequest(a: std.mem.Allocator, host: []const u8, path: []const u8, reuse: bool) ![]const u8 {
+    const connection = if (reuse) "keep-alive" else "close";
     return std.fmt.allocPrint(
         a,
         "GET {s} HTTP/1.1\r\n" ++
             "Host: {s}\r\n" ++
-            "Connection: keep-alive\r\n" ++
+            "Connection: {s}\r\n" ++
             "\r\n",
-        .{ path, host },
+        .{ path, host, connection },
     );
 }
 
@@ -366,7 +370,9 @@ fn runZhttp(init: std.process.Init, cfg: Config) !void {
         .routes = .{
             zhttp.get("/plaintext", Plaintext),
         },
-        .config = .{},
+        .config = .{
+            .tcp_nodelay = true,
+        },
     });
 
     const bind_port: u16 = cfg.port; // default 0 (ephemeral)
@@ -384,9 +390,9 @@ fn runZhttp(init: std.process.Init, cfg: Config) !void {
     const addr: std.Io.net.IpAddress = .{ .ip4 = std.Io.net.Ip4Address.loopback(actual_port) };
     const host = "127.0.0.1";
     const request_bytes = if (cfg.minimal_request)
-        try buildRequest(init.arena.allocator(), host, cfg.path)
+        try buildRequest(init.arena.allocator(), host, cfg.path, cfg.reuse)
     else
-        try buildFullRequest(init.arena.allocator(), host, cfg.path);
+        try buildFullRequest(init.arena.allocator(), host, cfg.path, cfg.reuse);
     const fixed_bytes = cfg.fixed_bytes orelse try discoverFixedResponseBytes(init.io, addr, request_bytes);
     try runBenchmark(init, addr, request_bytes, fixed_bytes, cfg);
 
@@ -398,9 +404,9 @@ fn runExternal(init: std.process.Init, cfg: Config) !void {
     const ip4 = try std.Io.net.Ip4Address.parse(cfg.host, cfg.port);
     const addr: std.Io.net.IpAddress = .{ .ip4 = ip4 };
     const request_bytes = if (cfg.minimal_request)
-        try buildRequest(init.arena.allocator(), cfg.host, cfg.path)
+        try buildRequest(init.arena.allocator(), cfg.host, cfg.path, cfg.reuse)
     else
-        try buildFullRequest(init.arena.allocator(), cfg.host, cfg.path);
+        try buildFullRequest(init.arena.allocator(), cfg.host, cfg.path, cfg.reuse);
 
     const fixed_bytes = cfg.fixed_bytes orelse try discoverFixedResponseBytes(init.io, addr, request_bytes);
     try runBenchmark(init, addr, request_bytes, fixed_bytes, cfg);

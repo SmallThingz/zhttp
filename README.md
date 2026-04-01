@@ -179,7 +179,7 @@ No benchmark transport errors were reported.
 Fairness notes: both targets use the same benchmark client settings (host/path/conns/iters/warmup/full_request/reuse), and fixed response bytes are discovered twice then pinned per target before timed runs
 <!-- README_COMPARISON_NOREUSE:END -->
 
-### Reuse On (`--reuse=0`, Default)
+### Reuse On (`--reuse=1`, Default)
 Use case: A server the uses any of proxy / load balancer / api gateway which have long lived connections
 
 <!-- README_COMPARISON:START -->

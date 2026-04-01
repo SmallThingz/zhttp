@@ -8,7 +8,6 @@ pub const Header = struct {
 
 const HeaderLineParts = [4][]const u8;
 const empty_segment_body_const: *const [0][]const u8 = &.{};
-const inline_response_limit = 1024;
 
 pub const ChunkedWriter = struct {
     w: *std.Io.Writer,
@@ -18,10 +17,9 @@ pub const ChunkedWriter = struct {
         if (bytes.len == 0) return;
         var len_buf: [32]u8 = undefined;
         const len_hex = std.fmt.bufPrint(&len_buf, "{x}", .{bytes.len}) catch unreachable;
-        try self.w.writeAll(len_hex);
-        try self.w.writeAll("\r\n");
-        try self.w.writeAll(bytes);
-        try self.w.writeAll("\r\n");
+
+        var parts: HeaderLineParts = .{len_hex, "\r\n", bytes, "\r\n"};
+        try self.w.writeVecAll(&parts);
     }
 
     /// Writes the final zero-length chunk terminator.
@@ -29,107 +27,6 @@ pub const ChunkedWriter = struct {
         try self.w.writeAll("0\r\n\r\n");
     }
 };
-
-const InlineBuffer = struct {
-    buf: []u8,
-    len: usize = 0,
-
-    fn init(buf: []u8) InlineBuffer {
-        return .{ .buf = buf };
-    }
-
-    fn append(self: *InlineBuffer, bytes: []const u8) error{NoSpace}!void {
-        if (self.len + bytes.len > self.buf.len) return error.NoSpace;
-        @memcpy(self.buf[self.len..][0..bytes.len], bytes);
-        self.len += bytes.len;
-    }
-
-    fn appendStatusLine(self: *InlineBuffer, status: std.http.Status) error{NoSpace}!void {
-        const status_code: u16 = @intCast(@intFromEnum(status));
-        var status_buf: [3]u8 = undefined;
-        status_buf[1..3].* = digits2(@intCast(status_code % 100));
-        status_buf[0] = @intCast('0' + (status_code / 100) % 10);
-        try self.append("HTTP/1.1 ");
-        try self.append(&status_buf);
-        if (status.phrase()) |phrase| {
-            try self.append(" ");
-            try self.append(phrase);
-        }
-        try self.append("\r\n");
-    }
-
-    fn appendHeaders(self: *InlineBuffer, headers: []const Header, close_conn: bool) error{NoSpace}!void {
-        try self.append(if (close_conn) "connection: close\r\n" else "connection: keep-alive\r\n");
-        for (headers) |h| {
-            try self.append(h.name);
-            try self.append(": ");
-            try self.append(h.value);
-            try self.append("\r\n");
-        }
-    }
-
-    fn appendContentLength(self: *InlineBuffer, body_len: usize) error{NoSpace}!void {
-        var len_buf: [32]u8 = undefined;
-        const len_str = std.fmt.bufPrint(&len_buf, "{d}", .{body_len}) catch unreachable;
-        try self.append("content-length: ");
-        try self.append(len_str);
-        try self.append("\r\n\r\n");
-    }
-};
-
-fn tryWriteInlineFixed(
-    w: *std.Io.Writer,
-    status: std.http.Status,
-    headers: []const Header,
-    close_conn: bool,
-    send_body: bool,
-    body: []const u8,
-) !bool {
-    var buf: [inline_response_limit]u8 = undefined;
-    var ib: InlineBuffer = .init(buf[0..]);
-    ib.appendStatusLine(status) catch return false;
-    ib.appendHeaders(headers, close_conn) catch return false;
-    ib.appendContentLength(body.len) catch return false;
-    if (send_body) ib.append(body) catch return false;
-    try w.writeAll(buf[0..ib.len]);
-    return true;
-}
-
-fn tryWriteInlineSegmented(
-    w: *std.Io.Writer,
-    status: std.http.Status,
-    headers: []const Header,
-    close_conn: bool,
-    send_body: bool,
-    body: [][]const u8,
-) !bool {
-    const body_len = segmentedContentLength(body);
-    var buf: [inline_response_limit]u8 = undefined;
-    var ib: InlineBuffer = .init(buf[0..]);
-    ib.appendStatusLine(status) catch return false;
-    ib.appendHeaders(headers, close_conn) catch return false;
-    ib.appendContentLength(body_len) catch return false;
-    if (send_body) {
-        for (body) |part| ib.append(part) catch return false;
-    }
-    try w.writeAll(buf[0..ib.len]);
-    return true;
-}
-
-fn tryWriteInlineNoBody(
-    w: *std.Io.Writer,
-    status: std.http.Status,
-    headers: []const Header,
-    close_conn: bool,
-) !bool {
-    var buf: [inline_response_limit]u8 = undefined;
-    var ib: InlineBuffer = .init(buf[0..]);
-    ib.appendStatusLine(status) catch return false;
-    ib.appendHeaders(headers, close_conn) catch return false;
-    ib.appendContentLength(0) catch return false;
-    try w.writeAll(buf[0..ib.len]);
-    return true;
-}
 
 fn validateBodyType(comptime Body: type) void {
     if (Body == []const u8 or Body == [][]const u8 or Body == void) return;
@@ -272,44 +169,36 @@ pub fn writeAny(
 
     const close_conn = (!keep_alive) or res.close;
 
-    if (Body == []const u8) {
+    if (@hasDecl(Body, "body")) {
         try writeStatusLine(w, res.status);
         try writeHeaders(w, res.headers, close_conn);
-        try writeContentLength(w, res.body.len);
-        if (send_body) {
-            try w.writeAll(res.body);
-        }
-        return;
-    }
+        // Custom body structs always stream through chunked encoding. They receive
+        // the readonly request wrapper so serialization can inspect request state
+        // without re-entering middleware overrides.
+        try w.writeAll("transfer-encoding: chunked\r\n\r\n");
+        if (!send_body) return;
 
-    if (Body == [][]const u8) {
-        try writeStatusLine(w, res.status);
-        try writeHeaders(w, res.headers, close_conn);
-        try writeContentLength(w, segmentedContentLength(res.body));
-        if (send_body) {
-            try w.writeVecAll(res.body);
-        }
-        return;
-    }
-
-    if (Body == void) {
-        try writeStatusLine(w, res.status);
-        try writeHeaders(w, res.headers, close_conn);
-        try writeContentLength(w, 0);
-        return;
+        var cw: ChunkedWriter = .{ .w = w };
+        try @call(.auto, Body.body, .{ res.body, rctx, req_ro, &cw });
+        try cw.finish();
     }
 
     try writeStatusLine(w, res.status);
     try writeHeaders(w, res.headers, close_conn);
-    // Custom body structs always stream through chunked encoding. They receive
-    // the readonly request wrapper so serialization can inspect request state
-    // without re-entering middleware overrides.
-    try w.writeAll("transfer-encoding: chunked\r\n\r\n");
-    if (!send_body) return;
 
-    var cw: ChunkedWriter = .{ .w = w };
-    try @call(.auto, Body.body, .{ res.body, rctx, req_ro, &cw });
-    try cw.finish();
+    if (Body == []const u8) {
+        try writeContentLength(w, res.body.len);
+        if (send_body) {
+            try w.writeAll(res.body);
+        }
+    } else if (Body == [][]const u8) {
+        try writeContentLength(w, segmentedContentLength(res.body));
+        if (send_body) {
+            try w.writeVecAll(res.body);
+        }
+    } else if (Body == void) {
+        try writeContentLength(w, 0);
+    }
 }
 
 /// Writes a prebuilt upgrade response without injecting connection/body headers.

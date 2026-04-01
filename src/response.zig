@@ -273,7 +273,6 @@ pub fn writeAny(
     const close_conn = (!keep_alive) or res.close;
 
     if (Body == []const u8) {
-        if (try tryWriteInlineFixed(w, res.status, res.headers, close_conn, send_body, res.body)) return;
         try writeStatusLine(w, res.status);
         try writeHeaders(w, res.headers, close_conn);
         try writeContentLength(w, res.body.len);
@@ -284,7 +283,6 @@ pub fn writeAny(
     }
 
     if (Body == [][]const u8) {
-        if (try tryWriteInlineSegmented(w, res.status, res.headers, close_conn, send_body, res.body)) return;
         try writeStatusLine(w, res.status);
         try writeHeaders(w, res.headers, close_conn);
         try writeContentLength(w, segmentedContentLength(res.body));
@@ -295,7 +293,6 @@ pub fn writeAny(
     }
 
     if (Body == void) {
-        if (try tryWriteInlineNoBody(w, res.status, res.headers, close_conn)) return;
         try writeStatusLine(w, res.status);
         try writeHeaders(w, res.headers, close_conn);
         try writeContentLength(w, 0);

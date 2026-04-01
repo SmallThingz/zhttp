@@ -183,18 +183,38 @@ pub const ReqCtx = struct {
                 return if (read_only) self2._base.paramValue(field) else Ctx.call(@TypeOf(self2._base.paramValue(field)), "paramValue", .{ self2, field });
             }
 
+            /// Returns per-request middleware data by middleware name.
+            ///
+            /// Expected `name` shape:
+            /// - enum literal (`.auth`) or
+            /// - string (`"auth"` / byte array literal).
             pub fn middlewareData(self2: ReqSelf, comptime name: anytype) @TypeOf(self2._base.middlewareData(name)) {
                 return if (read_only) self2._base.middlewareData(name) else Ctx.call(@TypeOf(self2._base.middlewareData(name)), "middlewareData", .{ self2, name });
             }
 
+            /// Returns const per-request middleware data by middleware name.
+            ///
+            /// Expected `name` shape:
+            /// - enum literal (`.auth`) or
+            /// - string (`"auth"` / byte array literal).
             pub fn middlewareDataConst(self2: ReqSelf, comptime name: anytype) @TypeOf(self2._base.middlewareDataConst(name)) {
                 return if (read_only) self2._base.middlewareDataConst(name) else Ctx.call(@TypeOf(self2._base.middlewareDataConst(name)), "middlewareDataConst", .{ self2, name });
             }
 
+            /// Returns per-route middleware static context by middleware name.
+            ///
+            /// Expected `name` shape:
+            /// - enum literal (`.cache`) or
+            /// - string (`"cache"` / byte array literal).
             pub fn middlewareStatic(self2: ReqSelf, comptime name: anytype) @TypeOf(self2._base.middlewareStatic(name)) {
                 return if (read_only) self2._base.middlewareStatic(name) else Ctx.call(@TypeOf(self2._base.middlewareStatic(name)), "middlewareStatic", .{ self2, name });
             }
 
+            /// Returns const per-route middleware static context by middleware name.
+            ///
+            /// Expected `name` shape:
+            /// - enum literal (`.cache`) or
+            /// - string (`"cache"` / byte array literal).
             pub fn middlewareStaticConst(self2: ReqSelf, comptime name: anytype) @TypeOf(self2._base.middlewareStaticConst(name)) {
                 return if (read_only) self2._base.middlewareStaticConst(name) else Ctx.call(@TypeOf(self2._base.middlewareStaticConst(name)), "middlewareStaticConst", .{ self2, name });
             }
@@ -250,6 +270,11 @@ pub const ReqCtx = struct {
     }
 
     /// Handles a middleware invocation for the current request context.
+    ///
+    /// Expected `params` shape:
+    /// - non-empty tuple
+    /// - first element is the active request wrapper (`self.T()`)
+    /// - optional second element is the forwarded method argument.
     pub fn call(comptime self: Self, comptime ReturnT: type, comptime func_name: []const u8, params: anytype) ReturnT {
         const params_len = comptime assertTupleWithReq(@TypeOf(params));
 

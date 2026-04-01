@@ -270,6 +270,16 @@ fn routeParamNames(comptime pattern: []const u8) []const []const u8 {
     return out[0..];
 }
 
+/// Builds a typed request wrapper for one concrete route declaration.
+///
+/// Expected shape:
+/// - `ServerPtr` is `*Server` and pointee exposes:
+///   - fields: `io`, `gpa`, `ctx`
+///   - `pub fn RouteStaticType(comptime route_index: usize) type`
+///   - `pub fn routeStatic(self: *Server, comptime route_index: usize) *RouteStaticType(route_index)`
+///   - `pub fn routeStaticConst(self: *const Server, comptime route_index: usize) *const RouteStaticType(route_index)`
+/// - `rd` is a fully resolved `zhttp.route_decl.RouteDecl`.
+/// - `MwCtx` is the merged per-request middleware context type for that route.
 pub fn RequestPWithPatternExt(
     comptime ServerPtr: type,
     comptime route_index: usize,
@@ -544,21 +554,37 @@ pub fn RequestPWithPatternExt(
         }
 
         /// Get a pointer to middleware data by name, e.g. `req.middlewareData(.auth)`.
+        ///
+        /// Expected `name` shape:
+        /// - enum literal (`.auth`) or
+        /// - string (`"auth"` / `&[_]u8{...}`).
         pub fn middlewareData(self: *Self, comptime name: anytype) *middlewareContextFieldType(MwCtx, name) {
             return &@field(self._mw_ctx, middlewareContextFieldName(MwCtx, name));
         }
 
         /// Get a const pointer to middleware data by name, e.g. `req.middlewareDataConst(.auth)`.
+        ///
+        /// Expected `name` shape:
+        /// - enum literal (`.auth`) or
+        /// - string (`"auth"` / `&[_]u8{...}`).
         pub fn middlewareDataConst(self: *const Self, comptime name: anytype) *const middlewareContextFieldType(MwCtx, name) {
             return &@field(self._mw_ctx, middlewareContextFieldName(MwCtx, name));
         }
 
         /// Get a pointer to middleware static context by name, e.g. `req.middlewareStatic(.cache)`.
+        ///
+        /// Expected `name` shape:
+        /// - enum literal (`.cache`) or
+        /// - string (`"cache"` / `&[_]u8{...}`).
         pub fn middlewareStatic(self: *Self, comptime name: anytype) *middlewareContextFieldType(MwStaticCtx, name) {
             return &@field(self.mwStaticCtxMut().*, middlewareContextFieldName(MwStaticCtx, name));
         }
 
         /// Get a const pointer to middleware static context by name.
+        ///
+        /// Expected `name` shape:
+        /// - enum literal (`.cache`) or
+        /// - string (`"cache"` / `&[_]u8{...}`).
         pub fn middlewareStaticConst(self: *const Self, comptime name: anytype) *const middlewareContextFieldType(MwStaticCtx, name) {
             return &@field(self.mwStaticCtxConst().*, middlewareContextFieldName(MwStaticCtx, name));
         }
@@ -1010,6 +1036,13 @@ fn syntheticPatternFromParamNames(comptime param_names: []const []const u8) []co
     return out;
 }
 
+/// Builds a standalone request type for tests/helpers without a full server.
+///
+/// Expected shape:
+/// - `Headers` and `Query` are capture structs where each field type follows
+///   the parser contract (`empty`, `parse`, `doneParsing`, `get`, `destroy`).
+/// - `param_names` is the list of path param names to synthesize as `/{name}`.
+/// - `MwCtx` is the middleware context struct returned by `middleware.contextType(...)`.
 pub fn Request(comptime Headers: type, comptime Query: type, comptime param_names: []const []const u8, comptime MwCtx: type) type {
     const route_pattern = syntheticPatternFromParamNames(param_names);
     const rd: route_decl.RouteDecl = .{

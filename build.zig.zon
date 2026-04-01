@@ -13,8 +13,8 @@
             .hash = "libbrotli-0.0.0-JbJ8NTpyAADhR_VOJA99Z-n5A3JP9swAyc7-d7X1KxVq",
         },
         .zwebsocket = .{
-            .url = "git+https://github.com/SmallThingz/zws#752c4021e04f59b946a49e47f5565c2f1af9377c",
-            .hash = "zwebsocket-0.0.0-DxX8cNk5BAC4IHyXaATaj0HV5Jl3jTZeXVQKwg35Cp1d",
+            .url = "git+https://github.com/SmallThingz/zws#3fa028f9e493710e5358212312025120cc0ecc29",
+            .hash = "zwebsocket-0.0.0-DxX8cDw4BACkv0M9ZCR14meb4FrnnNCMz0X-OUEN72co",
         },
     },
     .paths = .{

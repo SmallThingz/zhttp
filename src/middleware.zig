@@ -35,6 +35,10 @@ pub const MiddlewareInfo = struct {
 pub const StaticContextRouteDecl = route_decl.RouteDecl;
 
 /// Validates and returns middleware metadata.
+///
+/// Expected middleware type shape:
+/// - `pub const Info: zhttp.middleware.MiddlewareInfo`
+/// - `pub fn call(comptime rctx: zhttp.ReqCtx, req: rctx.T()) !Res`
 pub fn info(comptime Mw: type) MiddlewareInfo {
     if (!@hasDecl(Mw, "Info")) {
         @compileError("middleware " ++ @typeName(Mw) ++ " must expose `pub const Info: zhttp.middleware.MiddlewareInfo`");
@@ -77,6 +81,10 @@ pub fn info(comptime Mw: type) MiddlewareInfo {
 }
 
 /// Merges all middleware header capture requirements.
+///
+/// Expected input shape:
+/// - `mws` is accepted by `typeList` (tuple / `[]const type` / `[N]type` / `*const [N]type`)
+/// - every middleware type in `mws` satisfies `info(...)` shape checks
 pub fn needsHeaders(comptime mws: anytype) type {
     comptime {
         @setEvalBranchQuota(200_000);
@@ -93,6 +101,9 @@ pub fn needsHeaders(comptime mws: anytype) type {
 }
 
 /// Merges all middleware query capture requirements.
+///
+/// Expected input shape:
+/// - same as `needsHeaders`.
 pub fn needsQuery(comptime mws: anytype) type {
     comptime {
         @setEvalBranchQuota(200_000);
@@ -109,6 +120,9 @@ pub fn needsQuery(comptime mws: anytype) type {
 }
 
 /// Merges all middleware path capture requirements.
+///
+/// Expected input shape:
+/// - same as `needsHeaders`.
 pub fn needsParams(comptime mws: anytype) type {
     comptime {
         @setEvalBranchQuota(200_000);
@@ -164,6 +178,10 @@ fn initData(comptime Mw: type) dataType(Mw) {
 }
 
 /// Builds the middleware context struct type used by requests.
+///
+/// Expected input shape:
+/// - `mws` is accepted by `typeList`.
+/// - each middleware with `Info.data` uses a struct-compatible type.
 pub fn contextType(comptime mws: anytype) type {
     const list = typeList(mws);
     comptime var field_count: usize = 0;
@@ -225,6 +243,10 @@ pub fn contextType(comptime mws: anytype) type {
 }
 
 /// Initializes middleware context values for one request.
+///
+/// Expected input shape:
+/// - `mws` is accepted by `typeList`.
+/// - `Ctx` is exactly the type returned by `contextType(mws)`.
 pub fn initContext(comptime mws: anytype, comptime Ctx: type) Ctx {
     const list = typeList(mws);
     var ctx: Ctx = std.mem.zeroes(Ctx);
@@ -249,6 +271,10 @@ pub fn initContext(comptime mws: anytype, comptime Ctx: type) Ctx {
 }
 
 /// Builds the per-route static middleware context struct type.
+///
+/// Expected input shape:
+/// - `mws` is accepted by `typeList`.
+/// - each middleware optional `Info.static_context` is a struct type.
 pub fn staticContextType(comptime mws: anytype) type {
     const list = typeList(mws);
     comptime var field_count: usize = 0;
@@ -310,6 +336,12 @@ pub fn staticContextType(comptime mws: anytype) type {
 }
 
 /// Initializes per-route static middleware context values.
+///
+/// Expected shape:
+/// - `Ctx` is the type returned by `staticContextType(...)`.
+/// - for each field type `S` in `Ctx`, optional hooks are:
+///   `pub fn init(io: std.Io, allocator: std.mem.Allocator, route_decl: zhttp.route_decl.RouteDecl) S|!S`
+///   `pub fn deinit(self: *S, io: std.Io, allocator: std.mem.Allocator) void|!void`
 pub fn initStaticContext(
     comptime Ctx: type,
     io: std.Io,
@@ -361,6 +393,11 @@ pub fn initStaticContext(
 }
 
 /// Tears down per-route static middleware context values.
+///
+/// Expected shape:
+/// - `Ctx` is the type returned by `staticContextType(...)`.
+/// - each field type optional `deinit` hook matches:
+///   `pub fn deinit(self: *Self, io: std.Io, allocator: std.mem.Allocator) void|!void`
 pub fn deinitStaticContext(
     comptime Ctx: type,
     io: std.Io,
@@ -385,6 +422,10 @@ pub fn deinitStaticContext(
 }
 
 /// Returns middleware context schema entries used by `ReqCtx`.
+///
+/// Expected input shape:
+/// - `mws` is accepted by `typeList`.
+/// - every middleware satisfies `info(...)` checks.
 pub fn contextST(comptime mws: anytype) []const req_ctx.ST {
     const list = typeList(mws);
     comptime var count: usize = 0;
@@ -439,6 +480,12 @@ pub fn contextST(comptime mws: anytype) []const req_ctx.ST {
 }
 
 /// Returns middleware tuple elements as a flat `[]const type`.
+///
+/// Accepted `mws` shapes:
+/// - tuple of middleware types (`.{ MwA, MwB }`)
+/// - `[]const type`
+/// - `[N]type`
+/// - `*const [N]type`
 pub fn typeList(comptime mws: anytype) []const type {
     const T = @TypeOf(mws);
     return switch (@typeInfo(T)) {
@@ -473,6 +520,7 @@ pub fn typeList(comptime mws: anytype) []const type {
     };
 }
 
+/// Concatenates two middleware type lists.
 pub fn concatTypeLists(comptime a: []const type, comptime b: []const type) []const type {
     if (a.len == 0) return b;
     if (b.len == 0) return a;

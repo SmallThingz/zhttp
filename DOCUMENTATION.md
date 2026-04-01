@@ -28,6 +28,149 @@ Each endpoint type provides metadata in `EndpointInfo`:
 
 Global middlewares/operations are configured in `Server(.{ ... })`.
 
+## 1.1 Type/Anytype Shape Contracts (Function-by-Function)
+
+This section is the explicit contract for every public API that takes `type`/`anytype` style inputs.
+
+### Endpoint and server contracts
+
+- `zhttp.Server(def: anytype)`
+  - `def.routes` is required and is a tuple/struct of `zhttp.get/post/...` route declarations.
+  - optional `def.middlewares` is a middleware tuple (`.{ MwA, MwB, ... }`).
+  - optional `def.operations` is an operation tuple (`.{ OpA, OpB, ... }`).
+  - each route endpoint type must expose:
+    - `pub const Info: zhttp.router.EndpointInfo`
+    - `pub fn call(comptime rctx: zhttp.ReqCtx, req: rctx.T()) !rctx.Response(Body)`
+    - optional upgrade hook:
+      `pub fn upgrade(server, stream, r, w, line, res) void`
+
+- `zhttp.router.route(..., endpoint: type)` and `zhttp.router.get/post/put/delete/patch/head/options`
+  - same endpoint shape as above.
+
+- `zhttp.router.Compiled(Context, routes: anytype, global_middlewares: anytype)`
+  - `routes` is a tuple of `RouteDecl` values.
+  - `global_middlewares` is accepted by `middleware.typeList` (tuple / `[]const type` / `[N]type` / `*const [N]type`).
+
+### Middleware contracts
+
+- `zhttp.middleware.info(Mw: type)`
+  - middleware type must expose:
+    - `pub const Info: zhttp.middleware.MiddlewareInfo`
+    - `pub fn call(comptime rctx: zhttp.ReqCtx, req: rctx.T()) !Res`
+
+- `zhttp.middleware.needsHeaders/needsQuery/needsParams(mws: anytype)`
+- `zhttp.middleware.contextType(mws: anytype)`
+- `zhttp.middleware.staticContextType(mws: anytype)`
+- `zhttp.middleware.contextST(mws: anytype)`
+  - `mws` must be accepted by `zhttp.middleware.typeList`.
+  - each middleware in `mws` must satisfy `middleware.info(...)` checks.
+
+- `zhttp.middleware.initContext(mws: anytype, Ctx: type)`
+  - `Ctx` must be the exact type returned by `contextType(mws)`.
+
+- `zhttp.middleware.initStaticContext(Ctx: type, ...)` / `deinitStaticContext(Ctx: type, ...)`
+  - `Ctx` should be the exact type returned by `staticContextType(...)`.
+  - each static context field type may expose:
+    - `pub fn init(io: std.Io, allocator: std.mem.Allocator, route_decl: zhttp.route_decl.RouteDecl) Self | !Self`
+    - `pub fn deinit(self: *Self, io: std.Io, allocator: std.mem.Allocator) void | !void`
+
+- `zhttp.middleware.typeList(mws: anytype)`
+  - accepted input shapes:
+    - tuple of middleware types
+    - `[]const type`
+    - `[N]type`
+    - `*const [N]type`
+
+### Operation contracts
+
+- `zhttp.operations.apply(routes_tuple: anytype, global_middlewares_tuple: anytype, operations_tuple: anytype)`
+  - `routes_tuple` is a tuple of `RouteDecl`.
+  - `global_middlewares_tuple` is accepted by `middleware.typeList`.
+  - each operation type in `operations_tuple` exposes:
+    - `pub fn operation(comptime opctx: zhttp.operations.OperationCtx, router: opctx.T()) void`
+    - optional `pub fn maxAddedRoutes(comptime base_route_count: usize) usize`
+
+### Response/body contracts
+
+- `zhttp.response.Response(Body: type)`
+  - `Body` can be:
+    - `[]const u8`
+    - `[][]const u8`
+    - `void`
+    - custom struct with:
+      `pub fn body(self: @This(), comptime rctx: zhttp.ReqCtx, req: rctx.TReadOnly(), cw: *zhttp.response.ChunkedWriter) !void`
+
+- `zhttp.response.writeAny(rctx: anytype, req_ro: anytype, w, res: anytype, ...)`
+  - `rctx` is a `zhttp.ReqCtx` value.
+  - `req_ro` is `rctx.TReadOnly()`.
+  - `res` is `zhttp.response.Response(Body)` (or a compatible struct with `status`, `headers`, `body`, optional `close`).
+
+- `zhttp.response.writeUpgrade(w, res: anytype)`
+  - `res` must expose `status` and `headers`.
+
+### Request parsing and request-wrapper contracts
+
+- `zhttp.request.RequestPWithPatternExt(ServerPtr: type, route_index, rd, MwCtx)`
+  - `ServerPtr` is `*Server` where pointee exposes:
+    - fields: `io`, `gpa`, `ctx`
+    - `RouteStaticType(route_index)`
+    - `routeStatic(route_index)`
+    - `routeStaticConst(route_index)`
+  - `rd` is a resolved `RouteDecl`.
+  - `MwCtx` is merged middleware request-context type for that route.
+
+- `zhttp.request.Request(Headers: type, Query: type, param_names, MwCtx: type)`
+  - `Headers` and `Query` are capture structs whose field types follow parser contract (below).
+  - `MwCtx` is the middleware context struct type.
+
+- request helpers that take `name: anytype`:
+  - `req.middlewareData(name)`
+  - `req.middlewareDataConst(name)`
+  - `req.middlewareStatic(name)`
+  - `req.middlewareStaticConst(name)`
+  - accepted `name` shapes:
+    - enum literal (for example `.auth`)
+    - string/byte-array literal (for example `"auth"`)
+
+### Upgrade helper contracts
+
+- `zhttp.upgrade.websocketHandshakeRequest(req: anytype)`
+  - `req` must expose:
+    - `method`
+    - `baseConst().version`
+    - `header(.connection/.upgrade/.sec_websocket_key/.sec_websocket_version/.sec_websocket_protocol/.sec_websocket_extensions/.origin/.host)`
+
+- `zhttp.upgrade.acceptWebSocket(req: anytype, opts)`
+  - same requirements as `websocketHandshakeRequest(req)`
+  - plus `req.allocator()`.
+
+### Parse helper contracts
+
+Parser field type contract used by `zhttp.parse` helpers:
+
+```zig
+const Parser = struct {
+    pub const empty: @This() = .{};
+    pub fn parse(self: *@This(), allocator: std.mem.Allocator, raw: []const u8) !void {}
+    pub fn doneParsing(self: *@This(), was_present: bool) !void {}
+    pub fn get(self: *const @This()) ValueType { ... }
+    pub fn destroy(self: *@This(), allocator: std.mem.Allocator) void {}
+};
+```
+
+- `zhttp.parse.structFields(T: type)` -> `T` must be `struct`.
+- `zhttp.parse.emptyStruct(T: type)` -> every field type in `T` provides `empty`.
+- `zhttp.parse.destroyStruct(value: anytype, allocator)` -> `value` is `*Struct`, fields provide `destroy`.
+- `zhttp.parse.doneParsingStruct(value: anytype, present)` -> `value` is `*Struct`, fields provide `doneParsing`, `present.len` matches field count.
+- `zhttp.parse.Lookup(T: type, kind)` -> `T` is `struct` capture schema with no duplicate keys after normalization.
+- `zhttp.parse.mergeStructs(A: type, B: type)` -> both structs; duplicate field names must have identical types.
+- `zhttp.parse.mergeHeaderStructs(A: type, B: type)` -> same as above but key matching is case-insensitive and `_` equals `-`.
+- `zhttp.parse.mergeStructsMany(types_tuple: anytype)` -> tuple of struct types.
+- `zhttp.parse.Optional(P: type)` / `zhttp.parse.SliceOf(P: type)` -> `P` follows parser contract.
+- `zhttp.parse.Int(T: type)` -> integer type.
+- `zhttp.parse.Float(T: type)` -> float type.
+- `zhttp.parse.Enum(E: type)` -> enum type.
+
 ## 2. Writing a Middleware
 
 ## 2.1 Required shape
@@ -137,7 +280,7 @@ Name dedup behavior:
 Type can expose:
 
 ```zig
-pub fn init(io: std.Io, allocator: std.mem.Allocator, route_decl: anytype) Self | !Self
+pub fn init(io: std.Io, allocator: std.mem.Allocator, route_decl: zhttp.route_decl.RouteDecl) Self | !Self
 ```
 
 If omitted, zero-init is used.

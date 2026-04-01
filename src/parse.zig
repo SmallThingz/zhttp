@@ -22,6 +22,10 @@ fn isStructType(comptime T: type) bool {
     };
 }
 
+/// Returns compile-time field metadata for a struct type.
+///
+/// Expected shape:
+/// - `T` is a `struct` type.
 pub fn structFields(comptime T: type) []const std.builtin.Type.StructField {
     const info = @typeInfo(T);
     return switch (info) {
@@ -30,6 +34,11 @@ pub fn structFields(comptime T: type) []const std.builtin.Type.StructField {
     };
 }
 
+/// Returns the parser-empty value for every field in `T`.
+///
+/// Expected shape:
+/// - `T` is a `struct`.
+/// - Every field type `P` in `T` exposes `pub const empty: P`.
 pub fn emptyStruct(comptime T: type) T {
     var out: T = undefined;
     const fields = comptime structFields(T);
@@ -41,6 +50,12 @@ pub fn emptyStruct(comptime T: type) T {
     return out;
 }
 
+/// Calls `destroy(allocator)` on each field parser in a capture struct.
+///
+/// Expected shape:
+/// - `value` is `*T` where `T` is a `struct`.
+/// - Every field type `P` in `T` exposes:
+///   `pub fn destroy(self: *P, allocator: std.mem.Allocator) void`.
 pub fn destroyStruct(value: anytype, allocator: Allocator) void {
     const T = @TypeOf(value.*);
     const fields = comptime structFields(T);
@@ -51,6 +66,13 @@ pub fn destroyStruct(value: anytype, allocator: Allocator) void {
     }
 }
 
+/// Finalizes parsing for each field parser in a capture struct.
+///
+/// Expected shape:
+/// - `value` is `*T` where `T` is a `struct`.
+/// - Every field type `P` in `T` exposes:
+///   `pub fn doneParsing(self: *P, was_present: bool) !void`.
+/// - `present.len == std.meta.fields(T).len`.
 pub fn doneParsingStruct(value: anytype, present: []const bool) !void {
     const T = @TypeOf(value.*);
     const fields = comptime structFields(T);
@@ -93,6 +115,13 @@ fn headerFieldNamesClash(a: []const u8, b: []const u8) bool {
 
 pub const LookupKind = enum { header, query };
 
+/// Builds a compile-time key lookup table for a capture struct.
+///
+/// Expected shape:
+/// - `T` is a `struct` capture schema.
+/// - Field names are unique for `.query`.
+/// - Field names are unique after header normalization for `.header`
+///   (case-insensitive and `_` == `-`).
 pub fn Lookup(comptime T: type, comptime kind: LookupKind) type {
     if (!isStructType(T)) @compileError("expected struct type, got " ++ @typeName(T));
     const fields = structFields(T);
@@ -183,6 +212,11 @@ pub fn Lookup(comptime T: type, comptime kind: LookupKind) type {
     };
 }
 
+/// Merges two capture structs by field name.
+///
+/// Expected shape:
+/// - `A` and `B` are `struct` types.
+/// - Duplicate field names must have identical field types.
 pub fn mergeStructs(comptime A: type, comptime B: type) type {
     if (!isStructType(A) or !isStructType(B)) @compileError("mergeStructs expects struct types");
     const fa = structFields(A);
@@ -246,6 +280,12 @@ pub fn mergeStructs(comptime A: type, comptime B: type) type {
     return @Struct(.auto, null, names[0..], &types, &attrs);
 }
 
+/// Merges two header-capture structs using normalized header names.
+///
+/// Expected shape:
+/// - `A` and `B` are `struct` types.
+/// - Header name comparison is case-insensitive and treats `_` and `-` as equal.
+/// - If two normalized names match, their field types must also match.
 pub fn mergeHeaderStructs(comptime A: type, comptime B: type) type {
     if (!isStructType(A) or !isStructType(B)) @compileError("mergeHeaderStructs expects struct types");
     const fa = structFields(A);
@@ -310,6 +350,11 @@ pub fn mergeHeaderStructs(comptime A: type, comptime B: type) type {
     return @Struct(.auto, null, merged.names[0..], &merged.types, &merged.attrs);
 }
 
+/// Merges a tuple of capture structs from left to right.
+///
+/// Expected shape:
+/// - `types_tuple` is a tuple of `type` values.
+/// - Every tuple element is a `struct` type accepted by `mergeStructs`.
 pub fn mergeStructsMany(comptime types_tuple: anytype) type {
     const Ti = @TypeOf(types_tuple);
     const info = @typeInfo(Ti);
@@ -355,6 +400,14 @@ pub const String = struct {
     }
 };
 
+/// Makes parser `P` optional.
+///
+/// Expected parser shape for `P`:
+/// - `pub const empty: P`
+/// - `pub fn parse(self: *P, allocator: std.mem.Allocator, raw: []const u8) !void`
+/// - `pub fn doneParsing(self: *P, was_present: bool) !void`
+/// - `pub fn get(self: *const P) Value`
+/// - `pub fn destroy(self: *P, allocator: std.mem.Allocator) void`
 pub fn Optional(comptime P: type) type {
     return struct {
         present: bool = false,
@@ -382,6 +435,10 @@ pub fn Optional(comptime P: type) type {
     };
 }
 
+/// Required integer parser wrapper.
+///
+/// Expected shape:
+/// - `T` is an integer type accepted by `std.fmt.parseInt`.
 pub fn Int(comptime T: type) type {
     return struct {
         value: T = undefined,
@@ -405,6 +462,10 @@ pub fn Int(comptime T: type) type {
     };
 }
 
+/// Required floating-point parser wrapper.
+///
+/// Expected shape:
+/// - `T` is a float type accepted by `std.fmt.parseFloat`.
 pub fn Float(comptime T: type) type {
     return struct {
         value: T = undefined,
@@ -458,6 +519,10 @@ pub const Bool = struct {
     }
 };
 
+/// Required enum parser wrapper.
+///
+/// Expected shape:
+/// - `E` is an enum type.
 pub fn Enum(comptime E: type) type {
     return struct {
         value: E = undefined,
@@ -481,6 +546,13 @@ pub fn Enum(comptime E: type) type {
     };
 }
 
+/// Repeated-value parser wrapper.
+///
+/// Expected parser shape for `P`:
+/// - `pub const empty: P`
+/// - `pub fn parse(self: *P, allocator: std.mem.Allocator, raw: []const u8) !void`
+/// - `pub fn doneParsing(self: *P, was_present: bool) !void`
+/// - `pub fn destroy(self: *P, allocator: std.mem.Allocator) void`
 pub fn SliceOf(comptime P: type) type {
     return struct {
         list: std.ArrayListUnmanaged(P) = .empty,

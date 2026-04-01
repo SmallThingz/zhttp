@@ -65,8 +65,11 @@ fn configField(comptime cfg: anytype, comptime name: []const u8) @FieldType(Conf
 /// Supported fields:
 /// - `Context: type`      Optional user context type. Defaults to `void`.
 /// - `middlewares: tuple` Optional global middleware types. Defaults to `.{}`.
+///                        Each middleware type must satisfy `middleware.info(...)` shape.
 /// - `routes: struct`     Required routes tuple/struct: `.{ zhttp.get(...), ... }`.
+///                        Each endpoint must expose `Info` + `call` with zhttp endpoint shape.
 /// - `operations: tuple`  Optional route-operation types executed at comptime in tuple order.
+///                        Each operation exposes `operation(opctx, router)` and optional `maxAddedRoutes(...)`.
 /// - `config: struct`     Optional config overrides (fields match `zhttp.server.Config`).
 /// - `error_handler`      Optional fallback transport/dispatch error handler:
 ///                        `fn(*Server, *Io.Writer, comptime ErrorSet: type, err: ErrorSet) router.Action`.

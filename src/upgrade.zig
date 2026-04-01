@@ -53,6 +53,11 @@ pub const WebSocketResponseOptions = struct {
 ///
 /// Routes using this helper should declare `Info.headers = zhttp.upgrade.WebSocketHeaders`
 /// so every handshake field is available through `req.header(...)`.
+///
+/// Expected `req` shape:
+/// - field `method: []const u8`
+/// - `req.baseConst().version`
+/// - `req.header(.connection/.upgrade/.sec_websocket_key/.sec_websocket_version/.sec_websocket_protocol/.sec_websocket_extensions/.origin/.host)`
 pub fn websocketHandshakeRequest(req: anytype) WebSocketHandshakeRequest {
     return .{
         .method = req.method,
@@ -190,6 +195,10 @@ pub fn websocketResponseFromAccepted(
 }
 
 /// Validates a websocket handshake and returns the corresponding `101` response.
+///
+/// Expected `req` shape:
+/// - satisfies `websocketHandshakeRequest(req)` requirements
+/// - exposes `req.allocator()`.
 pub fn acceptWebSocket(
     req: anytype,
     opts: WebSocketHandshakeOptions,

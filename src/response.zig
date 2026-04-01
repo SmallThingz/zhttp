@@ -149,6 +149,13 @@ fn defaultBodyValue(comptime Body: type) Body {
 }
 
 /// Maps a body representation to a concrete response type.
+///
+/// Expected `Body` shape:
+/// - `[]const u8` for contiguous fixed-size bodies
+/// - `[][]const u8` for segmented fixed-size bodies
+/// - `void` for empty responses
+/// - custom `struct` exposing:
+///   `pub fn body(self: @This(), comptime rctx: zhttp.ReqCtx, req: rctx.TReadOnly(), cw: *response.ChunkedWriter) !void`
 pub fn Response(comptime Body: type) type {
     validateBodyType(Body);
     return struct {
@@ -246,6 +253,12 @@ fn writeHeaders(
 }
 
 /// Writes any supported response type.
+///
+/// Expected shapes:
+/// - `rctx` is a request context value (`zhttp.ReqCtx`).
+/// - `req_ro` is `rctx.TReadOnly()` for that same context.
+/// - `res` is `response.Response(Body)` (or compatible struct) with fields:
+///   `status`, `headers`, `body`, and optional `close`.
 pub fn writeAny(
     comptime rctx: anytype,
     req_ro: anytype,
@@ -302,6 +315,10 @@ pub fn writeAny(
     try cw.finish();
 }
 
+/// Writes a prebuilt upgrade response without injecting connection/body headers.
+///
+/// Expected `res` shape:
+/// - fields `status: std.http.Status` and `headers: []const response.Header`.
 pub fn writeUpgrade(w: *std.Io.Writer, res: anytype) !void {
     try writeStatusLine(w, res.status);
     for (res.headers) |h| {

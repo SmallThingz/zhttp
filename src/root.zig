@@ -81,6 +81,11 @@ pub const ReqCtx = @import("req_ctx.zig").ReqCtx;
 
 /// Runs `testOne` across the provided corpus and forwards to Zig's builtin
 /// fuzzing ABI when the test binary is compiled in fuzz mode.
+///
+/// Expected shape:
+/// - `context` can be any value and is forwarded as-is to `testOne`.
+/// - `testOne` must match:
+///   `fn (context: @TypeOf(context), smith: *std.testing.Smith) anyerror!void`.
 pub fn fuzz(
     context: anytype,
     comptime testOne: fn (context: @TypeOf(context), smith: *std.testing.Smith) anyerror!void,
@@ -194,7 +199,7 @@ test "fuzz: propagates testOne error in non-fuzz mode" {
     };
 
     var ctx: Ctx = .{};
-    try std.testing.expectError(error.Boom, fuzz(&ctx, Helper.testOne, .{ .corpus = &.{ "x" } }));
+    try std.testing.expectError(error.Boom, fuzz(&ctx, Helper.testOne, .{ .corpus = &.{"x"} }));
     try std.testing.expectEqual(@as(usize, 1), ctx.count);
 }
 

@@ -84,6 +84,8 @@ fn totalAddedBudget(comptime ops: []const type, comptime base_route_count: usize
 /// Mutable compile-time route table helper used by operations.
 ///
 /// `capacity` must cover base routes plus all routes an operations tuple may add.
+/// `global_middlewares` must be the flattened middleware type list (`[]const type`)
+/// used to resolve middleware lookups while operations run.
 pub fn Router(comptime capacity: usize, comptime global_middlewares: []const type) type {
     return struct {
         const Self = @This();
@@ -99,6 +101,10 @@ pub fn Router(comptime capacity: usize, comptime global_middlewares: []const typ
         _path_buf: [capacity][]const u8 = undefined,
         _group_buf: [capacity]usize = undefined,
 
+        /// Initializes an operation router from a base route tuple.
+        ///
+        /// Expected `routes` shape:
+        /// - tuple of `RouteDecl` values.
         pub fn init(comptime routes: anytype) Self {
             validateRouteTuple(routes);
             const fields = @typeInfo(@TypeOf(routes)).@"struct".fields;
@@ -232,22 +238,27 @@ pub fn Router(comptime capacity: usize, comptime global_middlewares: []const typ
             return false;
         }
 
+        /// Returns whether route `index` has middleware type `Mw`.
         pub fn hasMiddleware(comptime self: *const Self, index: usize, comptime Mw: type) bool {
             return routeHasMiddleware(self.routeConst(index).*, Mw);
         }
 
+        /// Returns whether route `index` has middleware with `pub const Signature = Signature`.
         pub fn hasSignature(comptime self: *const Self, index: usize, comptime Signature: type) bool {
             return self.firstMiddlewareWithDeclValue(index, "Signature", Signature) != null;
         }
 
+        /// Returns whether route `index` has middleware exposing declaration `decl_name`.
         pub fn hasMiddlewareDecl(comptime self: *const Self, index: usize, comptime decl_name: []const u8) bool {
             return routeHasMiddlewareDecl(self.routeConst(index).*, decl_name);
         }
 
+        /// Returns first middleware type whose `Signature` declaration equals `Signature`.
         pub fn firstMiddlewareWithSignature(comptime self: *const Self, index: usize, comptime Signature: type) ?type {
             return self.firstMiddlewareWithDeclValue(index, "Signature", Signature);
         }
 
+        /// Returns first middleware type exposing declaration `decl_name`.
         pub fn firstMiddlewareWithDecl(comptime self: *const Self, index: usize, comptime decl_name: []const u8) ?type {
             const route_decl = self.routeConst(index).*;
             inline for (global_middlewares) |GlobalMw| {
@@ -259,6 +270,10 @@ pub fn Router(comptime capacity: usize, comptime global_middlewares: []const typ
             return null;
         }
 
+        /// Returns first middleware type where declaration `decl_name` equals `decl_value`.
+        ///
+        /// Expected shape:
+        /// - middleware declaration exists and has the same type/value as `decl_value`.
         pub fn firstMiddlewareWithDeclValue(comptime self: *const Self, index: usize, comptime decl_name: []const u8, comptime decl_value: anytype) ?type {
             const route_decl = self.routeConst(index).*;
             inline for (global_middlewares) |GlobalMw| {
@@ -279,10 +294,12 @@ pub fn Router(comptime capacity: usize, comptime global_middlewares: []const typ
             return false;
         }
 
+        /// Returns whether route `index` is tagged with operation type `Op`.
         pub fn hasOperation(comptime self: *const Self, index: usize, comptime Op: type) bool {
             return routeHasOperation(self.routeConst(index).*, Op);
         }
 
+        /// Returns route indices that include middleware type `Mw`.
         pub fn filterByMiddleware(comptime self: *Self, comptime Mw: type) []const usize {
             comptime var n: usize = 0;
             inline for (self.all(), 0..) |route_decl, i| {
@@ -294,6 +311,7 @@ pub fn Router(comptime capacity: usize, comptime global_middlewares: []const typ
             return self._index_buf[0..n];
         }
 
+        /// Returns route indices tagged with operation type `Op`.
         pub fn filterByOperation(comptime self: *Self, comptime Op: type) []const usize {
             comptime var n: usize = 0;
             inline for (self.all(), 0..) |route_decl, i| {
@@ -305,6 +323,7 @@ pub fn Router(comptime capacity: usize, comptime global_middlewares: []const typ
             return self._index_buf[0..n];
         }
 
+        /// Returns route indices whose middleware `Signature` matches `Signature`.
         pub fn filterBySignature(comptime self: *Self, comptime Signature: type) []const usize {
             comptime var n: usize = 0;
             inline for (self.all(), 0..) |_, i| {
@@ -316,6 +335,7 @@ pub fn Router(comptime capacity: usize, comptime global_middlewares: []const typ
             return self._index_buf[0..n];
         }
 
+        /// Returns route indices that have middleware declaration `decl_name`.
         pub fn filterByMiddlewareDecl(comptime self: *Self, comptime decl_name: []const u8) []const usize {
             comptime var n: usize = 0;
             inline for (self.all(), 0..) |route_decl, i| {
@@ -364,16 +384,22 @@ pub fn Router(comptime capacity: usize, comptime global_middlewares: []const typ
             }
         }
 
+        /// Convenience wrapper for `forEachPathGroup(filterByMiddleware(Mw), callback)`.
         pub fn forEachPathGroupByMiddleware(comptime self: *Self, comptime Mw: type, comptime callback: anytype) void {
             const indices = self.filterByMiddleware(Mw);
             self.forEachPathGroup(indices, callback);
         }
 
+        /// Convenience wrapper for `forEachPathGroup(filterBySignature(Signature), callback)`.
         pub fn forEachPathGroupBySignature(comptime self: *Self, comptime Signature: type, comptime callback: anytype) void {
             const indices = self.filterBySignature(Signature);
             self.forEachPathGroup(indices, callback);
         }
 
+        /// Converts the mutable operation router back into a route tuple.
+        ///
+        /// Expected shape:
+        /// - `out_len` equals final route count after all operations run.
         pub fn toTuple(comptime self: *const Self, comptime out_len: usize) routeTupleType(out_len) {
             if (self._len != out_len) {
                 @compileError("operation route count changed between sizing and build pass");
@@ -440,6 +466,13 @@ fn applyWithLen(
 }
 
 /// Runs registered route operations and returns the final route tuple.
+///
+/// Expected shapes:
+/// - `routes_tuple`: tuple of `zhttp.router.RouteDecl` values.
+/// - `global_middlewares_tuple`: accepted by `middleware.typeList`.
+/// - `operations_tuple`: tuple of operation types exposing:
+///   `pub fn operation(comptime opctx: zhttp.operations.OperationCtx, router: opctx.T()) void`
+///   optional `pub fn maxAddedRoutes(comptime base_route_count: usize) usize`.
 pub fn apply(
     comptime routes_tuple: anytype,
     comptime global_middlewares_tuple: anytype,

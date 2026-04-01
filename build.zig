@@ -69,7 +69,6 @@ pub fn build(b: *std.Build) void {
     const zws_dep = b.dependency("zwebsocket", .{
         .target = target,
         .optimize = optimize,
-        .static_libc = effective_static_libc,
     });
     const zstd_dep = b.dependency("libzstd", .{
         .target = target,

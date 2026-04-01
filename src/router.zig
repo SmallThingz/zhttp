@@ -60,6 +60,12 @@ fn endpointType(comptime endpoint: type) struct { endpoint: type, info: Endpoint
     };
 }
 
+/// Declares one route entry.
+///
+/// Expected `endpoint` shape:
+/// - `pub const Info: zhttp.router.EndpointInfo`
+/// - `pub fn call(comptime rctx: zhttp.ReqCtx, req: rctx.T()) !rctx.Response(Body)`
+/// - optional `pub fn upgrade(server, stream, r, w, line, res) void`
 pub fn route(
     /// HTTP method enum literal, e.g. `.GET`.
     comptime method_lit: @EnumLiteral(),
@@ -80,24 +86,31 @@ pub fn route(
     };
 }
 
+/// HTTP GET route helper. `endpoint` must satisfy the same shape as `route(...)`.
 pub fn get(comptime pattern: []const u8, comptime endpoint: type) RouteDecl {
     return route(.GET, pattern, endpoint);
 }
+/// HTTP POST route helper. `endpoint` must satisfy the same shape as `route(...)`.
 pub fn post(comptime pattern: []const u8, comptime endpoint: type) RouteDecl {
     return route(.POST, pattern, endpoint);
 }
+/// HTTP PUT route helper. `endpoint` must satisfy the same shape as `route(...)`.
 pub fn put(comptime pattern: []const u8, comptime endpoint: type) RouteDecl {
     return route(.PUT, pattern, endpoint);
 }
+/// HTTP DELETE route helper. `endpoint` must satisfy the same shape as `route(...)`.
 pub fn delete(comptime pattern: []const u8, comptime endpoint: type) RouteDecl {
     return route(.DELETE, pattern, endpoint);
 }
+/// HTTP PATCH route helper. `endpoint` must satisfy the same shape as `route(...)`.
 pub fn patch(comptime pattern: []const u8, comptime endpoint: type) RouteDecl {
     return route(.PATCH, pattern, endpoint);
 }
+/// HTTP HEAD route helper. `endpoint` must satisfy the same shape as `route(...)`.
 pub fn head(comptime pattern: []const u8, comptime endpoint: type) RouteDecl {
     return route(.HEAD, pattern, endpoint);
 }
+/// HTTP OPTIONS route helper. `endpoint` must satisfy the same shape as `route(...)`.
 pub fn options(comptime pattern: []const u8, comptime endpoint: type) RouteDecl {
     return route(.OPTIONS, pattern, endpoint);
 }
@@ -757,6 +770,12 @@ fn PatternRadix(comptime all_patterns: []const Pattern, comptime route_ids: []co
     return Self;
 }
 
+/// Builds the compiled router type used by `Server`.
+///
+/// Expected shapes:
+/// - `routes` is a tuple of `RouteDecl` values (usually from `zhttp.get/post/...`).
+/// - `global_middlewares` is accepted by `middleware.typeList` (tuple / slice / array of middleware types).
+/// - each route endpoint satisfies the endpoint shape required by `route(...)`.
 pub fn Compiled(
     comptime _: type,
     comptime routes: anytype,

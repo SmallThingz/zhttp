@@ -171,8 +171,8 @@ Config: host=`127.0.0.1` path=`/plaintext` conns=16 iters=100000 warmup=10000 fu
 
 | Target | req/s | ns/req | relative |
 |---|---:|---:|---:|
-| zhttp | 180985.36 | 5525.30 | 0.845x vs faf |
-| faf | 214128.17 | 4670.10 | 1.183x vs zhttp |
+| zhttp | 176263.85 | 5673.30 | 0.853x vs faf |
+| faf | 206754.82 | 4836.60 | 1.173x vs zhttp |
 
 No benchmark transport errors were reported.
 
@@ -190,8 +190,8 @@ Config: host=`127.0.0.1` path=`/plaintext` conns=16 iters=100000 warmup=10000 fu
 
 | Target | req/s | ns/req | relative |
 |---|---:|---:|---:|
-| zhttp | 592671.03 | 1687.30 | 0.944x vs faf |
-| faf | 627524.13 | 1593.60 | 1.059x vs zhttp |
+| zhttp | 565140.83 | 1769.50 | 0.890x vs faf |
+| faf | 634888.78 | 1575.10 | 1.123x vs zhttp |
 
 No benchmark transport errors were reported.
 

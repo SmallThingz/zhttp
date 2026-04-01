@@ -491,8 +491,7 @@ pub fn Server(comptime def: anytype) type {
         }
 
         fn writeSimple(self: *Self, w: *Io.Writer, status: u16, body: []const u8) void {
-            const res = response.Res.text(status, body);
-            response.write(w, res, false, true) catch {};
+            response.write(w, response.Res.text(status, body), false, true) catch {};
             _ = self;
         }
 

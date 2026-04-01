@@ -79,8 +79,7 @@ pub fn Response(comptime Body: type) type {
             try writeStatusLine(w, self.status);
 
             if (self.format_connection_header) {
-                const connection_line: []const u8 = if (!self.close) "connection: keep-alive\r\n" else "connection: close\r\n";
-                try w.writeAll(connection_line);
+                try w.writeAll(if (!self.close) "connection: keep-alive\r\n" else "connection: close\r\n");
             }
 
             for (self.headers) |h| {
@@ -89,8 +88,7 @@ pub fn Response(comptime Body: type) type {
             }
 
             if (self.format_content_length) {
-                const body_len: usize = self.format_body_len_override orelse self.body.len;
-                try writeContentLength(w, body_len);
+                try writeContentLength(w, self.format_body_len_override orelse self.body.len);
             } else {
                 try w.writeAll("\r\n");
             }

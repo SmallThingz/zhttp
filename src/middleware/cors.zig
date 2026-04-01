@@ -136,8 +136,7 @@ pub fn Cors(comptime opts: CorsOptions) type {
 
         /// Handles a middleware invocation for the current request context.
         pub fn call(comptime rctx: ReqCtx, req: rctx.T()) !Res {
-            const origin_opt = req.header(.origin) orelse return rctx.next(req);
-            const origin = origin_opt;
+            const origin = req.header(.origin) orelse return rctx.next(req);
             const needs_origin_copy = store or !(allow_any_origin and !allow_credentials);
             const origin_copy = if (needs_origin_copy) try req.allocator().dupe(u8, origin) else origin;
             const allowed = if (origin_is_allowed) |f|
@@ -151,8 +150,7 @@ pub fn Cors(comptime opts: CorsOptions) type {
                 break :blk false;
             };
 
-            const is_options = core_util.asciiEqlLower(req.method, "options");
-            const preflight = is_options and req.header(.access_control_request_method) != null;
+            const preflight = core_util.asciiEqlLower(req.method, "options") and req.header(.access_control_request_method) != null;
 
             if (store) {
                 const d = req.middlewareData(info_name);
@@ -200,31 +198,37 @@ pub fn Cors(comptime opts: CorsOptions) type {
                 }
 
                 if (allow_headers_opt) |allowed_headers| {
-                    const value = try util.joinCommaList(req.allocator(), allowed_headers);
-                    if (value.len != 0) {
-                        if (util.shouldAddHeader(hdrs[0..n], "access-control-allow-headers", allow_headers_behavior)) {
+                    if (util.shouldAddHeader(hdrs[0..n], "access-control-allow-headers", allow_headers_behavior)) {
+                        const value = try util.joinCommaList(req.allocator(), allowed_headers);
+                        if (value.len != 0) {
                             hdrs[n] = .{ .name = "access-control-allow-headers", .value = value };
                             n += 1;
                         }
                     }
                 } else if (requested_headers.len != 0) {
-                    const value = try util.joinCommaList(req.allocator(), requested_headers);
                     if (util.shouldAddHeader(hdrs[0..n], "access-control-allow-headers", allow_headers_behavior)) {
-                        hdrs[n] = .{ .name = "access-control-allow-headers", .value = value };
+                        hdrs[n] = .{
+                            .name = "access-control-allow-headers",
+                            .value = try util.joinCommaList(req.allocator(), requested_headers),
+                        };
                         n += 1;
                     }
                 }
 
-                const methods_value = try util.joinCommaList(req.allocator(), methods);
                 if (util.shouldAddHeader(hdrs[0..n], "access-control-allow-methods", allow_methods_behavior)) {
-                    hdrs[n] = .{ .name = "access-control-allow-methods", .value = methods_value };
+                    hdrs[n] = .{
+                        .name = "access-control-allow-methods",
+                        .value = try util.joinCommaList(req.allocator(), methods),
+                    };
                     n += 1;
                 }
 
                 if (max_age) |age| {
-                    const value = try std.fmt.allocPrint(req.allocator(), "{d}", .{age});
                     if (util.shouldAddHeader(hdrs[0..n], "access-control-max-age", max_age_behavior)) {
-                        hdrs[n] = .{ .name = "access-control-max-age", .value = value };
+                        hdrs[n] = .{
+                            .name = "access-control-max-age",
+                            .value = try std.fmt.allocPrint(req.allocator(), "{d}", .{age}),
+                        };
                         n += 1;
                     }
                 }
@@ -234,8 +238,11 @@ pub fn Cors(comptime opts: CorsOptions) type {
                     n += 1;
                 }
 
-                const headers = try util.copyHeaders(req.allocator(), hdrs[0..n]);
-                return .{ .status = .no_content, .headers = headers, .body = "" };
+                return .{
+                    .status = .no_content,
+                    .headers = try util.copyHeaders(req.allocator(), hdrs[0..n]),
+                    .body = "",
+                };
             }
 
             if (!allowed) {
@@ -258,13 +265,11 @@ pub fn Cors(comptime opts: CorsOptions) type {
                     n += 1;
                 }
             }
-            if (expose_headers.len != 0) {
+            if (expose_headers.len != 0 and util.shouldAddHeader(res.headers, "access-control-expose-headers", expose_headers_behavior)) {
                 const value = try util.joinCommaList(req.allocator(), expose_headers);
                 if (value.len != 0) {
-                    if (util.shouldAddHeader(res.headers, "access-control-expose-headers", expose_headers_behavior)) {
-                        hdrs[n] = .{ .name = "access-control-expose-headers", .value = value };
-                        n += 1;
-                    }
+                    hdrs[n] = .{ .name = "access-control-expose-headers", .value = value };
+                    n += 1;
                 }
             }
             if (!(allow_any_origin and !allow_credentials)) {

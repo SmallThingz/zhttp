@@ -585,10 +585,9 @@ pub fn RequestPWithPatternExt(
             var present: [QueryLookup.count]bool = .{false} ** QueryLookup.count;
 
             var i: usize = 0;
-            const q = query_raw;
-            while (i <= q.len) {
-                const amp = std.mem.indexOfScalarPos(u8, q, i, '&') orelse q.len;
-                const part = q[i..amp];
+            while (i <= query_raw.len) {
+                const amp = std.mem.indexOfScalarPos(u8, query_raw, i, '&') orelse query_raw.len;
+                const part = query_raw[i..amp];
                 i = amp + 1;
                 if (part.len == 0) continue;
                 const eq = std.mem.indexOfScalar(u8, part, '=');

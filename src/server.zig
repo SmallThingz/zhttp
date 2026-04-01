@@ -143,7 +143,8 @@ pub fn Server(comptime def: anytype) type {
         extra_listeners: [Conf.listener_shards - 1]std.Io.net.Server,
         lifecycle: std.atomic.Value(Lifecycle),
         group: Io.Group = .init,
-        permanent_worker_count: std.atomic.Value(usize),
+        permanent_worker_count: usize,
+        max_temp_workers_runtime: usize,
         busy_workers: std.atomic.Value(usize),
         live_temp_workers: std.atomic.Value(usize),
         ctx: if (Context == void) void else *Context,
@@ -340,7 +341,8 @@ pub fn Server(comptime def: anytype) type {
                 .listener = listener,
                 .extra_listeners = extra_listeners,
                 .lifecycle = std.atomic.Value(Lifecycle).init(.running),
-                .permanent_worker_count = std.atomic.Value(usize).init(0),
+                .permanent_worker_count = 0,
+                .max_temp_workers_runtime = 0,
                 .busy_workers = std.atomic.Value(usize).init(0),
                 .live_temp_workers = std.atomic.Value(usize).init(0),
                 .ctx = ctx,
@@ -352,7 +354,7 @@ pub fn Server(comptime def: anytype) type {
         pub fn stop(self: *Self) void {
             if (self.lifecycle.cmpxchgStrong(.running, .stopping, .acq_rel, .acquire) != null) return;
 
-            const wake_count = (self.permanent_worker_count.load(.acquire) + self.live_temp_workers.load(.acquire) + 1) * listenerShardCount();
+            const wake_count = (self.permanent_worker_count + self.max_temp_workers_runtime + 1) * listenerShardCount();
             var i: usize = 0;
             while (i < wake_count) : (i += 1) {
                 var wake = std.Io.net.IpAddress.connect(&self.listener.socket.address, self.io, .{ .mode = .stream }) catch null;
@@ -392,12 +394,13 @@ pub fn Server(comptime def: anytype) type {
 
         fn serve(self: *Self, opts: ServeOptions) Io.Cancelable!void {
             const permanent_workers = permanentWorkerCount(opts.permanent_workers);
-            self.permanent_worker_count.store(permanent_workers, .release);
+            self.permanent_worker_count = permanent_workers;
+            self.max_temp_workers_runtime = maxTempWorkerCount(permanent_workers);
             var i: usize = 0;
             while (i < permanent_workers) : (i += 1) {
                 self.group.concurrent(self.io, worker, .{ self, i % listenerShardCount() }) catch return error.Canceled;
             }
-            if (Conf.temp_workers and maxTempWorkerCount(permanent_workers) != 0) {
+            if (Conf.temp_workers and self.max_temp_workers_runtime != 0) {
                 self.group.concurrent(self.io, spawnTempWorkers, .{self}) catch return error.Canceled;
             }
             self.group.await(self.io) catch {};
@@ -443,48 +446,47 @@ pub fn Server(comptime def: anytype) type {
             defer state.deinit();
             while (self.lifecycle.load(.acquire) == .running) {
                 const stream = (try self.acceptOne(shard_idx)) orelse continue;
-                if (Conf.temp_workers) _ = self.busy_workers.fetchAdd(1, .acq_rel);
+                if (Conf.temp_workers) _ = self.busy_workers.fetchAdd(1, .monotonic);
                 handleConn(self, &state, stream) catch |err| {
-                    if (Conf.temp_workers) _ = self.busy_workers.fetchSub(1, .acq_rel);
+                    if (Conf.temp_workers) _ = self.busy_workers.fetchSub(1, .monotonic);
                     switch (err) {
                         error.Canceled => return,
                     }
                 };
-                if (Conf.temp_workers) _ = self.busy_workers.fetchSub(1, .acq_rel);
+                if (Conf.temp_workers) _ = self.busy_workers.fetchSub(1, .monotonic);
                 state.reset();
             }
         }
 
         fn tempWorker(self: *Self) Io.Cancelable!void {
-            _ = self.live_temp_workers.fetchAdd(1, .acq_rel);
-            defer _ = self.live_temp_workers.fetchSub(1, .acq_rel);
+            const live_temp_index = self.live_temp_workers.fetchAdd(1, .monotonic);
+            defer _ = self.live_temp_workers.fetchSub(1, .monotonic);
             var state = WorkerState.init(self.gpa);
             defer state.deinit();
 
             var accepted: usize = 0;
-            const shard_idx = if (listenerShardCount() == 1) 0 else self.live_temp_workers.load(.acquire) % listenerShardCount();
+            const shard_idx = if (listenerShardCount() == 1) 0 else live_temp_index % listenerShardCount();
             while (self.lifecycle.load(.acquire) == .running and accepted < Conf.temp_worker_connection_limit) {
                 const stream = (try self.acceptOne(shard_idx)) orelse continue;
                 accepted += 1;
-                _ = self.busy_workers.fetchAdd(1, .acq_rel);
+                _ = self.busy_workers.fetchAdd(1, .monotonic);
                 handleConn(self, &state, stream) catch |err| {
-                    _ = self.busy_workers.fetchSub(1, .acq_rel);
+                    _ = self.busy_workers.fetchSub(1, .monotonic);
                     switch (err) {
                         error.Canceled => return,
                     }
                 };
-                _ = self.busy_workers.fetchSub(1, .acq_rel);
+                _ = self.busy_workers.fetchSub(1, .monotonic);
                 state.reset();
             }
         }
 
         fn spawnTempWorkers(self: *Self) Io.Cancelable!void {
             while (self.lifecycle.load(.acquire) == .running) {
-                const live_temp = self.live_temp_workers.load(.acquire);
-                const busy = self.busy_workers.load(.acquire);
-                const permanent_workers = self.permanent_worker_count.load(.acquire);
-                const total_workers = permanent_workers + live_temp;
-                if (live_temp < maxTempWorkerCount(permanent_workers) and busy >= total_workers) {
+                const live_temp = self.live_temp_workers.load(.monotonic);
+                const busy = self.busy_workers.load(.monotonic);
+                const total_workers = self.permanent_worker_count + live_temp;
+                if (live_temp < self.max_temp_workers_runtime and busy >= total_workers) {
                     self.group.concurrent(self.io, tempWorker, .{self}) catch {};
                 }
                 std.Io.sleep(self.io, std.Io.Duration.fromMilliseconds(1), .awake) catch return;

@@ -482,14 +482,20 @@ pub fn Server(comptime def: anytype) type {
         }
 
         fn spawnTempWorkers(self: *Self) Io.Cancelable!void {
+            var idle_sleep_ms: i64 = 1;
             while (self.lifecycle.load(.acquire) == .running) {
                 const live_temp = self.live_temp_workers.load(.monotonic);
                 const busy = self.busy_workers.load(.monotonic);
                 const total_workers = self.permanent_worker_count + live_temp;
                 if (live_temp < self.max_temp_workers_runtime and busy >= total_workers) {
                     self.group.concurrent(self.io, tempWorker, .{self}) catch {};
+                    idle_sleep_ms = 1;
+                } else if (busy + 1 < total_workers) {
+                    idle_sleep_ms = @min(idle_sleep_ms * 2, 8);
+                } else {
+                    idle_sleep_ms = 1;
                 }
-                std.Io.sleep(self.io, std.Io.Duration.fromMilliseconds(1), .awake) catch return;
+                std.Io.sleep(self.io, std.Io.Duration.fromMilliseconds(idle_sleep_ms), .awake) catch return;
             }
         }
 

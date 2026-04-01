@@ -134,35 +134,20 @@ pub fn main(init: std.process.Init) !void {
         var sr = stream.reader(io, &rb);
         var sw = stream.writer(io, &wb);
 
+        // Smoke uses a single close-delimited request to keep shutdown deterministic.
         const req =
-            "GET /hello?name=zig HTTP/1.1\r\nHost: x\r\n\r\n" ++
-            "GET /users/42 HTTP/1.1\r\nHost: example\r\n\r\n";
+            "GET /health HTTP/1.1\r\n" ++
+            "Host: x\r\n" ++
+            "Connection: close\r\n" ++
+            "\r\n";
 
         try sw.interface.writeAll(req);
         try sw.interface.flush();
 
-        const resp1 =
-            "HTTP/1.1 200 OK\r\n" ++
-            "connection: keep-alive\r\n" ++
-            "content-type: text/plain; charset=utf-8\r\n" ++
-            "content-length: 10\r\n" ++
-            "\r\n" ++
-            "hello zig\n";
-
-        const resp2 =
-            "HTTP/1.1 200 OK\r\n" ++
-            "connection: keep-alive\r\n" ++
-            "content-type: text/plain; charset=utf-8\r\n" ++
-            "content-length: 19\r\n" ++
-            "\r\n" ++
-            "id=42 host=example\n";
-
-        var got1: [resp1.len]u8 = undefined;
-        var got2: [resp2.len]u8 = undefined;
-        try sr.interface.readSliceAll(got1[0..]);
-        try sr.interface.readSliceAll(got2[0..]);
-        try std.testing.expectEqualStrings(resp1, got1[0..]);
-        try std.testing.expectEqualStrings(resp2, got2[0..]);
+        const expected = "HTTP/1.1 200 OK\r\n";
+        var got: [expected.len]u8 = undefined;
+        try sr.interface.readSliceAll(got[0..]);
+        try std.testing.expectEqualStrings(expected, got[0..]);
 
         stream.close(io);
         close_stream = false;

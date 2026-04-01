@@ -19,6 +19,10 @@ pub const MiddlewareInfo = struct {
     /// `pub fn init(io: std.Io, allocator: std.mem.Allocator, route_decl: zhttp.router.RouteDecl) Self|!Self`,
     /// that function is used to build the route-local context value and any init error
     /// is returned from `Server.init`.
+    ///
+    /// Optional teardown hook:
+    /// `pub fn deinit(self: *Self, io: std.Io, allocator: std.mem.Allocator) void|!void`.
+    /// When present, `Server.deinit` invokes it once per initialized route context.
     static_context: ?type = null,
     /// Optional path param capture type required by this middleware.
     path: ?type = null,
@@ -313,7 +317,30 @@ pub fn initStaticContext(
     rd: StaticContextRouteDecl,
 ) !Ctx {
     var ctx: Ctx = std.mem.zeroes(Ctx);
-    inline for (std.meta.fields(Ctx)) |f| {
+    const fields = std.meta.fields(Ctx);
+    var initialized_count: usize = 0;
+    errdefer {
+        // Unwind in reverse order so teardown mirrors successful init.
+        inline for (fields, 0..) |_, rev_i| {
+            const i = fields.len - 1 - rev_i;
+            if (i < initialized_count) {
+                const f = fields[i];
+                if (@hasDecl(f.type, "deinit")) {
+                    const deinit_fn = f.type.deinit;
+                    const ret = @call(.auto, deinit_fn, .{ &@field(ctx, f.name), io, allocator });
+                    const RetT = @TypeOf(ret);
+                    if (RetT == void) {
+                        // nothing to do
+                    } else if (@typeInfo(RetT) == .error_union and @typeInfo(RetT).error_union.payload == void) {
+                        ret catch {};
+                    } else {
+                        @compileError("middleware static context deinit must return void or !void");
+                    }
+                }
+            }
+        }
+    }
+    inline for (fields, 0..) |f, i| {
         if (@hasDecl(f.type, "init")) {
             const init_fn = f.type.init;
             const ret = @call(.auto, init_fn, .{ io, allocator, rd });
@@ -328,8 +355,33 @@ pub fn initStaticContext(
         } else {
             @field(ctx, f.name) = std.mem.zeroes(f.type);
         }
+        initialized_count = i + 1;
     }
     return ctx;
+}
+
+/// Tears down per-route static middleware context values.
+pub fn deinitStaticContext(
+    comptime Ctx: type,
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    ctx: *Ctx,
+) void {
+    const fields = std.meta.fields(Ctx);
+    // Deinitialize in reverse order so dependencies mirror init traversal.
+    inline for (fields, 0..) |_, rev_i| {
+        const f = fields[fields.len - 1 - rev_i];
+        if (!@hasDecl(f.type, "deinit")) continue;
+        const deinit_fn = f.type.deinit;
+        const ret = @call(.auto, deinit_fn, .{ &@field(ctx.*, f.name), io, allocator });
+        const RetT = @TypeOf(ret);
+        if (RetT == void) continue;
+        if (@typeInfo(RetT) == .error_union and @typeInfo(RetT).error_union.payload == void) {
+            ret catch {};
+            continue;
+        }
+        @compileError("middleware static context deinit must return void or !void");
+    }
 }
 
 /// Returns middleware context schema entries used by `ReqCtx`.
@@ -470,6 +522,10 @@ test "middleware helpers: merge needs, dedupe context data, and init static cont
         pub fn init(_: std.Io, _: std.mem.Allocator, rd: StaticContextRouteDecl) @This() {
             return .{ .pattern = rd.pattern };
         }
+
+        pub fn deinit(self: *@This(), _: std.Io, _: std.mem.Allocator) void {
+            self.pattern = "";
+        }
     };
 
     const MwA = struct {
@@ -557,8 +613,10 @@ test "middleware helpers: merge needs, dedupe context data, and init static cont
         .middlewares = &.{},
         .operations = &.{},
     };
-    const static_ctx = try initStaticContext(StaticCtxT, testing.io, testing.allocator, rd);
+    var static_ctx = try initStaticContext(StaticCtxT, testing.io, testing.allocator, rd);
     try testing.expectEqualStrings("/items/{id}", static_ctx.auth.pattern);
+    deinitStaticContext(StaticCtxT, testing.io, testing.allocator, &static_ctx);
+    try testing.expectEqualStrings("", static_ctx.auth.pattern);
 }
 
 test "middleware helpers: typeList and concatTypeLists support tuple/array inputs" {
@@ -584,6 +642,116 @@ test "middleware helpers: typeList and concatTypeLists support tuple/array input
     comptime {
         if (joined[2] != C) @compileError("concatTypeLists order changed");
     }
+}
+
+test "middleware helpers: deinitStaticContext accepts !void deinit hooks" {
+    const FallibleCtx = struct {
+        called: *bool,
+
+        pub fn deinit(self: *@This(), _: std.Io, _: std.mem.Allocator) !void {
+            self.called.* = true;
+            return error.DeinitFailed;
+        }
+    };
+
+    const InfallibleCtx = struct {
+        called: *bool,
+
+        pub fn deinit(self: *@This(), _: std.Io, _: std.mem.Allocator) void {
+            self.called.* = true;
+        }
+    };
+
+    const Ctx = struct {
+        fallible: FallibleCtx,
+        infallible: InfallibleCtx,
+    };
+
+    var fallible_called = false;
+    var infallible_called = false;
+    var ctx: Ctx = .{
+        .fallible = .{ .called = &fallible_called },
+        .infallible = .{ .called = &infallible_called },
+    };
+
+    deinitStaticContext(Ctx, std.testing.io, std.testing.allocator, &ctx);
+    try std.testing.expect(fallible_called);
+    try std.testing.expect(infallible_called);
+}
+
+test "middleware helpers: deinitStaticContext runs in reverse field order" {
+    const DeinitA = struct {
+        order: *[2]u8,
+        idx: *usize,
+
+        pub fn deinit(self: *@This(), _: std.Io, _: std.mem.Allocator) void {
+            self.order.*[self.idx.*] = 'A';
+            self.idx.* += 1;
+        }
+    };
+    const DeinitB = struct {
+        order: *[2]u8,
+        idx: *usize,
+
+        pub fn deinit(self: *@This(), _: std.Io, _: std.mem.Allocator) void {
+            self.order.*[self.idx.*] = 'B';
+            self.idx.* += 1;
+        }
+    };
+    const Ctx = struct {
+        a: DeinitA,
+        b: DeinitB,
+    };
+
+    var order: [2]u8 = undefined;
+    var idx: usize = 0;
+    var ctx: Ctx = .{
+        .a = .{ .order = &order, .idx = &idx },
+        .b = .{ .order = &order, .idx = &idx },
+    };
+    deinitStaticContext(Ctx, std.testing.io, std.testing.allocator, &ctx);
+    try std.testing.expectEqual(@as(usize, 2), idx);
+    try std.testing.expectEqual('B', order[0]);
+    try std.testing.expectEqual('A', order[1]);
+}
+
+test "middleware helpers: initStaticContext unwinds initialized fields on failure" {
+    const AllocCtx = struct {
+        buf: []u8 = &.{},
+
+        pub fn init(_: std.Io, allocator: std.mem.Allocator, _: StaticContextRouteDecl) !@This() {
+            return .{ .buf = try allocator.alloc(u8, 64) };
+        }
+
+        pub fn deinit(self: *@This(), _: std.Io, allocator: std.mem.Allocator) void {
+            if (self.buf.len != 0) allocator.free(self.buf);
+            self.buf = &.{};
+        }
+    };
+    const FailCtx = struct {
+        pub fn init(_: std.Io, _: std.mem.Allocator, _: StaticContextRouteDecl) !@This() {
+            return error.ExpectedInitFailure;
+        }
+    };
+    const Ctx = struct {
+        alloc: AllocCtx,
+        fail: FailCtx,
+    };
+    const rd: StaticContextRouteDecl = .{
+        .method = "GET",
+        .pattern = "/x",
+        .endpoint = struct {},
+        .headers = struct {},
+        .query = struct {},
+        .params = struct {},
+        .middlewares = &.{},
+        .operations = &.{},
+    };
+
+    try std.testing.expectError(
+        error.ExpectedInitFailure,
+        initStaticContext(Ctx, std.testing.io, std.testing.allocator, rd),
+    );
 }
 
 test "middleware helpers: info returns declared metadata and init handles error-union static context" {

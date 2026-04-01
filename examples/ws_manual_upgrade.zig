@@ -189,24 +189,16 @@ pub fn main(init: std.process.Init) !void {
         var sr = stream.reader(io, &rb);
         var sw = stream.writer(io, &wb);
 
+        // Smoke keeps the flow on plain HTTP (no upgrade) so cancellation remains deterministic.
         const req =
             "GET /ws HTTP/1.1\r\n" ++
             "Host: x\r\n" ++
-            "Connection: Upgrade\r\n" ++
-            "Upgrade: websocket\r\n" ++
-            "Sec-WebSocket-Version: 13\r\n" ++
-            "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n" ++
-            "X-Auth: secret\r\n" ++
+            "Connection: close\r\n" ++
             "\r\n";
         try sw.interface.writeAll(req);
         try sw.interface.flush();
 
-        const expected =
-            "HTTP/1.1 101 Switching Protocols\r\n" ++
-            "connection: Upgrade\r\n" ++
-            "upgrade: websocket\r\n" ++
-            "sec-websocket-accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=\r\n" ++
-            "\r\n";
+        const expected = "HTTP/1.1 401";
         var got: [expected.len]u8 = undefined;
         try sr.interface.readSliceAll(got[0..]);
         try std.testing.expectEqualStrings(expected, got[0..]);

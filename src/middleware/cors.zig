@@ -55,7 +55,7 @@ pub const CorsOptions = struct {
     /// Optional custom origin predicate.
     ///
     /// When provided, this overrides static `origins` matching logic.
-    origin_is_allowed: ?*const fn ([]const u8) bool = null,
+    origin_is_allowed: ?fn ([]const u8) bool = null,
     /// Behavior when `access-control-allow-origin` already exists.
     allow_origin_behavior: util.HeaderSetBehavior = .assert_absent,
     /// Behavior when `access-control-allow-credentials` already exists.

@@ -48,7 +48,7 @@ pub const LoggerOptions = struct {
     /// Optional custom sink invoked once per request with method, path, status and elapsed duration.
     ///
     /// When null, logger writes to stderr via `std.debug.print`.
-    log: ?*const fn ([]const u8, []const u8, u16, Io.Duration) void = null,
+    log: ?fn ([]const u8, []const u8, u16, Io.Duration) void = null,
     /// Clock source used for request latency measurement.
     ///
     /// Use `.monotonic` or another clock when you need timing semantics different from `.awake`.
@@ -61,7 +61,7 @@ pub const LoggerOptions = struct {
 /// Optionally stores measured values in middleware context for downstream handlers.
 pub fn Logger(comptime opts: LoggerOptions) type {
     const store: bool = opts.name != null;
-    const LogFn = *const fn ([]const u8, []const u8, u16, Io.Duration) void;
+    const LogFn = fn ([]const u8, []const u8, u16, Io.Duration) void;
     const log_fn: ?LogFn = opts.log;
     const clock: Io.Clock = opts.clock;
 

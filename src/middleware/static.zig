@@ -232,10 +232,18 @@ pub fn Static(comptime opts: StaticOptions) type {
             cache: ?*CacheState = null,
 
             pub fn init(_: Io, _: std.mem.Allocator, _: route_decl.RouteDecl) !@This() {
+                if (!cache_enabled) return .{};
                 const cache_a = std.heap.page_allocator;
                 const cache = try cache_a.create(CacheState);
                 cache.* = .{};
                 return .{ .cache = cache };
+            }
+
+            pub fn deinit(self: *@This(), _: Io, _: std.mem.Allocator) void {
+                if (self.cache) |cache| {
+                    self.cache = null;
+                    releaseCache(cache);
+                }
             }
         };
 
@@ -663,6 +671,20 @@ test "static: contentTypeFor covers common web/media types" {
     try std.testing.expectEqualStrings("application/manifest+json; charset=utf-8", contentTypeFor("site.webmanifest").?);
 }
 
+test "static: in_memory_cache=false skips cache allocation" {
+    const S = Static(.{
+        .dir = "testdata/static",
+        .mount = "/static",
+        .in_memory_cache = false,
+    });
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    var mw_static = try initStaticRouteCtx(S, a, "/static/{*path}");
+    defer @import("../middleware.zig").deinitStaticContext(@TypeOf(mw_static), std.testing.io, a, &mw_static);
+    try std.testing.expect(@field(mw_static, "static").cache == null);
+}
+
 test "static: serves file and index, blocks traversal" {
     const S = Static(.{ .dir = "testdata/static", .mount = "/static" });
     const RouteStaticCtx = @import("../middleware.zig").staticContextType(.{S});
@@ -832,11 +854,10 @@ test "static: etag returns 304 on match" {
 }
 
 test "static: in-memory cache serves stale bytes when fs watch is disabled" {
-    const static_dir = ".zig-cache/tmp/zhttp-static-watch-disabled";
+    const static_root = ".zig-cache/tmp";
     const file_rel = "watch.txt";
-    const file_path = static_dir ++ "/" ++ file_rel;
     const S = Static(.{
-        .dir = static_dir,
+        .dir = static_root,
         .mount = "/static",
         .fs_watch = .{ .enabled = false },
     });
@@ -850,12 +871,21 @@ test "static: in-memory cache serves stale bytes when fs watch is disabled" {
     const a = arena_state.allocator();
     const mw_static = try initStaticRouteCtx(S, a, "/static/{*path}");
 
+    const unique_subdir = try std.fmt.allocPrint(a, "zhttp-static-watch-disabled-{d}-{d}", .{
+        std.c.getpid(),
+        @intFromPtr(&arena_state),
+    });
+    const static_dir = try std.fmt.allocPrint(a, "{s}/{s}", .{ static_root, unique_subdir });
+    const file_path = try std.fmt.allocPrint(a, "{s}/{s}", .{ static_dir, file_rel });
+    const rel_path = try std.fmt.allocPrint(a, "{s}/{s}", .{ unique_subdir, file_rel });
+    const req_path = try std.fmt.allocPrint(a, "/static/{s}", .{rel_path});
+
     var cwd = Io.Dir.cwd();
     try cwd.createDirPath(std.testing.io, static_dir);
     defer cwd.deleteTree(std.testing.io, static_dir) catch {};
     try writeTestFile(file_path, "v1\n");
 
-    const path_buf = "/static/watch.txt".*;
+    const path_buf = try a.dupe(u8, req_path);
     const query_buf: [0]u8 = .{};
 
     {
@@ -869,8 +899,8 @@ test "static: in-memory cache serves stale bytes when fs watch is disabled" {
         var server: TestServer = .{ .io = std.testing.io, .gpa = a, .ctx = {}, .route_static_ctx = mw_static };
         var reqv = ReqT.initWithServer(a, line, mw_ctx, &server);
         defer reqv.deinit(a);
-        var rel2 = "watch.txt".*;
-        try reqv.parseParams(a, &.{rel2[0..]});
+        const rel2 = try a.dupe(u8, rel_path);
+        try reqv.parseParams(a, &.{rel2});
         const res = try S.serve(&reqv);
         try std.testing.expectEqual(@as(u16, 200), @intFromEnum(res.status));
         try std.testing.expectEqualStrings("v1\n", res.body);
@@ -889,8 +919,8 @@ test "static: in-memory cache serves stale bytes when fs watch is disabled" {
         var server: TestServer = .{ .io = std.testing.io, .gpa = a, .ctx = {}, .route_static_ctx = mw_static };
         var reqv = ReqT.initWithServer(a, line, mw_ctx, &server);
         defer reqv.deinit(a);
-        var rel3 = "watch.txt".*;
-        try reqv.parseParams(a, &.{rel3[0..]});
+        const rel3 = try a.dupe(u8, rel_path);
+        try reqv.parseParams(a, &.{rel3});
         const res = try S.serve(&reqv);
         try std.testing.expectEqual(@as(u16, 200), @intFromEnum(res.status));
         try std.testing.expectEqualStrings("v1\n", res.body);
@@ -898,11 +928,10 @@ test "static: in-memory cache serves stale bytes when fs watch is disabled" {
 }
 
 test "static: in-memory cache refreshes when fs watch is enabled" {
-    const static_dir = ".zig-cache/tmp/zhttp-static-watch-enabled";
+    const static_root = ".zig-cache/tmp";
     const file_rel = "watch.txt";
-    const file_path = static_dir ++ "/" ++ file_rel;
     const S = Static(.{
-        .dir = static_dir,
+        .dir = static_root,
         .mount = "/static",
         .fs_watch = .{
             .enabled = true,
@@ -919,12 +948,21 @@ test "static: in-memory cache refreshes when fs watch is enabled" {
     const a = arena_state.allocator();
     const mw_static = try initStaticRouteCtx(S, a, "/static/{*path}");
 
+    const unique_subdir = try std.fmt.allocPrint(a, "zhttp-static-watch-enabled-{d}-{d}", .{
+        std.c.getpid(),
+        @intFromPtr(&arena_state),
+    });
+    const static_dir = try std.fmt.allocPrint(a, "{s}/{s}", .{ static_root, unique_subdir });
+    const file_path = try std.fmt.allocPrint(a, "{s}/{s}", .{ static_dir, file_rel });
+    const rel_path = try std.fmt.allocPrint(a, "{s}/{s}", .{ unique_subdir, file_rel });
+    const req_path = try std.fmt.allocPrint(a, "/static/{s}", .{rel_path});
+
     var cwd = Io.Dir.cwd();
     try cwd.createDirPath(std.testing.io, static_dir);
     defer cwd.deleteTree(std.testing.io, static_dir) catch {};
     try writeTestFile(file_path, "v1\n");
 
-    const path_buf = "/static/watch.txt".*;
+    const path_buf = try a.dupe(u8, req_path);
     const query_buf: [0]u8 = .{};
 
     {
@@ -938,8 +976,8 @@ test "static: in-memory cache refreshes when fs watch is enabled" {
         var server: TestServer = .{ .io = std.testing.io, .gpa = a, .ctx = {}, .route_static_ctx = mw_static };
         var reqv = ReqT.initWithServer(a, line, mw_ctx, &server);
         defer reqv.deinit(a);
-        var rel4 = "watch.txt".*;
-        try reqv.parseParams(a, &.{rel4[0..]});
+        const rel4 = try a.dupe(u8, rel_path);
+        try reqv.parseParams(a, &.{rel4});
         const res = try S.serve(&reqv);
         try std.testing.expectEqual(@as(u16, 200), @intFromEnum(res.status));
         try std.testing.expectEqualStrings("v1\n", res.body);
@@ -958,8 +996,8 @@ test "static: in-memory cache refreshes when fs watch is enabled" {
         var server: TestServer = .{ .io = std.testing.io, .gpa = a, .ctx = {}, .route_static_ctx = mw_static };
         var reqv = ReqT.initWithServer(a, line, mw_ctx, &server);
         defer reqv.deinit(a);
-        var rel5 = "watch.txt".*;
-        try reqv.parseParams(a, &.{rel5[0..]});
+        const rel5 = try a.dupe(u8, rel_path);
+        try reqv.parseParams(a, &.{rel5});
         const res = try S.serve(&reqv);
         try std.testing.expectEqual(@as(u16, 200), @intFromEnum(res.status));
         try std.testing.expectEqualStrings("v2\n", res.body);

@@ -33,13 +33,6 @@ const ExpectState = struct {
     sent: bool = false,
 };
 
-fn framingHasReadableBody(framing: anytype) bool {
-    return switch (framing) {
-        .chunked, .content_length => true,
-        .none, .content_length_zero => false,
-    };
-}
-
 /// Validates request `Expect` header and enables `100 Continue` body-read handling.
 ///
 /// - Missing `Expect` header: pass-through.
@@ -70,17 +63,6 @@ pub fn Expect(comptime opts: ExpectOptions) type {
             return res;
         }
 
-        fn hasFramedBody(base: anytype) bool {
-            return switch (base.body) {
-                .none => false,
-                .chunked => true,
-                .content_length => |remaining| remaining != 0,
-                .downloaded => |downloaded| downloaded.bytes.len != 0 or framingHasReadableBody(downloaded.framing),
-                .discarded, .streamed => |framing| framingHasReadableBody(framing),
-                .errored => |failed| framingHasReadableBody(failed.framing),
-            };
-        }
-
         /// Executes Expect-header validation for the current request.
         pub fn call(comptime rctx: ReqCtx, req: rctx.T()) !Res {
             const state = req.middlewareData(info_name);
@@ -89,7 +71,23 @@ pub fn Expect(comptime opts: ExpectOptions) type {
             const expect_value = req.header(.expect) orelse return rctx.next(req);
             const base = req.baseMut();
             if (util.asciiEqlLower(std.mem.trim(u8, expect_value, " \t"), "100-continue")) {
-                if (!allow_without_body and !hasFramedBody(base)) {
+                if (!allow_without_body and !switch (base.body) {
+                    .none => false,
+                    .chunked => true,
+                    .content_length => |remaining| remaining != 0,
+                    .downloaded => |downloaded| downloaded.bytes.len != 0 or switch (downloaded.framing) {
+                        .chunked, .content_length => true,
+                        .none, .content_length_zero => false,
+                    },
+                    .discarded, .streamed => |framing| switch (framing) {
+                        .chunked, .content_length => true,
+                        .none, .content_length_zero => false,
+                    },
+                    .errored => |failed| switch (failed.framing) {
+                        .chunked, .content_length => true,
+                        .none, .content_length_zero => false,
+                    },
+                }) {
                     return reject(@TypeOf(req), req);
                 }
                 state.approved = true;

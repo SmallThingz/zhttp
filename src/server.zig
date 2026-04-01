@@ -354,7 +354,7 @@ pub fn Server(comptime def: anytype) type {
         pub fn stop(self: *Self) void {
             if (self.lifecycle.cmpxchgStrong(.running, .stopping, .acq_rel, .acquire) != null) return;
 
-            const wake_count = (self.permanent_worker_count + self.max_temp_workers_runtime + 1) * listenerShardCount();
+            const wake_count = (self.permanent_worker_count + self.max_temp_workers_runtime + 1) * Conf.listener_shards;
             var i: usize = 0;
             while (i < wake_count) : (i += 1) {
                 var wake = std.Io.net.IpAddress.connect(&self.listener.socket.address, self.io, .{ .mode = .stream }) catch null;
@@ -393,31 +393,22 @@ pub fn Server(comptime def: anytype) type {
         };
 
         fn serve(self: *Self, opts: ServeOptions) Io.Cancelable!void {
-            const permanent_workers = permanentWorkerCount(opts.permanent_workers);
+            const permanent_workers = if (opts.permanent_workers != 0) blk: {
+                break :blk opts.permanent_workers;
+            } else blk: {
+                const cpu_count = std.Thread.getCpuCount() catch 1;
+                break :blk @max(cpu_count * 2 - 1, 1);
+            };
             self.permanent_worker_count = permanent_workers;
-            self.max_temp_workers_runtime = maxTempWorkerCount(permanent_workers);
+            self.max_temp_workers_runtime = if (Conf.max_temp_workers == 0) permanent_workers else Conf.max_temp_workers;
             var i: usize = 0;
             while (i < permanent_workers) : (i += 1) {
-                self.group.concurrent(self.io, worker, .{ self, i % listenerShardCount() }) catch return error.Canceled;
+                self.group.concurrent(self.io, worker, .{ self, i % Conf.listener_shards }) catch return error.Canceled;
             }
             if (Conf.temp_workers and self.max_temp_workers_runtime != 0) {
                 self.group.concurrent(self.io, spawnTempWorkers, .{self}) catch return error.Canceled;
             }
             self.group.await(self.io) catch {};
-        }
-
-        fn listenerShardCount() usize {
-            return Conf.listener_shards;
-        }
-
-        fn permanentWorkerCount(runtime_count: usize) usize {
-            if (runtime_count != 0) return runtime_count;
-            const cpu_count = std.Thread.getCpuCount() catch 1;
-            return @max(cpu_count * 2 - 1, 1);
-        }
-
-        fn maxTempWorkerCount(permanent_workers: usize) usize {
-            return if (Conf.max_temp_workers == 0) permanent_workers else Conf.max_temp_workers;
         }
 
         fn listenerAt(self: *Self, shard_idx: usize) *std.Io.net.Server {
@@ -465,7 +456,7 @@ pub fn Server(comptime def: anytype) type {
             defer state.deinit();
 
             var accepted: usize = 0;
-            const shard_idx = if (listenerShardCount() == 1) 0 else live_temp_index % listenerShardCount();
+            const shard_idx = if (Conf.listener_shards == 1) 0 else live_temp_index % Conf.listener_shards;
             while (self.lifecycle.load(.acquire) == .running and accepted < Conf.temp_worker_connection_limit) {
                 const stream = (try self.acceptOne(shard_idx)) orelse continue;
                 accepted += 1;
@@ -524,13 +515,9 @@ pub fn Server(comptime def: anytype) type {
             if (info.@"fn".return_type != Action) @compileError("error_handler must return router.Action");
         }
 
-        fn callErrorHandler(self: *Self, w: *Io.Writer, comptime ErrorSet: type, err: ErrorSet) Action {
+        pub fn handleHandlerError(self: *Self, w: *Io.Writer, comptime ErrorSet: type, err: ErrorSet) Action {
             comptime validateErrorHandler();
             return @call(.auto, ErrorHandler, .{ self, w, ErrorSet, err });
-        }
-
-        pub fn handleHandlerError(self: *Self, w: *Io.Writer, comptime ErrorSet: type, err: ErrorSet) Action {
-            return self.callErrorHandler(w, ErrorSet, err);
         }
 
         inline fn handleDispatchServerError(self: *Self, w: *Io.Writer, err: anytype) Action {

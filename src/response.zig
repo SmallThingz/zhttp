@@ -38,13 +38,6 @@ fn validateBodyType(comptime Body: type) void {
     }
 }
 
-fn defaultBodyValue(comptime Body: type) Body {
-    if (Body == []const u8) return "";
-    if (Body == [][]const u8) return @constCast(empty_segment_body_const[0..]);
-    if (Body == void) return {};
-    return undefined;
-}
-
 /// Maps a body representation to a concrete response type.
 ///
 /// Expected `Body` shape:
@@ -58,7 +51,12 @@ pub fn Response(comptime Body: type) type {
     return struct {
         status: std.http.Status = .ok,
         headers: []const Header = &.{},
-        body: Body = defaultBodyValue(Body),
+        body: Body = blk: {
+            if (Body == []const u8) break :blk "";
+            if (Body == [][]const u8) break :blk @constCast(empty_segment_body_const[0..]);
+            if (Body == void) break :blk {};
+            break :blk undefined;
+        },
         close: bool = false,
         format_connection_header: bool = true,
         format_content_length: bool = true,
@@ -108,17 +106,6 @@ pub const Res = Response([]const u8);
 pub const SegmentedRes = Response([][]const u8);
 pub const NoBodyRes = Response(void);
 
-/// Computes the total byte length across all segmented body parts.
-fn segmentedContentLength(parts: [][]const u8) usize {
-    var total: usize = 0;
-    for (parts) |p| {
-        const sum, const ov = @addWithOverflow(total, p.len);
-        if (ov != 0) unreachable;
-        total = sum;
-    }
-    return total;
-}
-
 /// Converts values in the range [0, 100) to a base 10 string.
 pub fn digits2(value: u8) [2]u8 {
     if (builtin.mode == .ReleaseSmall) {
@@ -166,10 +153,14 @@ pub fn writeAny(
 ) !void {
     const Body = @TypeOf(res.body);
     validateBodyType(Body);
+    const streams_body = comptime switch (@typeInfo(Body)) {
+        .@"struct" => @hasDecl(Body, "body"),
+        else => false,
+    };
 
     const close_conn = (!keep_alive) or res.close;
 
-    if (@hasDecl(Body, "body")) {
+    if (streams_body) {
         try writeStatusLine(w, res.status);
         try writeHeaders(w, res.headers, close_conn);
         // Custom body structs always stream through chunked encoding. They receive
@@ -181,6 +172,7 @@ pub fn writeAny(
         var cw: ChunkedWriter = .{ .w = w };
         try @call(.auto, Body.body, .{ res.body, rctx, req_ro, &cw });
         try cw.finish();
+        return;
     }
 
     try writeStatusLine(w, res.status);
@@ -192,7 +184,13 @@ pub fn writeAny(
             try w.writeAll(res.body);
         }
     } else if (Body == [][]const u8) {
-        try writeContentLength(w, segmentedContentLength(res.body));
+        var body_len: usize = 0;
+        for (res.body) |part| {
+            const sum, const ov = @addWithOverflow(body_len, part.len);
+            if (ov != 0) unreachable;
+            body_len = sum;
+        }
+        try writeContentLength(w, body_len);
         if (send_body) {
             try w.writeVecAll(res.body);
         }

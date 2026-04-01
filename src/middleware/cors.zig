@@ -121,7 +121,7 @@ pub fn Cors(comptime opts: CorsOptions) type {
         preflight: bool = false,
     } else struct {};
 
-    const Common = struct {
+    return struct {
         pub const Signature = CorsSignature;
         pub const info_name: []const u8 = if (store) opts.name.? else "cors";
         pub const Info = MiddlewareInfo{
@@ -134,43 +134,22 @@ pub fn Cors(comptime opts: CorsOptions) type {
             },
         };
 
-        fn originAllowed(origin: []const u8) bool {
-            if (origin_is_allowed) |f| return @call(.auto, f, .{origin});
-            if (allow_any_origin) return true;
-            for (origins) |o| {
-                if (std.mem.eql(u8, o, origin)) return true;
-            }
-            return false;
-        }
-
-        fn methodAllowed(method: []const u8) bool {
-            if (allow_any_method) return true;
-            return listContainsIgnoreCase(methods, method);
-        }
-
-        fn headersAllowed(requested: []const []const u8) bool {
-            if (allow_headers_opt == null) return true;
-            if (allow_any_header) return true;
-            const allowed = allow_headers_opt.?;
-            for (requested) |h| {
-                if (!listContainsIgnoreCase(allowed, h)) return false;
-            }
-            return true;
-        }
-
-        fn varyHeaderValue(preflight: bool) []const u8 {
-            return if (preflight)
-                "origin, access-control-request-method, access-control-request-headers"
-            else
-                "origin";
-        }
-
-        fn handle(comptime rctx: ReqCtx, req: rctx.T()) !Res {
+        /// Handles a middleware invocation for the current request context.
+        pub fn call(comptime rctx: ReqCtx, req: rctx.T()) !Res {
             const origin_opt = req.header(.origin) orelse return rctx.next(req);
             const origin = origin_opt;
             const needs_origin_copy = store or !(allow_any_origin and !allow_credentials);
             const origin_copy = if (needs_origin_copy) try req.allocator().dupe(u8, origin) else origin;
-            const allowed = originAllowed(origin);
+            const allowed = if (origin_is_allowed) |f|
+                @call(.auto, f, .{origin})
+            else if (allow_any_origin)
+                true
+            else blk: {
+                for (origins) |o| {
+                    if (std.mem.eql(u8, o, origin)) break :blk true;
+                }
+                break :blk false;
+            };
 
             const is_options = core_util.asciiEqlLower(req.method, "options");
             const preflight = is_options and req.header(.access_control_request_method) != null;
@@ -187,12 +166,21 @@ pub fn Cors(comptime opts: CorsOptions) type {
             if (preflight) {
                 if (!allowed) return Res.text(403, "cors forbidden");
                 const req_method = req.header(.access_control_request_method).?;
-                if (!methodAllowed(req_method)) return Res.text(403, "cors forbidden");
+                if (!allow_any_method and !listContainsIgnoreCase(methods, req_method)) {
+                    return Res.text(403, "cors forbidden");
+                }
 
                 var requested_headers: []const []const u8 = &.{};
                 if (req.header(.access_control_request_headers)) |h| {
                     requested_headers = try parseHeaderList(h, req.allocator());
-                    if (!headersAllowed(requested_headers)) return Res.text(403, "cors forbidden");
+                    if (allow_headers_opt != null and !allow_any_header) {
+                        const allowed_headers = allow_headers_opt.?;
+                        for (requested_headers) |header_name| {
+                            if (!listContainsIgnoreCase(allowed_headers, header_name)) {
+                                return Res.text(403, "cors forbidden");
+                            }
+                        }
+                    }
                 }
 
                 var hdrs: [6]Header = undefined;
@@ -242,7 +230,7 @@ pub fn Cors(comptime opts: CorsOptions) type {
                 }
 
                 if (util.shouldAddHeader(hdrs[0..n], "vary", vary_behavior)) {
-                    hdrs[n] = .{ .name = "vary", .value = varyHeaderValue(true) };
+                    hdrs[n] = .{ .name = "vary", .value = "origin, access-control-request-method, access-control-request-headers" };
                     n += 1;
                 }
 
@@ -281,7 +269,7 @@ pub fn Cors(comptime opts: CorsOptions) type {
             }
             if (!(allow_any_origin and !allow_credentials)) {
                 if (util.shouldAddHeader(res.headers, "vary", vary_behavior)) {
-                    hdrs[n] = .{ .name = "vary", .value = varyHeaderValue(false) };
+                    hdrs[n] = .{ .name = "vary", .value = "origin" };
                     n += 1;
                 }
             }
@@ -289,15 +277,6 @@ pub fn Cors(comptime opts: CorsOptions) type {
             if (n == 0) return res;
             res.headers = try util.appendHeaders(req.allocator(), res.headers, hdrs[0..n]);
             return res;
-        }
-    };
-
-    return struct {
-        pub const Signature = Common.Signature;
-        pub const Info = Common.Info;
-        /// Handles a middleware invocation for the current request context.
-        pub fn call(comptime rctx: ReqCtx, req: rctx.T()) !Res {
-            return Common.handle(rctx, req);
         }
     };
 }

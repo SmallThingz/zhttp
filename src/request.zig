@@ -73,14 +73,6 @@ fn trimCR(line: []u8) []u8 {
     return line;
 }
 
-fn trimSpaces(s: []const u8) []const u8 {
-    var a: usize = 0;
-    var b: usize = s.len;
-    while (a < b and (s[a] == ' ' or s[a] == '\t')) a += 1;
-    while (b > a and (s[b - 1] == ' ' or s[b - 1] == '\t')) b -= 1;
-    return s[a..b];
-}
-
 fn middlewareNameString(comptime name: anytype) []const u8 {
     return switch (@typeInfo(@TypeOf(name))) {
         .enum_literal => @tagName(name),
@@ -220,15 +212,11 @@ const ParsedHeader = enum {
     transfer_encoding,
 };
 
-fn asciiLower(c: u8) u8 {
-    return c | 0x20;
-}
-
 fn classifyParsedHeader(name: []const u8) ParsedHeader {
     return switch (name.len) {
-        10 => if (asciiLower(name[0]) == 'c' and util.asciiEqlLower(name, "connection")) .connection else .other,
-        14 => if (asciiLower(name[0]) == 'c' and util.asciiEqlLower(name, "content-length")) .content_length else .other,
-        17 => if (asciiLower(name[0]) == 't' and util.asciiEqlLower(name, "transfer-encoding")) .transfer_encoding else .other,
+        10 => if (util.asciiLower(name[0]) == 'c' and util.asciiEqlLower(name, "connection")) .connection else .other,
+        14 => if (util.asciiLower(name[0]) == 'c' and util.asciiEqlLower(name, "content-length")) .content_length else .other,
+        17 => if (util.asciiLower(name[0]) == 't' and util.asciiEqlLower(name, "transfer-encoding")) .transfer_encoding else .other,
         else => .other,
     };
 }
@@ -488,22 +476,6 @@ pub fn RequestPWithPatternExt(
             return &self._params;
         }
 
-        fn framingForContentLength(len: usize) BodyFraming {
-            return if (len == 0) .content_length_zero else .content_length;
-        }
-
-        fn bodyFraming(body: Body) BodyFraming {
-            return switch (body) {
-                .none => .none,
-                .chunked => .chunked,
-                .content_length => |len| framingForContentLength(len),
-                .downloaded => |downloaded| downloaded.framing,
-                .streamed => |framing| framing,
-                .discarded => |framing| framing,
-                .errored => |failed| failed.framing,
-            };
-        }
-
         fn setDownloadedBody(self: *Self, bytes: []u8, framing: BodyFraming) void {
             self._base.body = .{ .downloaded = .{
                 .bytes = bytes,
@@ -680,8 +652,7 @@ pub fn RequestPWithPatternExt(
 
                 const col = std.mem.indexOfScalarPos(u8, line, 1, ':') orelse return error.BadRequest;
                 const name = line[0..col];
-                var value: []const u8 = line[col + 1 ..];
-                value = trimSpaces(value);
+                const value = std.mem.trim(u8, line[col + 1 ..], " \t");
 
                 switch (classifyParsedHeader(name)) {
                     .connection => {
@@ -730,7 +701,15 @@ pub fn RequestPWithPatternExt(
         }
 
         fn rememberBodyError(self: *Self, err: BodyOpError) BodyOpError {
-            const framing = bodyFraming(self._base.body);
+            const framing = switch (self._base.body) {
+                .none => .none,
+                .chunked => .chunked,
+                .content_length => |len| if (len == 0) BodyFraming.content_length_zero else BodyFraming.content_length,
+                .downloaded => |downloaded| downloaded.framing,
+                .streamed => |body_framing| body_framing,
+                .discarded => |body_framing| body_framing,
+                .errored => |failed| failed.framing,
+            };
             self.clearBody(self._base.arena);
             self._base.body = .{ .errored = .{
                 .err = err,
@@ -744,19 +723,6 @@ pub fn RequestPWithPatternExt(
                 error.EndOfStream => error.EndOfStream,
                 error.ReadFailed => error.ReadFailed,
             });
-        }
-
-        fn readChunkTrailers(self: *Self, r: *Io.Reader) BodyOpError!void {
-            while (true) {
-                const t0_incl = r.takeDelimiterInclusive('\n') catch |err| switch (err) {
-                    error.StreamTooLong => return self.rememberBodyError(error.BadRequest),
-                    error.EndOfStream => return self.rememberBodyError(error.EndOfStream),
-                    error.ReadFailed => return self.rememberBodyError(error.ReadFailed),
-                };
-                const t0 = t0_incl[0 .. t0_incl.len - 1];
-                const t = trimCR(t0);
-                if (t.len == 0) return;
-            }
         }
 
         fn readChunkHeader(self: *Self, r: *Io.Reader) BodyOpError!?usize {
@@ -773,7 +739,15 @@ pub fn RequestPWithPatternExt(
             if (size == 0) {
                 // A zero-sized chunk terminates the body and is followed by
                 // optional trailers plus a blank line.
-                try self.readChunkTrailers(r);
+                while (true) {
+                    const trailer0_incl = r.takeDelimiterInclusive('\n') catch |err| switch (err) {
+                        error.StreamTooLong => return self.rememberBodyError(error.BadRequest),
+                        error.EndOfStream => return self.rememberBodyError(error.EndOfStream),
+                        error.ReadFailed => return self.rememberBodyError(error.ReadFailed),
+                    };
+                    const trailer0 = trailer0_incl[0 .. trailer0_incl.len - 1];
+                    if (trimCR(trailer0).len == 0) break;
+                }
                 return null;
             }
             return size;
@@ -783,30 +757,6 @@ pub fn RequestPWithPatternExt(
             var crlf: [2]u8 = undefined;
             try self.readExact(r, crlf[0..]);
             if (crlf[0] != '\r' or crlf[1] != '\n') return self.rememberBodyError(error.BadRequest);
-        }
-
-        fn readContentLengthAll(self: *Self, a: Allocator, r: *Io.Reader, len: usize, max_bytes: usize) BodyOpError![]const u8 {
-            if (len > max_bytes) return self.rememberBodyError(error.PayloadTooLarge);
-            const buf = try a.alloc(u8, len);
-            errdefer a.free(buf);
-            try self.readExact(r, buf);
-            self.setDownloadedBody(buf, framingForContentLength(len));
-            return buf;
-        }
-
-        fn readChunkedAll(self: *Self, a: Allocator, r: *Io.Reader, max_bytes: usize) BodyOpError![]const u8 {
-            var out: std.ArrayList(u8) = .empty;
-            errdefer out.deinit(a);
-            while (try self.readChunkHeader(r)) |size| {
-                const start = out.items.len;
-                if (size > max_bytes or start > max_bytes - size) return self.rememberBodyError(error.PayloadTooLarge);
-                try out.resize(a, start + size);
-                try self.readExact(r, out.items[start..][0..size]);
-                try self.readChunkCrlf(r);
-            }
-            const body = try out.toOwnedSlice(a);
-            self.setDownloadedBody(body, .chunked);
-            return body;
         }
 
         pub const BodyReader = struct {
@@ -945,8 +895,28 @@ pub fn RequestPWithPatternExt(
         pub fn bodyAll(self: *Self, max_bytes: usize) BodyOpError![]const u8 {
             return switch (self._base.body) {
                 .none => "",
-                .content_length => |len| self.readContentLengthAll(self._base.arena, self._base.reader, len, max_bytes),
-                .chunked => self.readChunkedAll(self._base.arena, self._base.reader, max_bytes),
+                .content_length => |len| blk: {
+                    if (len > max_bytes) return self.rememberBodyError(error.PayloadTooLarge);
+                    const buf = try self._base.arena.alloc(u8, len);
+                    errdefer self._base.arena.free(buf);
+                    try self.readExact(self._base.reader, buf);
+                    self.setDownloadedBody(buf, if (len == 0) BodyFraming.content_length_zero else BodyFraming.content_length);
+                    break :blk buf;
+                },
+                .chunked => blk: {
+                    var out: std.ArrayList(u8) = .empty;
+                    errdefer out.deinit(self._base.arena);
+                    while (try self.readChunkHeader(self._base.reader)) |size| {
+                        const start = out.items.len;
+                        if (size > max_bytes or start > max_bytes - size) return self.rememberBodyError(error.PayloadTooLarge);
+                        try out.resize(self._base.arena, start + size);
+                        try self.readExact(self._base.reader, out.items[start..][0..size]);
+                        try self.readChunkCrlf(self._base.reader);
+                    }
+                    const body = try out.toOwnedSlice(self._base.arena);
+                    self.setDownloadedBody(body, .chunked);
+                    break :blk body;
+                },
                 .downloaded => |downloaded| downloaded.bytes,
                 .discarded, .streamed => error.BadRequest,
                 .errored => |failed| failed.err,
@@ -966,7 +936,7 @@ pub fn RequestPWithPatternExt(
                     };
                 },
                 .content_length => |len| blk: {
-                    const framing = framingForContentLength(len);
+                    const framing: BodyFraming = if (len == 0) BodyFraming.content_length_zero else BodyFraming.content_length;
                     self.setStreamedBody(framing);
                     break :blk .{
                         .req = self,
@@ -1002,7 +972,7 @@ pub fn RequestPWithPatternExt(
                         });
                         remaining -= tossed;
                     }
-                    self.setDiscardedBody(framingForContentLength(len));
+                    self.setDiscardedBody(if (len == 0) BodyFraming.content_length_zero else BodyFraming.content_length);
                 },
                 .chunked => {
                     while (try self.readChunkHeader(self._base.reader)) |size| {

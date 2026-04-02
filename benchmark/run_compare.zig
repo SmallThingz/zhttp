@@ -123,7 +123,7 @@ pub fn main(init: std.process.Init) !void {
         .fixed_bytes = if (reuse) zhttp_res.fixed_bytes else null,
     };
 
-    const faf_dir = scripts.envString(env, "FAF_DIR", ".zig-cache/faf-example");
+    const faf_dir = env.get("FAF_DIR") orelse scripts.defaultFafExampleDir(reuse);
     const faf_core_dir = scripts.envString(env, "FAF_CORE_DIR", ".zig-cache/faf");
     const rustc_env = env.get("RUSTC_BIN") orelse env.get("RUSTC");
     const rustc_bin = rustc_env orelse "rustc";
@@ -144,7 +144,7 @@ pub fn main(init: std.process.Init) !void {
             return err;
         },
     };
-    if (reuse and zhttp_res.fixed_bytes != faf_res.fixed_bytes) return error.FixedBytesMismatch;
+    if (zhttp_res.fixed_bytes != faf_res.fixed_bytes) return error.FixedBytesMismatch;
 
     const compare_cfg: scripts.CompareConfig = .{
         .host = host,

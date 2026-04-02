@@ -965,8 +965,32 @@ fn patchFafExampleCargoToml(
     }
 }
 
-fn patchFafExampleMain(io: std.Io, allocator: std.mem.Allocator, root: []const u8, path: []const u8) !void {
-    const src = try std.fs.path.join(allocator, &.{ root, "benchmark", "faf_example_main.rs" });
+fn fafExampleTemplateRelPath(reuse: bool) []const u8 {
+    return if (reuse) "faf_example_main.rs" else "faf_example_main_noreuse.rs";
+}
+
+/// Returns the default cached FaF example checkout for the requested reuse mode.
+///
+/// Keep-alive and no-reuse use different `main.rs` templates, so they need
+/// distinct workdirs if we want `cargo build` artifacts to stay reusable across
+/// alternating benchmark runs.
+pub fn defaultFafExampleDir(reuse: bool) []const u8 {
+    return if (reuse) ".zig-cache/faf-example" else ".zig-cache/faf-example-noreuse";
+}
+
+test "defaultFafExampleDir separates reuse modes" {
+    try std.testing.expectEqualStrings(".zig-cache/faf-example", defaultFafExampleDir(true));
+    try std.testing.expectEqualStrings(".zig-cache/faf-example-noreuse", defaultFafExampleDir(false));
+}
+
+fn patchFafExampleMain(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    root: []const u8,
+    path: []const u8,
+    reuse: bool,
+) !void {
+    const src = try std.fs.path.join(allocator, &.{ root, "benchmark", fafExampleTemplateRelPath(reuse) });
     defer allocator.free(src);
     const default_main = try readFileMaybe(io, allocator, src) orelse return error.FileNotFound;
     defer allocator.free(default_main);
@@ -1066,7 +1090,7 @@ pub fn runFaf(
         if (main_data == null) {
             ex_patched = false;
         } else {
-            const tmpl_path = try std.fs.path.join(allocator, &.{ root, "benchmark", "faf_example_main.rs" });
+            const tmpl_path = try std.fs.path.join(allocator, &.{ root, "benchmark", fafExampleTemplateRelPath(cfg.reuse) });
             defer allocator.free(tmpl_path);
             const tmpl_data = try readFileMaybe(io, allocator, tmpl_path) orelse return error.FileNotFound;
             defer allocator.free(tmpl_data);
@@ -1078,7 +1102,7 @@ pub fn runFaf(
     }
     if (!ex_patched) {
         try patchFafExampleCargoToml(io, allocator, cargo_path, faf_core_dir_abs, lock_path);
-        try patchFafExampleMain(io, allocator, root, main_path);
+        try patchFafExampleMain(io, allocator, root, main_path, cfg.reuse);
         _ = try writeFileIfChanged(io, allocator, ex_marker, faf_rev.?);
     }
 
@@ -1433,7 +1457,7 @@ pub fn writeCompareSnapshotAndSyncReadme(
         .zhttp = zhttp,
         .faf = faf,
     };
-    if (cfg.reuse) try ensureFixedBytesParity(snap.zhttp, snap.faf);
+    try ensureFixedBytesParity(snap.zhttp, snap.faf);
 
     var json_writer: std.Io.Writer.Allocating = .init(allocator);
     defer json_writer.deinit();

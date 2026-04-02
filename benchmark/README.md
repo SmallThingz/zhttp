@@ -71,6 +71,7 @@ Notes:
 - `--host` is currently expected to be an IPv4 literal.
 - If `--fixed-bytes` is not provided, the benchmark auto-discovers `Content-Length` once (outside the hot loop).
 - `run_zhttp_external.zig` and `run_faf.zig` both validate response size stability by discovering fixed bytes twice before timing.
+- `run_compare.zig` now uses a dedicated FaF no-reuse example template so the no-reuse comparison matches zhttp's close-response byte count too.
 - Use `--full-request` to send `Host:` and `Connection:` headers (default is the minimal `GET ...\r\n\r\n` request).
 - `--reuse=1` (default) reuses one keep-alive connection per worker; use `--reuse=0` / `--no-reuse` to reconnect every request.
 - `zhttp-bench-server` uses `cpu_count` permanent workers in both reuse modes.

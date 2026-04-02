@@ -194,12 +194,12 @@ Recommended zhttp config for this workload: `.config = .{ .temp_worker_spawn = .
 
 Source: `benchmark/results/latest_noreuse.json`
 
-Config: host=`127.0.0.1` path=`/plaintext` conns=16 iters=100000 warmup=10000 full_request=true reuse=false
+Config: host=`127.0.0.1` path=`/plaintext` conns=16 iters=16 warmup=16 full_request=true reuse=false
 
 | Target | req/s | ns/req | relative |
 |---|---:|---:|---:|
-| zhttp | 231842.84 | 4313.30 | 1.006x vs faf |
-| faf | 230426.94 | 4339.80 | 0.994x vs zhttp |
+| zhttp | 28713.29 | 34827.10 | 0.412x vs faf |
+| faf | 69658.58 | 14355.70 | 2.426x vs zhttp |
 
 No benchmark transport errors were reported.
 
@@ -219,8 +219,8 @@ Config: host=`127.0.0.1` path=`/plaintext` conns=16 iters=100000 warmup=10000 fu
 
 | Target | req/s | ns/req | relative |
 |---|---:|---:|---:|
-| zhttp | 801129.81 | 1248.20 | 1.012x vs faf |
-| faf | 791341.79 | 1263.70 | 0.988x vs zhttp |
+| zhttp | 830464.42 | 1204.10 | 0.974x vs faf |
+| faf | 853061.77 | 1172.20 | 1.027x vs zhttp |
 
 No benchmark transport errors were reported.
 

@@ -65,9 +65,10 @@ pub fn main(init: std.process.Init) !void {
             // With the normal buffered response path, abortive close restores the
             // short-connection throughput that the benchmark is meant to measure.
             .abortive_close = true,
-            .temp_workers = false,
-            .max_temp_workers = 8,
-            .temp_worker_connection_limit = 1_000_000,
+            // Bench runs may use more live connections than permanent workers.
+            // Keep temporary workers enabled so the benchmark server can still
+            // service all accepted keep-alive sockets without deadlocking when
+            // `conns > cpu_count`.
         },
     });
 

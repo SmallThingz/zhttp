@@ -163,6 +163,8 @@ Benchmark commands and modes are documented in [`benchmark/README.md`](./benchma
 ### Reuse Off (`--reuse=0`)
 Use case: A server the handles client connections with no middleman \[NO proxy, NO load balancer, NO api gateway\] and short lived connections
 
+Recommended zhttp config for this workload: `.config = .{ .temp_worker_spawn = .signaled }`
+
 <!-- README_COMPARISON_NOREUSE:START -->
 
 Source: `benchmark/results/latest_noreuse.json`
@@ -181,6 +183,8 @@ Fairness notes: both targets use the same benchmark client settings (host/path/c
 
 ### Reuse On (`--reuse=1`, Default)
 Use case: A server the uses any of proxy / load balancer / api gateway which have long lived connections
+
+Recommended zhttp config for this workload: `.config = .{ .temp_worker_spawn = .polling }`
 
 <!-- README_COMPARISON:START -->
 

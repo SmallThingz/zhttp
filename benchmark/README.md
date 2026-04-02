@@ -73,6 +73,7 @@ Notes:
 - `run_zhttp_external.zig` and `run_faf.zig` both validate response size stability by discovering fixed bytes twice before timing.
 - Use `--full-request` to send `Host:` and `Connection:` headers (default is the minimal `GET ...\r\n\r\n` request).
 - `--reuse=1` (default) reuses one keep-alive connection per worker; use `--reuse=0` / `--no-reuse` to reconnect every request.
+- For zhttp server config, prefer `.temp_worker_spawn = .polling` for keep-alive-heavy (`--reuse=1`) traffic and `.temp_worker_spawn = .signaled` for reconnect-heavy (`--reuse=0`) traffic.
 - For the helper scripts, set `FULL_REQUEST=1` to pass `--full-request`:
   - `FULL_REQUEST=1 zig run benchmark/run_zhttp_external.zig`
   - `FULL_REQUEST=1 zig run benchmark/run_faf.zig`

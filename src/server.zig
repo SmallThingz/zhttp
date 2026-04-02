@@ -52,8 +52,20 @@ pub const Config = struct {
     temp_worker_connection_limit: usize = 1024,
     /// Enables temporary worker spawning under sustained pressure.
     temp_workers: bool = true,
+    /// Temporary-worker spawn policy.
+    ///
+    /// `.polling` keeps the autoscaler sleep loop and is the current
+    /// recommendation for keep-alive-heavy traffic. `.signaled` wakes the
+    /// autoscaler only when workers saturate and is the current
+    /// recommendation for reconnect-heavy (`reuse=0`) traffic.
+    temp_worker_spawn: TempWorkerSpawn = .polling,
     /// Maximum number of temporary workers alive at once. Zero means auto (= permanent worker count).
     max_temp_workers: usize = 0,
+};
+
+pub const TempWorkerSpawn = enum {
+    polling,
+    signaled,
 };
 
 fn configField(comptime cfg: anytype, comptime name: []const u8) @FieldType(Config, name) {
@@ -92,6 +104,7 @@ pub fn Server(comptime def: anytype) type {
         .arena_reset_limit = configField(cfg, "arena_reset_limit"),
         .temp_worker_connection_limit = configField(cfg, "temp_worker_connection_limit"),
         .temp_workers = configField(cfg, "temp_workers"),
+        .temp_worker_spawn = configField(cfg, "temp_worker_spawn"),
         .max_temp_workers = configField(cfg, "max_temp_workers"),
     };
     comptime {
@@ -147,6 +160,9 @@ pub fn Server(comptime def: anytype) type {
         max_temp_workers_runtime: usize,
         busy_workers: std.atomic.Value(usize),
         live_temp_workers: std.atomic.Value(usize),
+        temp_worker_mutex: if (Conf.temp_worker_spawn == .signaled) Io.Mutex else void,
+        temp_worker_cond: if (Conf.temp_worker_spawn == .signaled) Io.Condition else void,
+        temp_worker_requested: if (Conf.temp_worker_spawn == .signaled) bool else void,
         ctx: if (Context == void) void else *Context,
         route_static_ctx: RouteStaticCtxTuple,
 
@@ -217,6 +233,170 @@ pub fn Server(comptime def: anytype) type {
             }
         };
         const ErrorHandler = if (@hasField(DefT, "error_handler")) def.error_handler else DefaultErrorHandler.call;
+        const TempWorkerSupport = switch (Conf.temp_worker_spawn) {
+            .polling => struct {
+                const extra_stop_wake_workers: usize = 1;
+
+                inline fn stop(_: *Self) void {}
+
+                fn worker(self: *Self, shard_idx: usize) Io.Cancelable!void {
+                    var state = WorkerState.init(self.gpa);
+                    defer state.deinit();
+                    while (self.lifecycle.load(.acquire) == .running) {
+                        const stream = (try self.acceptOne(shard_idx)) orelse continue;
+                        if (Conf.temp_workers) _ = self.busy_workers.fetchAdd(1, .monotonic);
+                        handleConn(self, &state, stream) catch |err| {
+                            if (Conf.temp_workers) _ = self.busy_workers.fetchSub(1, .monotonic);
+                            switch (err) {
+                                error.Canceled => return,
+                            }
+                        };
+                        if (Conf.temp_workers) _ = self.busy_workers.fetchSub(1, .monotonic);
+                        state.reset();
+                    }
+                }
+
+                fn tempWorker(self: *Self) Io.Cancelable!void {
+                    const live_temp_index = self.live_temp_workers.fetchAdd(1, .monotonic);
+                    defer _ = self.live_temp_workers.fetchSub(1, .monotonic);
+                    var state = WorkerState.init(self.gpa);
+                    defer state.deinit();
+
+                    var accepted: usize = 0;
+                    const shard_idx = if (Conf.listener_shards == 1) 0 else live_temp_index % Conf.listener_shards;
+                    while (self.lifecycle.load(.acquire) == .running and accepted < Conf.temp_worker_connection_limit) {
+                        const stream = (try self.acceptOne(shard_idx)) orelse continue;
+                        accepted += 1;
+                        _ = self.busy_workers.fetchAdd(1, .monotonic);
+                        handleConn(self, &state, stream) catch |err| {
+                            _ = self.busy_workers.fetchSub(1, .monotonic);
+                            switch (err) {
+                                error.Canceled => return,
+                            }
+                        };
+                        _ = self.busy_workers.fetchSub(1, .monotonic);
+                        state.reset();
+                    }
+                }
+
+                fn spawn(self: *Self) Io.Cancelable!void {
+                    var idle_sleep_ms: i64 = 1;
+                    while (self.lifecycle.load(.acquire) == .running) {
+                        const live_temp = self.live_temp_workers.load(.monotonic);
+                        const busy = self.busy_workers.load(.monotonic);
+                        const total_workers = self.permanent_worker_count + live_temp;
+                        if (live_temp < self.max_temp_workers_runtime and busy >= total_workers) {
+                            self.group.concurrent(self.io, tempWorker, .{self}) catch {};
+                            idle_sleep_ms = 1;
+                        } else if (busy + 1 < total_workers) {
+                            idle_sleep_ms = @min(idle_sleep_ms * 2, 8);
+                        } else {
+                            idle_sleep_ms = 1;
+                        }
+                        std.Io.sleep(self.io, std.Io.Duration.fromMilliseconds(idle_sleep_ms), .awake) catch return;
+                    }
+                }
+            },
+            .signaled => struct {
+                const extra_stop_wake_workers: usize = 0;
+
+                inline fn stop(self: *Self) void {
+                    self.temp_worker_mutex.lockUncancelable(self.io);
+                    self.temp_worker_requested = true;
+                    self.temp_worker_cond.broadcast(self.io);
+                    self.temp_worker_mutex.unlock(self.io);
+                }
+
+                inline fn requestSpawn(self: *Self, busy_now: usize) void {
+                    if (!Conf.temp_workers or self.max_temp_workers_runtime == 0) return;
+                    if (self.lifecycle.load(.acquire) != .running) return;
+
+                    const live_temp = self.live_temp_workers.load(.monotonic);
+                    if (live_temp >= self.max_temp_workers_runtime) return;
+                    if (busy_now != self.permanent_worker_count + live_temp) return;
+                    if (!self.temp_worker_mutex.tryLock()) return;
+                    defer self.temp_worker_mutex.unlock(self.io);
+
+                    if (!self.temp_worker_requested) {
+                        self.temp_worker_requested = true;
+                        self.temp_worker_cond.signal(self.io);
+                    }
+                }
+
+                fn worker(self: *Self, shard_idx: usize) Io.Cancelable!void {
+                    var state = WorkerState.init(self.gpa);
+                    defer state.deinit();
+                    while (self.lifecycle.load(.acquire) == .running) {
+                        const stream = (try self.acceptOne(shard_idx)) orelse continue;
+                        if (Conf.temp_workers) {
+                            const prev_busy = self.busy_workers.fetchAdd(1, .monotonic);
+                            requestSpawn(self, prev_busy + 1);
+                        }
+                        handleConn(self, &state, stream) catch |err| {
+                            if (Conf.temp_workers) _ = self.busy_workers.fetchSub(1, .monotonic);
+                            switch (err) {
+                                error.Canceled => return,
+                            }
+                        };
+                        if (Conf.temp_workers) _ = self.busy_workers.fetchSub(1, .monotonic);
+                        state.reset();
+                    }
+                }
+
+                fn tempWorker(self: *Self, shard_idx: usize) Io.Cancelable!void {
+                    defer _ = self.live_temp_workers.fetchSub(1, .acq_rel);
+                    var state = WorkerState.init(self.gpa);
+                    defer state.deinit();
+
+                    var accepted: usize = 0;
+                    while (self.lifecycle.load(.acquire) == .running and accepted < Conf.temp_worker_connection_limit) {
+                        const stream = (try self.acceptOne(shard_idx)) orelse continue;
+                        accepted += 1;
+                        const prev_busy = self.busy_workers.fetchAdd(1, .monotonic);
+                        requestSpawn(self, prev_busy + 1);
+                        handleConn(self, &state, stream) catch |err| {
+                            _ = self.busy_workers.fetchSub(1, .monotonic);
+                            switch (err) {
+                                error.Canceled => return,
+                            }
+                        };
+                        _ = self.busy_workers.fetchSub(1, .monotonic);
+                        state.reset();
+                    }
+                }
+
+                fn spawn(self: *Self) Io.Cancelable!void {
+                    while (self.lifecycle.load(.acquire) == .running) {
+                        try self.temp_worker_mutex.lock(self.io);
+                        while (!self.temp_worker_requested and self.lifecycle.load(.acquire) == .running) {
+                            self.temp_worker_cond.wait(self.io, &self.temp_worker_mutex) catch |err| {
+                                self.temp_worker_mutex.unlock(self.io);
+                                return err;
+                            };
+                        }
+                        self.temp_worker_requested = false;
+                        self.temp_worker_mutex.unlock(self.io);
+
+                        while (self.lifecycle.load(.acquire) == .running) {
+                            const live_temp = self.live_temp_workers.load(.monotonic);
+                            const busy = self.busy_workers.load(.monotonic);
+                            const total_workers = self.permanent_worker_count + live_temp;
+                            if (live_temp >= self.max_temp_workers_runtime or busy < total_workers) break;
+
+                            if (self.live_temp_workers.cmpxchgWeak(live_temp, live_temp + 1, .acq_rel, .monotonic)) |_| {
+                                continue;
+                            }
+
+                            const shard_idx = if (Conf.listener_shards == 1) 0 else live_temp % Conf.listener_shards;
+                            self.group.concurrent(self.io, tempWorker, .{ self, shard_idx }) catch {
+                                _ = self.live_temp_workers.fetchSub(1, .acq_rel);
+                                return error.Canceled;
+                            };
+                        }
+                    }
+                }
+            },
+        };
         pub const RouteCount: usize = route_fields.len;
         pub const RouteDeclList: [route_fields.len]router.RouteDecl = blk: {
             var out: [route_fields.len]router.RouteDecl = undefined;
@@ -345,6 +525,9 @@ pub fn Server(comptime def: anytype) type {
                 .max_temp_workers_runtime = 0,
                 .busy_workers = std.atomic.Value(usize).init(0),
                 .live_temp_workers = std.atomic.Value(usize).init(0),
+                .temp_worker_mutex = if (Conf.temp_worker_spawn == .signaled) .init else {},
+                .temp_worker_cond = if (Conf.temp_worker_spawn == .signaled) .init else {},
+                .temp_worker_requested = if (Conf.temp_worker_spawn == .signaled) false else {},
                 .ctx = ctx,
                 .route_static_ctx = route_static_ctx,
             };
@@ -354,7 +537,11 @@ pub fn Server(comptime def: anytype) type {
         pub fn stop(self: *Self) void {
             if (self.lifecycle.cmpxchgStrong(.running, .stopping, .acq_rel, .acquire) != null) return;
 
-            const wake_count = (self.permanent_worker_count + self.max_temp_workers_runtime + 1) * Conf.listener_shards;
+            if (Conf.temp_workers and self.max_temp_workers_runtime != 0) {
+                TempWorkerSupport.stop(self);
+            }
+
+            const wake_count = (self.permanent_worker_count + self.max_temp_workers_runtime + TempWorkerSupport.extra_stop_wake_workers) * Conf.listener_shards;
             var i: usize = 0;
             while (i < wake_count) : (i += 1) {
                 var wake = std.Io.net.IpAddress.connect(&self.listener.socket.address, self.io, .{ .mode = .stream }) catch null;
@@ -403,10 +590,10 @@ pub fn Server(comptime def: anytype) type {
             self.max_temp_workers_runtime = if (Conf.max_temp_workers == 0) permanent_workers else Conf.max_temp_workers;
             var i: usize = 0;
             while (i < permanent_workers) : (i += 1) {
-                self.group.concurrent(self.io, worker, .{ self, i % Conf.listener_shards }) catch return error.Canceled;
+                self.group.concurrent(self.io, TempWorkerSupport.worker, .{ self, i % Conf.listener_shards }) catch return error.Canceled;
             }
             if (Conf.temp_workers and self.max_temp_workers_runtime != 0) {
-                self.group.concurrent(self.io, spawnTempWorkers, .{self}) catch return error.Canceled;
+                self.group.concurrent(self.io, TempWorkerSupport.spawn, .{self}) catch return error.Canceled;
             }
             self.group.await(self.io) catch {};
         }
@@ -430,64 +617,6 @@ pub fn Server(comptime def: anytype) type {
                 return error.Canceled;
             }
             return stream;
-        }
-
-        fn worker(self: *Self, shard_idx: usize) Io.Cancelable!void {
-            var state = WorkerState.init(self.gpa);
-            defer state.deinit();
-            while (self.lifecycle.load(.acquire) == .running) {
-                const stream = (try self.acceptOne(shard_idx)) orelse continue;
-                if (Conf.temp_workers) _ = self.busy_workers.fetchAdd(1, .monotonic);
-                handleConn(self, &state, stream) catch |err| {
-                    if (Conf.temp_workers) _ = self.busy_workers.fetchSub(1, .monotonic);
-                    switch (err) {
-                        error.Canceled => return,
-                    }
-                };
-                if (Conf.temp_workers) _ = self.busy_workers.fetchSub(1, .monotonic);
-                state.reset();
-            }
-        }
-
-        fn tempWorker(self: *Self) Io.Cancelable!void {
-            const live_temp_index = self.live_temp_workers.fetchAdd(1, .monotonic);
-            defer _ = self.live_temp_workers.fetchSub(1, .monotonic);
-            var state = WorkerState.init(self.gpa);
-            defer state.deinit();
-
-            var accepted: usize = 0;
-            const shard_idx = if (Conf.listener_shards == 1) 0 else live_temp_index % Conf.listener_shards;
-            while (self.lifecycle.load(.acquire) == .running and accepted < Conf.temp_worker_connection_limit) {
-                const stream = (try self.acceptOne(shard_idx)) orelse continue;
-                accepted += 1;
-                _ = self.busy_workers.fetchAdd(1, .monotonic);
-                handleConn(self, &state, stream) catch |err| {
-                    _ = self.busy_workers.fetchSub(1, .monotonic);
-                    switch (err) {
-                        error.Canceled => return,
-                    }
-                };
-                _ = self.busy_workers.fetchSub(1, .monotonic);
-                state.reset();
-            }
-        }
-
-        fn spawnTempWorkers(self: *Self) Io.Cancelable!void {
-            var idle_sleep_ms: i64 = 1;
-            while (self.lifecycle.load(.acquire) == .running) {
-                const live_temp = self.live_temp_workers.load(.monotonic);
-                const busy = self.busy_workers.load(.monotonic);
-                const total_workers = self.permanent_worker_count + live_temp;
-                if (live_temp < self.max_temp_workers_runtime and busy >= total_workers) {
-                    self.group.concurrent(self.io, tempWorker, .{self}) catch {};
-                    idle_sleep_ms = 1;
-                } else if (busy + 1 < total_workers) {
-                    idle_sleep_ms = @min(idle_sleep_ms * 2, 8);
-                } else {
-                    idle_sleep_ms = 1;
-                }
-                std.Io.sleep(self.io, std.Io.Duration.fromMilliseconds(idle_sleep_ms), .awake) catch return;
-            }
         }
 
         fn writeSimple(self: *Self, w: *Io.Writer, status: u16, body: []const u8) void {
@@ -1088,6 +1217,24 @@ test "Server config: listener_shards=1 compiles listener selection path" {
     });
     const listener_at: fn (*SrvT, usize) *std.Io.net.Server = SrvT.listenerAt;
     _ = listener_at;
+}
+
+test "Server config: temp_worker_spawn=signaled compiles signaled autoscaler path" {
+    const SrvT = Server(.{
+        .routes = .{
+            router.get("/", struct {
+                pub const Info: router.EndpointInfo = .{};
+                pub fn call(comptime rctx: ReqCtx, req: rctx.T()) !response.Res {
+                    _ = req;
+                    return response.Res.text(200, "ok");
+                }
+            }),
+        },
+        .config = .{
+            .temp_worker_spawn = .signaled,
+        },
+    });
+    _ = SrvT.TempWorkerSupport;
 }
 
 test "Server stop: stop after deinit is a no-op" {

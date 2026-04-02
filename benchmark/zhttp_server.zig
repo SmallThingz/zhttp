@@ -98,6 +98,7 @@ pub fn main(init: std.process.Init) !void {
         },
         .config = .{
             .listen_backlog = 65_535,
+            .write_buffer = 0,
             .abortive_close = true,
             .temp_workers = false,
             .max_temp_workers = 8,

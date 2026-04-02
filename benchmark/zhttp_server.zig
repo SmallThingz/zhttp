@@ -61,7 +61,7 @@ fn usage() void {
         \\zhttp-bench-server
         \\
         \\Usage:
-        \\  zhttp-bench-server [--port=8081]
+        \\  zhttp-bench-server [--port=8081] [--reuse=1|0]
         \\
     , .{});
 }
@@ -69,7 +69,10 @@ fn usage() void {
 /// Starts this executable.
 pub fn main(init: std.process.Init) !void {
     var port: u16 = 8081;
-    const permanent_workers = @max(std.Thread.getCpuCount() catch 1, 16);
+    var reuse = true;
+    const cpu_count = std.Thread.getCpuCount() catch 1;
+    const keep_alive_workers = @max(cpu_count, 16);
+    const reconnect_workers = cpu_count;
 
     var it = try std.process.Args.Iterator.initAllocator(init.minimal.args, init.gpa);
     defer it.deinit();
@@ -81,9 +84,15 @@ pub fn main(init: std.process.Init) !void {
             usage();
             return;
         }
+        if (std.mem.eql(u8, arg, "--no-reuse")) {
+            reuse = false;
+            continue;
+        }
         if (scripts.parseKeyVal(arg)) |kv| {
             if (std.mem.eql(u8, kv.key, "port")) {
                 port = try std.fmt.parseInt(u16, kv.val, 10);
+            } else if (std.mem.eql(u8, kv.key, "reuse")) {
+                reuse = !std.mem.eql(u8, kv.val, "0");
             } else {
                 return error.UnknownArg;
             }
@@ -112,6 +121,6 @@ pub fn main(init: std.process.Init) !void {
         .io = init.io,
         .address = addr,
         .ctx = {},
-        .permanent_workers = permanent_workers,
+        .permanent_workers = if (reuse) keep_alive_workers else reconnect_workers,
     });
 }

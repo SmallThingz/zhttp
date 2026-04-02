@@ -589,13 +589,12 @@ pub fn runZhttpExternal(
 
     var port_buf: [16]u8 = undefined;
     const port_arg = try std.fmt.bufPrint(&port_buf, "--port={d}", .{cfg.port});
+    const reuse_arg: ?[]const u8 = if (cfg.reuse) null else "--reuse=0";
 
-    var server = try spawnBackground(
-        io,
-        &.{ "./zig-out/bin/zhttp-bench-server", port_arg },
-        root,
-        false,
-    );
+    var server = if (reuse_arg) |arg|
+        try spawnBackground(io, &.{ "./zig-out/bin/zhttp-bench-server", port_arg, arg }, root, false)
+    else
+        try spawnBackground(io, &.{ "./zig-out/bin/zhttp-bench-server", port_arg }, root, false);
     defer terminateChild(io, &server);
 
     const addr = try std.Io.net.IpAddress.parseIp4(cfg.host, cfg.port);

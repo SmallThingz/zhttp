@@ -104,6 +104,11 @@ pub const Res = Response([]const u8);
 pub const SegmentedRes = Response([][]const u8);
 pub const NoBodyRes = Response(void);
 
+/// Reports whether a response overrides the connection to close.
+pub fn closes(res: anytype) bool {
+    return if (@hasField(@TypeOf(res), "close")) res.close else false;
+}
+
 /// Converts values in the range [0, 100) to a base 10 string.
 pub fn digits2(value: u8) [2]u8 {
     if (builtin.mode == .ReleaseSmall) {
@@ -139,8 +144,12 @@ fn writeHeaders(
 /// Expected shapes:
 /// - `rctx` is a request context value (`zhttp.ReqCtx`).
 /// - `req_ro` is `rctx.TReadOnly()` for that same context.
-/// - `res` is `response.Response(Body)` (or compatible struct) with fields:
-///   `status`, `headers`, `body`, and optional `close`.
+/// - `res` is either:
+///   - `response.Response(Body)` (or compatible struct) with fields:
+///     `status`, `headers`, `body`, and optional `close`, or
+///   - a custom struct exposing
+///     `pub fn write(self: @This(), w: *std.Io.Writer, keep_alive: bool, send_body: bool) !void`
+///     and optional `close: bool`.
 pub fn writeAny(
     comptime rctx: anytype,
     req_ro: anytype,
@@ -149,14 +158,20 @@ pub fn writeAny(
     keep_alive: bool,
     send_body: bool,
 ) !void {
+    const close_conn = (!keep_alive) or closes(res);
+    const effective_keep_alive = !close_conn;
+    const ResT = @TypeOf(res);
+    if (comptime @hasDecl(ResT, "write")) {
+        try @call(.auto, ResT.write, .{ res, w, effective_keep_alive, send_body });
+        return;
+    }
+
     const Body = @TypeOf(res.body);
     validateBodyType(Body);
     const streams_body = comptime switch (@typeInfo(Body)) {
         .@"struct" => @hasDecl(Body, "body"),
         else => false,
     };
-
-    const close_conn = (!keep_alive) or res.close;
 
     if (streams_body) {
         try writeStatusLine(w, res.status);
@@ -300,6 +315,32 @@ test "write: res.close forces close" {
     var w = std.Io.Writer.fixed(out[0..]);
     try write(&w, res, true, true);
     try std.testing.expect(std.mem.indexOf(u8, out[0..w.end], "connection: close\r\n") != null);
+}
+
+test "writeAny: custom writer hook receives effective keep-alive" {
+    const Custom = struct {
+        close: bool = false,
+
+        pub fn write(self: @This(), w: *std.Io.Writer, keep_alive: bool, send_body: bool) !void {
+            _ = self;
+            try w.writeAll(if (keep_alive)
+                if (send_body) "ka-body" else "ka-head"
+            else if (send_body)
+                "close-body"
+            else
+                "close-head");
+        }
+    };
+
+    var out1: [64]u8 = undefined;
+    var w1 = std.Io.Writer.fixed(out1[0..]);
+    try writeAny({}, {}, &w1, Custom{}, true, true);
+    try std.testing.expectEqualStrings("ka-body", out1[0..w1.end]);
+
+    var out2: [64]u8 = undefined;
+    var w2 = std.Io.Writer.fixed(out2[0..]);
+    try writeAny({}, {}, &w2, Custom{ .close = true }, true, false);
+    try std.testing.expectEqualStrings("close-head", out2[0..w2.end]);
 }
 
 test "writeUpgrade: does not inject connection or content-length" {

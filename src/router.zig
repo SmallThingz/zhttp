@@ -1121,7 +1121,7 @@ pub fn Compiled(
             // return only transport actions while body serialization stays
             // close to the final writer.
             try response.writeAny(rctx, req_ro, w, res, keep_alive, send_body);
-            return if (!keep_alive or res.close) .close else .@"continue";
+            return if (!keep_alive or response.closes(res)) .close else .@"continue";
         }
 
         /// Invokes endpoint-defined upgrade callback after a successful 101 write.

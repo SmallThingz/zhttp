@@ -2,20 +2,57 @@ const std = @import("std");
 const zhttp = @import("zhttp");
 const scripts = @import("scripts.zig");
 
+const PlaintextResponse = struct {
+    const keep_alive_body =
+        "HTTP/1.1 200 OK\r\n" ++
+        "Server: F\r\n" ++
+        "Content-Type: text/plain\r\n" ++
+        "Content-Length: 13\r\n" ++
+        "Connection: keep-alive\r\n" ++
+        "Date: Wed, 24 Feb 2021 12:00:00 GMT\r\n" ++
+        "\r\n" ++
+        "Hello, World!";
+    const keep_alive_head =
+        "HTTP/1.1 200 OK\r\n" ++
+        "Server: F\r\n" ++
+        "Content-Type: text/plain\r\n" ++
+        "Content-Length: 13\r\n" ++
+        "Connection: keep-alive\r\n" ++
+        "Date: Wed, 24 Feb 2021 12:00:00 GMT\r\n" ++
+        "\r\n";
+    const close_body =
+        "HTTP/1.1 200 OK\r\n" ++
+        "Server: F\r\n" ++
+        "Content-Type: text/plain\r\n" ++
+        "Content-Length: 13\r\n" ++
+        "Connection: close\r\n" ++
+        "Date: Wed, 24 Feb 2021 12:00:00 GMT\r\n" ++
+        "\r\n" ++
+        "Hello, World!";
+    const close_head =
+        "HTTP/1.1 200 OK\r\n" ++
+        "Server: F\r\n" ++
+        "Content-Type: text/plain\r\n" ++
+        "Content-Length: 13\r\n" ++
+        "Connection: close\r\n" ++
+        "Date: Wed, 24 Feb 2021 12:00:00 GMT\r\n" ++
+        "\r\n";
+
+    pub fn write(_: @This(), w: *std.Io.Writer, keep_alive: bool, send_body: bool) !void {
+        try w.writeAll(if (keep_alive)
+            if (send_body) keep_alive_body else keep_alive_head
+        else if (send_body)
+            close_body
+        else
+            close_head);
+    }
+};
+
 const Plaintext = struct {
     pub const Info: zhttp.router.EndpointInfo = .{};
-    pub fn call(comptime _: zhttp.ReqCtx, req: anytype) !zhttp.Res {
+    pub fn call(comptime _: zhttp.ReqCtx, req: anytype) !PlaintextResponse {
         _ = req;
-        const body = "Hello, World!";
-        return .{
-            .status = .ok,
-            .headers = &.{
-                .{ .name = "Server", .value = "F" },
-                .{ .name = "Content-Type", .value = "text/plain" },
-                .{ .name = "Date", .value = "Wed, 24 Feb 2021 12:00:00 GMT" },
-            },
-            .body = body,
-        };
+        return .{};
     }
 };
 

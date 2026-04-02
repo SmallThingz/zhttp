@@ -99,11 +99,18 @@ This section is the explicit contract for every public API that takes `type`/`an
     - `void`
     - custom struct with:
       `pub fn body(self: @This(), comptime rctx: zhttp.ReqCtx, req: rctx.TReadOnly(), cw: *zhttp.response.ChunkedWriter) !void`
+  - endpoint handlers may also return a prebuilt response struct instead of `Response(Body)` when it exposes:
+    `pub fn write(self: @This(), w: *std.Io.Writer, keep_alive: bool, send_body: bool) !void`
+    and optional `close: bool`
+  - server dispatch automatically bypasses the per-connection writer buffer for these prebuilt writes
 
 - `zhttp.response.writeAny(rctx: anytype, req_ro: anytype, w, res: anytype, ...)`
   - `rctx` is a `zhttp.ReqCtx` value.
   - `req_ro` is `rctx.TReadOnly()`.
   - `res` is `zhttp.response.Response(Body)` (or a compatible struct with `status`, `headers`, `body`, optional `close`).
+  - prebuilt response structs expose:
+    `pub fn write(self: @This(), w: *std.Io.Writer, keep_alive: bool, send_body: bool) !void`
+  - `keep_alive` and `send_body` are already resolved to the effective connection/body policy for that request
 
 - `zhttp.response.writeUpgrade(w, res: anytype)`
   - `res` must expose `status` and `headers`.
@@ -503,6 +510,8 @@ Endpoints select response serialization mode via `rctx.Response(Body)`:
 - `Body = []const u8`: normal `Content-Length` response.
 - `Body = [][]const u8`: vectored body, still `Content-Length`.
 - `Body = CustomBody`: chunked response (`transfer-encoding: chunked`).
+- returning a custom struct with `pub fn write(self, w, keep_alive, send_body) !void`: prebuilt response bytes
+  written directly to an unbuffered stream writer by the server
 
 Chunked example:
 
@@ -521,6 +530,33 @@ const StreamEp = struct {
                 }
             }.write },
         };
+    }
+};
+```
+
+Prebuilt write example:
+
+```zig
+const Prebuilt = struct {
+    pub fn write(_: @This(), w: *std.Io.Writer, keep_alive: bool, send_body: bool) !void {
+        try w.writeAll(if (keep_alive)
+            if (send_body)
+                "HTTP/1.1 200 OK\r\nconnection: keep-alive\r\ncontent-length: 2\r\n\r\nok"
+            else
+                "HTTP/1.1 200 OK\r\nconnection: keep-alive\r\ncontent-length: 2\r\n\r\n"
+        else if (send_body)
+            "HTTP/1.1 200 OK\r\nconnection: close\r\ncontent-length: 2\r\n\r\nok"
+        else
+            "HTTP/1.1 200 OK\r\nconnection: close\r\ncontent-length: 2\r\n\r\n");
+    }
+};
+
+const PrebuiltEp = struct {
+    pub const Info: zhttp.router.EndpointInfo = .{};
+
+    pub fn call(comptime rctx: zhttp.ReqCtx, req: rctx.T()) !Prebuilt {
+        _ = req;
+        return .{};
     }
 };
 ```

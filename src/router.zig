@@ -1110,6 +1110,8 @@ pub fn Compiled(
 
         /// Serializes a response and returns the next connection action.
         fn finishResponse(
+            server: anytype,
+            stream: *const std.Io.net.Stream,
             comptime rctx: ReqCtx,
             req_ro: rctx.TReadOnly(),
             w: *Io.Writer,
@@ -1120,8 +1122,33 @@ pub fn Compiled(
             // Response formatting is centralized here so the dispatch path can
             // return only transport actions while body serialization stays
             // close to the final writer.
-            try response.writeAny(rctx, req_ro, w, res, keep_alive, send_body);
+            if (comptime response.hasPrebuiltWrite(@TypeOf(res))) {
+                if (useStreamWriter(stream)) {
+                    try w.flush();
+                    var unbuffered_write_buf: [0]u8 = undefined;
+                    var unbuffered_w = stream.writer(server.io, &unbuffered_write_buf);
+                    try response.writeAny(rctx, req_ro, &unbuffered_w.interface, res, keep_alive, send_body);
+                } else {
+                    try response.writeAny(rctx, req_ro, w, res, keep_alive, send_body);
+                }
+            } else {
+                try response.writeAny(rctx, req_ro, w, res, keep_alive, send_body);
+            }
             return if (!keep_alive or response.closes(res)) .close else .@"continue";
+        }
+
+        fn useStreamWriter(stream: *const std.Io.net.Stream) bool {
+            return if (builtin.is_test) blk: {
+                // Router unit tests pass an undefined stream placeholder.
+                // Real server tests pass a valid connected stream.
+                const handle = stream.socket.handle;
+                const T = @TypeOf(handle);
+                break :blk switch (@typeInfo(T)) {
+                    .int, .comptime_int => handle > 0,
+                    .pointer => @intFromPtr(handle) != 0,
+                    else => true,
+                };
+            } else true;
         }
 
         /// Invokes endpoint-defined upgrade callback after a successful 101 write.
@@ -1157,19 +1184,7 @@ pub fn Compiled(
         ) DispatchError!?Action {
             if (!@hasDecl(Endpoint, "upgrade")) return null;
             if (res.status != .switching_protocols) return null;
-            const use_stream_writer = if (builtin.is_test) blk: {
-                // Router unit tests pass an undefined stream placeholder.
-                // Real server tests pass a valid connected stream.
-                const handle = stream.socket.handle;
-                const T = @TypeOf(handle);
-                break :blk switch (@typeInfo(T)) {
-                    .int, .comptime_int => handle > 0,
-                    .pointer => @intFromPtr(handle) != 0,
-                    else => true,
-                };
-            } else true;
-
-            if (use_stream_writer) {
+            if (useStreamWriter(stream)) {
                 // `101` and all subsequent upgrade traffic must bypass the HTTP
                 // connection writer buffer.
                 var upgrade_write_buf: [0]u8 = undefined;
@@ -1281,7 +1296,7 @@ pub fn Compiled(
                     try req_tail.discardUnreadBody();
                     if (try maybeHandleUpgradeEntry(rd.endpoint, server, stream, r, w, line, res)) |act| return act;
                     const send_body = !(line.method.len == 4 and line.method[0] == 'H' and line.method[1] == 'E' and line.method[2] == 'A' and line.method[3] == 'D');
-                    return finishResponse(rctx, req_ro, w, res, reqv.keepAlive(), send_body);
+                    return finishResponse(server, stream, rctx, req_ro, w, res, reqv.keepAlive(), send_body);
                 }
             }
             return error.BadRequest;

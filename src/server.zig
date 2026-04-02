@@ -2758,6 +2758,76 @@ test "server variation: unbuffered writer config works" {
     try expectClosed(&sr.interface);
 }
 
+test "server variation: prebuilt responses bypass buffered writer automatically" {
+    const PrebuiltResponse = struct {
+        const ok =
+            "HTTP/1.1 200 OK\r\n" ++
+            "connection: close\r\n" ++
+            "content-length: 2\r\n" ++
+            "\r\n" ++
+            "ok";
+        const bad =
+            "HTTP/1.1 500 Internal Server Error\r\n" ++
+            "connection: close\r\n" ++
+            "content-length: 8\r\n" ++
+            "\r\n" ++
+            "buffered";
+
+        pub fn write(_: @This(), w: *std.Io.Writer, keep_alive: bool, send_body: bool) !void {
+            _ = keep_alive;
+            _ = send_body;
+            try w.writeAll(if (w.buffer.len == 0) ok else bad);
+        }
+    };
+
+    const PrebuiltEndpoint = struct {
+        pub const Info: router.EndpointInfo = .{};
+        pub fn call(comptime _: ReqCtx, _: anytype) !PrebuiltResponse {
+            return .{};
+        }
+    };
+
+    const io = std.testing.io;
+    primeSocketBackend();
+
+    const SrvT = Server(.{
+        .routes = .{
+            router.get("/ok", PrebuiltEndpoint),
+        },
+        .config = .{
+            .read_buffer = 4 * 1024,
+            .write_buffer = 16 * 1024,
+            .max_request_line = 1024,
+            .max_single_header_size = 1024,
+            .max_header_bytes = 4 * 1024,
+        },
+    });
+
+    const addr0: Io.net.IpAddress = .{ .ip4 = Io.net.Ip4Address.loopback(0) };
+    var group: Io.Group = .init;
+    var server = try SrvT.initOwned(std.testing.allocator, io, addr0, {});
+    defer stopServerTest(io, &group, &server);
+    const port: u16 = server.listener.socket.address.getPort();
+
+    try group.concurrent(io, SrvT.serve, .{ &server, .{} });
+
+    var stream = try Io.net.IpAddress.connect(&.{ .ip4 = Io.net.Ip4Address.loopback(port) }, io, .{ .mode = .stream });
+    defer stream.close(io);
+
+    var rb: [4 * 1024]u8 = undefined;
+    var wb: [1]u8 = undefined;
+    var sr = stream.reader(io, &rb);
+    var sw = stream.writer(io, &wb);
+
+    try sw.interface.writeAll("GET /ok HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n");
+    try sw.interface.flush();
+
+    var got: [PrebuiltResponse.ok.len]u8 = undefined;
+    try sr.interface.readSliceAll(got[0..]);
+    try std.testing.expectEqualStrings(PrebuiltResponse.ok, got[0..]);
+    try expectClosed(&sr.interface);
+}
+
 test "server adversarial malformed clients recover and keep serving" {
     const Endpoints = struct {
         const Ok = struct {

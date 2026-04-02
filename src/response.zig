@@ -109,6 +109,18 @@ pub fn closes(res: anytype) bool {
     return if (@hasField(@TypeOf(res), "close")) res.close else false;
 }
 
+/// Reports whether a response type supplies a prebuilt writer hook.
+///
+/// Prebuilt response types expose:
+/// `pub fn write(self: @This(), w: *std.Io.Writer, keep_alive: bool, send_body: bool) !void`
+///
+/// When serialized by the server, these writes bypass the per-connection HTTP
+/// writer buffer automatically so the prebuilt bytes go straight to the
+/// socket writer.
+pub fn hasPrebuiltWrite(comptime ResT: type) bool {
+    return @hasDecl(ResT, "write");
+}
+
 /// Converts values in the range [0, 100) to a base 10 string.
 pub fn digits2(value: u8) [2]u8 {
     if (builtin.mode == .ReleaseSmall) {
@@ -147,7 +159,7 @@ fn writeHeaders(
 /// - `res` is either:
 ///   - `response.Response(Body)` (or compatible struct) with fields:
 ///     `status`, `headers`, `body`, and optional `close`, or
-///   - a custom struct exposing
+///   - a prebuilt response struct exposing
 ///     `pub fn write(self: @This(), w: *std.Io.Writer, keep_alive: bool, send_body: bool) !void`
 ///     and optional `close: bool`.
 pub fn writeAny(
@@ -161,7 +173,7 @@ pub fn writeAny(
     const close_conn = (!keep_alive) or closes(res);
     const effective_keep_alive = !close_conn;
     const ResT = @TypeOf(res);
-    if (comptime @hasDecl(ResT, "write")) {
+    if (comptime hasPrebuiltWrite(ResT)) {
         try @call(.auto, ResT.write, .{ res, w, effective_keep_alive, send_body });
         return;
     }

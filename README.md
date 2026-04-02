@@ -78,6 +78,7 @@ exe.root_module.addImport("zhttp", zhttp_dep.module("zhttp"));
 - `zhttp.Server(.{ ... })` accepts `.Context`, `.middlewares`, `.operations`, `.routes`, `.config`, `.error_handler`, and `.not_found_handler`. `.error_handler` is a writer-based hook for user handler/middleware errors with signature `fn(*Server, *std.Io.Writer, comptime ErrorSet: type, err: ErrorSet) zhttp.router.Action`. Server parse/validation errors stay on the built-in bad-request path. If no not-found handler is provided, a built-in `404 not found` endpoint is used.
 - Route helpers: `zhttp.get`, `post`, `put`, `delete`, `patch`, `head`, `options`, and `zhttp.route(...)` each take `(pattern, EndpointType)`.
 - Endpoint types must expose `pub const Info: zhttp.router.EndpointInfo = .{ ... };` and `pub fn call(comptime rctx: zhttp.ReqCtx, req: rctx.T()) !rctx.Response(Body)`.
+- Endpoints may also return a prebuilt response struct that exposes `pub fn write(self: @This(), w: *std.Io.Writer, keep_alive: bool, send_body: bool) !void` and optional `close: bool`.
 - Supported `Body` types are `[]const u8`, `[][]const u8`, `void`, and custom structs that expose `pub fn body(self, comptime rctx, req: rctx.TReadOnly(), cw) !void`.
 - `EndpointInfo` fields: `.headers`, `.query`, `.path`, `.middlewares`, `.operations`.
 - Optional endpoint upgrade hook: `pub fn upgrade(server, stream, r, w, line, res) void`. If present and `call` returns `101 Switching Protocols`, zhttp writes upgrade response and returns `zhttp.router.Action.upgraded`; the upgrade hook owns connection lifecycle.
@@ -98,6 +99,7 @@ exe.root_module.addImport("zhttp", zhttp_dep.module("zhttp"));
 - `[][]const u8` uses `Content-Length` (sum of segments, written via vectored I/O).
 - `void` uses `Content-Length: 0`.
 - Custom response body structs use `Transfer-Encoding: chunked`.
+- Prebuilt response structs expose `pub fn write(self, w, keep_alive, send_body) !void` and write the full response bytes themselves. The server automatically bypasses the per-connection writer buffer for these writes.
 
 Chunked example shape:
 
@@ -113,6 +115,29 @@ const StreamBody = struct {
 pub fn call(comptime rctx: zhttp.ReqCtx, req: rctx.T()) !rctx.Response(StreamBody) {
     _ = req;
     return .{ .status = .ok, .body = .{} };
+}
+```
+
+Prebuilt response example:
+
+```zig
+const Prebuilt = struct {
+    pub fn write(_: @This(), w: *std.Io.Writer, keep_alive: bool, send_body: bool) !void {
+        try w.writeAll(if (keep_alive)
+            if (send_body)
+                "HTTP/1.1 200 OK\r\nconnection: keep-alive\r\ncontent-length: 2\r\n\r\nok"
+            else
+                "HTTP/1.1 200 OK\r\nconnection: keep-alive\r\ncontent-length: 2\r\n\r\n"
+        else if (send_body)
+            "HTTP/1.1 200 OK\r\nconnection: close\r\ncontent-length: 2\r\n\r\nok"
+        else
+            "HTTP/1.1 200 OK\r\nconnection: close\r\ncontent-length: 2\r\n\r\n");
+    }
+};
+
+pub fn call(comptime rctx: zhttp.ReqCtx, req: rctx.T()) !Prebuilt {
+    _ = req;
+    return .{};
 }
 ```
 
@@ -173,8 +198,8 @@ Config: host=`127.0.0.1` path=`/plaintext` conns=16 iters=100000 warmup=10000 fu
 
 | Target | req/s | ns/req | relative |
 |---|---:|---:|---:|
-| zhttp | 234610.32 | 4262.40 | 1.012x vs faf |
-| faf | 231801.19 | 4314.00 | 0.988x vs zhttp |
+| zhttp | 255233.39 | 3918.00 | 1.104x vs faf |
+| faf | 231124.72 | 4326.70 | 0.906x vs zhttp |
 
 No benchmark transport errors were reported.
 
@@ -194,8 +219,8 @@ Config: host=`127.0.0.1` path=`/plaintext` conns=16 iters=100000 warmup=10000 fu
 
 | Target | req/s | ns/req | relative |
 |---|---:|---:|---:|
-| zhttp | 888320.70 | 1125.70 | 1.149x vs faf |
-| faf | 773326.50 | 1293.10 | 0.871x vs zhttp |
+| zhttp | 675269.68 | 1480.90 | 1.025x vs faf |
+| faf | 659016.63 | 1517.40 | 0.976x vs zhttp |
 
 No benchmark transport errors were reported.
 

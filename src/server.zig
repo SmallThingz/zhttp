@@ -14,20 +14,6 @@ const operations = @import("operations.zig");
 const parse = @import("parse.zig");
 const zws = @import("zwebsocket");
 
-fn setTcpNoDelay(stream: *const std.Io.net.Stream) void {
-    // Best-effort optimization for Linux sockets only. Ignore failures so
-    // transport setup behavior stays identical across platforms.
-    if (builtin.os.tag != .linux) return;
-    const linux = std.os.linux;
-    var one: i32 = 1;
-    std.posix.setsockopt(
-        stream.socket.handle,
-        @intCast(linux.IPPROTO.TCP),
-        linux.TCP.NODELAY,
-        std.mem.asBytes(&one),
-    ) catch {};
-}
-
 pub const Config = struct {
     /// Kernel listen backlog used when creating the server socket.
     listen_backlog: u31 = 4096,
@@ -678,7 +664,19 @@ pub fn Server(comptime def: anytype) type {
         }
 
         fn handleConn(self: *Self, state: *WorkerState, stream: std.Io.net.Stream) Io.Cancelable!void {
-            if (Conf.tcp_nodelay) setTcpNoDelay(&stream);
+            if (Conf.tcp_nodelay and builtin.os.tag == .linux) {
+                // Best-effort optimization for Linux sockets only. Ignore
+                // failures so transport setup behavior stays identical across
+                // platforms.
+                const linux = std.os.linux;
+                var one: i32 = 1;
+                std.posix.setsockopt(
+                    stream.socket.handle,
+                    @intCast(linux.IPPROTO.TCP),
+                    linux.TCP.NODELAY,
+                    std.mem.asBytes(&one),
+                ) catch {};
+            }
 
             var close_stream = true;
             defer if (close_stream) self.closeStream(&stream);

@@ -110,107 +110,6 @@ pub fn websocketHandshakeRequest(req: anytype) WebSocketHandshakeRequest {
     };
 }
 
-fn trimSpaces(s: []const u8) []const u8 {
-    return std.mem.trim(u8, s, " \t");
-}
-
-/// Returns true when a comma-separated token list contains `wanted`
-/// using ASCII case-insensitive matching.
-fn containsTokenIgnoreCase(value: []const u8, wanted: []const u8) bool {
-    var it = std.mem.splitScalar(u8, value, ',');
-    while (it.next()) |part| {
-        if (std.ascii.eqlIgnoreCase(trimSpaces(part), wanted)) return true;
-    }
-    return false;
-}
-
-/// Returns true when a comma-separated token list contains `wanted`
-/// with exact byte matching.
-fn containsToken(value: []const u8, wanted: []const u8) bool {
-    var it = std.mem.splitScalar(u8, value, ',');
-    while (it.next()) |part| {
-        if (std.mem.eql(u8, trimSpaces(part), wanted)) return true;
-    }
-    return false;
-}
-
-fn negotiatedPerMessageDeflateForOffer(
-    requested: zws.Extensions.PerMessageDeflate,
-    preferred: zws.Extensions.PerMessageDeflate,
-) zws.Extensions.PerMessageDeflate {
-    return .{
-        .server_no_context_takeover = preferred.server_no_context_takeover,
-        .client_no_context_takeover = preferred.client_no_context_takeover and requested.client_no_context_takeover,
-    };
-}
-
-fn perMessageDeflateOfferScore(
-    requested: zws.Extensions.PerMessageDeflate,
-    preferred: zws.Extensions.PerMessageDeflate,
-) usize {
-    var score: usize = 0;
-    if (preferred.client_no_context_takeover and requested.client_no_context_takeover) score += 1;
-    return score;
-}
-
-fn negotiatePerMessageDeflate(header_value: ?[]const u8) WebSocketHandshakeError!?[]const u8 {
-    const offered = header_value orelse return null;
-    if (!zws.Extensions.offersPerMessageDeflate(offered)) return null;
-
-    const preferred: zws.Extensions.PerMessageDeflate = .{};
-    var offers = zws.Extensions.parsePerMessageDeflate(offered);
-    var negotiated: ?zws.Extensions.PerMessageDeflate = null;
-    var best_score: usize = 0;
-    // Multiple permessage-deflate offers are legal. Keep the best supported
-    // alternative instead of requiring a single canonical ordering.
-    while (offers.next() catch return error.ExtensionsNotSupported) |requested| {
-        const candidate = negotiatedPerMessageDeflateForOffer(requested, preferred);
-        const score = perMessageDeflateOfferScore(requested, preferred);
-        if (negotiated == null or score > best_score) {
-            negotiated = candidate;
-            best_score = score;
-        }
-    }
-    if (negotiated) |selected| return selected.responseHeaderValue();
-    return null;
-}
-
-fn acceptWebSocketHandshake(
-    req: WebSocketHandshakeRequest,
-    opts: WebSocketHandshakeOptions,
-) WebSocketHandshakeError!WebSocketHandshakeResponse {
-    if (!std.mem.eql(u8, req.method, "GET")) return error.MethodNotGet;
-    if (!req.is_http_11) return error.HttpVersionNotSupported;
-
-    const connection = req.connection orelse return error.MissingConnectionHeader;
-    if (!containsTokenIgnoreCase(connection, "upgrade")) return error.InvalidConnectionHeader;
-
-    const upgrade_value = trimSpaces(req.upgrade orelse return error.MissingUpgradeHeader);
-    if (!std.ascii.eqlIgnoreCase(upgrade_value, "websocket")) return error.InvalidUpgradeHeader;
-
-    const key = trimSpaces(req.sec_websocket_key orelse return error.MissingWebSocketKey);
-    const version = trimSpaces(req.sec_websocket_version orelse return error.MissingWebSocketVersion);
-    if (!std.mem.eql(u8, version, "13")) return error.UnsupportedWebSocketVersion;
-
-    if (opts.selected_subprotocol) |selected| {
-        const offered = req.sec_websocket_protocol orelse return error.SubprotocolNotOffered;
-        if (!containsToken(offered, selected)) return error.SubprotocolNotOffered;
-    }
-
-    const accept_key = try zws.Handshake.computeAcceptKey(key);
-    const selected_extensions = if (opts.enable_permessage_deflate)
-        try negotiatePerMessageDeflate(req.sec_websocket_extensions)
-    else
-        null;
-
-    return .{
-        .accept_key = accept_key,
-        .selected_subprotocol = opts.selected_subprotocol,
-        .selected_extensions = selected_extensions,
-        .extra_headers = opts.extra_headers,
-    };
-}
-
 /// Builds a generic `101 Switching Protocols` response.
 pub fn responseFor(allocator: std.mem.Allocator, opts: ResponseOptions) !Res {
     if (opts.protocol.len == 0) return error.EmptyProtocol;
@@ -301,7 +200,62 @@ pub fn acceptWebSocket(
     req: anytype,
     opts: WebSocketHandshakeOptions,
 ) (std.mem.Allocator.Error || WebSocketHandshakeError)!Res {
-    const accepted = try acceptWebSocketHandshake(websocketHandshakeRequest(req), opts);
+    const handshake = websocketHandshakeRequest(req);
+    if (!std.mem.eql(u8, handshake.method, "GET")) return error.MethodNotGet;
+    if (!handshake.is_http_11) return error.HttpVersionNotSupported;
+
+    const connection = handshake.connection orelse return error.MissingConnectionHeader;
+    var connection_tokens = std.mem.splitScalar(u8, connection, ',');
+    while (connection_tokens.next()) |part| {
+        if (std.ascii.eqlIgnoreCase(std.mem.trim(u8, part, " \t"), "upgrade")) break;
+    } else return error.InvalidConnectionHeader;
+
+    const upgrade_value = std.mem.trim(u8, handshake.upgrade orelse return error.MissingUpgradeHeader, " \t");
+    if (!std.ascii.eqlIgnoreCase(upgrade_value, "websocket")) return error.InvalidUpgradeHeader;
+
+    const key = std.mem.trim(u8, handshake.sec_websocket_key orelse return error.MissingWebSocketKey, " \t");
+    const version = std.mem.trim(u8, handshake.sec_websocket_version orelse return error.MissingWebSocketVersion, " \t");
+    if (!std.mem.eql(u8, version, "13")) return error.UnsupportedWebSocketVersion;
+
+    if (opts.selected_subprotocol) |selected| {
+        const offered = handshake.sec_websocket_protocol orelse return error.SubprotocolNotOffered;
+        var offered_tokens = std.mem.splitScalar(u8, offered, ',');
+        while (offered_tokens.next()) |part| {
+            if (std.mem.eql(u8, std.mem.trim(u8, part, " \t"), selected)) break;
+        } else return error.SubprotocolNotOffered;
+    }
+
+    const accept_key = try zws.Handshake.computeAcceptKey(key);
+    const selected_extensions = if (opts.enable_permessage_deflate) blk: {
+        const offered = handshake.sec_websocket_extensions orelse break :blk null;
+        if (!zws.Extensions.offersPerMessageDeflate(offered)) break :blk null;
+
+        const preferred: zws.Extensions.PerMessageDeflate = .{};
+        var offers = zws.Extensions.parsePerMessageDeflate(offered);
+        var negotiated: ?zws.Extensions.PerMessageDeflate = null;
+        var best_score: usize = 0;
+        // Multiple permessage-deflate offers are legal. Keep the best supported
+        // alternative instead of requiring a single canonical ordering.
+        while (offers.next() catch return error.ExtensionsNotSupported) |requested| {
+            const score: usize = if (preferred.client_no_context_takeover and requested.client_no_context_takeover) 1 else 0;
+            if (negotiated == null or score > best_score) {
+                negotiated = .{
+                    .server_no_context_takeover = preferred.server_no_context_takeover,
+                    .client_no_context_takeover = preferred.client_no_context_takeover and requested.client_no_context_takeover,
+                };
+                best_score = score;
+            }
+        }
+        if (negotiated) |selected| break :blk selected.responseHeaderValue();
+        break :blk null;
+    } else null;
+
+    const accepted: WebSocketHandshakeResponse = .{
+        .accept_key = accept_key,
+        .selected_subprotocol = opts.selected_subprotocol,
+        .selected_extensions = selected_extensions,
+        .extra_headers = opts.extra_headers,
+    };
     return websocketResponseFromAccepted(req.allocator(), accepted);
 }
 

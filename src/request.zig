@@ -201,45 +201,6 @@ fn containsTokenIgnoreCase(value: []const u8, comptime token: []const u8) bool {
     return false;
 }
 
-fn routeParamNames(comptime pattern: []const u8) []const []const u8 {
-    // Extract `{name}` and `{*name}` params from the route pattern once at
-    // comptime so runtime request parsing can index a fixed typed tuple.
-    if (pattern.len == 0 or pattern[0] != '/') @compileError("route pattern must start with '/'");
-    if (std.mem.eql(u8, pattern, "/")) return &.{};
-
-    comptime var count: usize = 0;
-    comptime {
-        var start: usize = 1;
-        while (start <= pattern.len) {
-            const end = std.mem.indexOfScalarPos(u8, pattern, start, '/') orelse pattern.len;
-            const seg = pattern[start..end];
-            if (seg.len != 0 and seg[0] == '{' and seg[seg.len - 1] == '}') count += 1;
-            if (end == pattern.len) break;
-            start = end + 1;
-        }
-    }
-    if (count == 0) return &.{};
-
-    const out: [count][]const u8 = comptime blk: {
-        var names: [count][]const u8 = undefined;
-        var i: usize = 0;
-        var start: usize = 1;
-        while (start <= pattern.len) {
-            const end = std.mem.indexOfScalarPos(u8, pattern, start, '/') orelse pattern.len;
-            const seg = pattern[start..end];
-            if (seg.len != 0 and seg[0] == '{' and seg[seg.len - 1] == '}') {
-                const inner = seg[1 .. seg.len - 1];
-                names[i] = if (inner.len != 0 and inner[0] == '*') inner[1..] else inner;
-                i += 1;
-            }
-            if (end == pattern.len) break;
-            start = end + 1;
-        }
-        break :blk names;
-    };
-    return out[0..];
-}
-
 /// Builds a typed request wrapper for one concrete route declaration.
 ///
 /// Expected shape:
@@ -274,7 +235,44 @@ pub fn RequestPWithPatternExt(
     const Headers = rd.headers;
     const Query = rd.query;
     const Params = rd.params;
-    const param_names = routeParamNames(rd.pattern);
+    const param_names = comptime blk: {
+        // Extract `{name}` and `{*name}` params from the route pattern once at
+        // comptime so runtime request parsing can index a fixed typed tuple.
+        if (rd.pattern.len == 0 or rd.pattern[0] != '/') {
+            @compileError("route pattern must start with '/'");
+        }
+        if (std.mem.eql(u8, rd.pattern, "/")) break :blk &.{};
+
+        var count: usize = 0;
+        var start: usize = 1;
+        while (start <= rd.pattern.len) {
+            const end = std.mem.indexOfScalarPos(u8, rd.pattern, start, '/') orelse rd.pattern.len;
+            const seg = rd.pattern[start..end];
+            if (seg.len != 0 and seg[0] == '{' and seg[seg.len - 1] == '}') count += 1;
+            if (end == rd.pattern.len) break;
+            start = end + 1;
+        }
+        if (count == 0) break :blk &.{};
+
+        const out: [count][]const u8 = blk2: {
+            var names: [count][]const u8 = undefined;
+            var i: usize = 0;
+            var seg_start: usize = 1;
+            while (seg_start <= rd.pattern.len) {
+                const end = std.mem.indexOfScalarPos(u8, rd.pattern, seg_start, '/') orelse rd.pattern.len;
+                const seg = rd.pattern[seg_start..end];
+                if (seg.len != 0 and seg[0] == '{' and seg[seg.len - 1] == '}') {
+                    const inner = seg[1 .. seg.len - 1];
+                    names[i] = if (inner.len != 0 and inner[0] == '*') inner[1..] else inner;
+                    i += 1;
+                }
+                if (end == rd.pattern.len) break;
+                seg_start = end + 1;
+            }
+            break :blk2 names;
+        };
+        break :blk out[0..];
+    };
     const MwStaticCtx = ServerT.RouteStaticType(route_index);
     const CtxPtr = @FieldType(ServerT, "ctx");
     const HeaderLookup = parse.Lookup(Headers, .header);

@@ -1,6 +1,6 @@
 const std = @import("std");
 const zhttp = @import("zhttp");
-const zws = @import("zwebsocket");
+const zws = @import("zws");
 const common = @import("common.zig");
 const ReqCtx = zhttp.ReqCtx;
 

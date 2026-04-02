@@ -12,7 +12,7 @@ const router = @import("router.zig");
 const middleware = @import("middleware.zig");
 const operations = @import("operations.zig");
 const parse = @import("parse.zig");
-const zws = @import("zwebsocket");
+const zws = @import("zws");
 
 pub const Config = struct {
     /// Kernel listen backlog used when creating the server socket.

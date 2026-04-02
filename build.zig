@@ -37,7 +37,7 @@ fn discoverExamples(b: *std.Build, allocator: std.mem.Allocator) ![]Example {
         const name = try allocator.dupe(u8, entry.name[0 .. entry.name.len - ".zig".len]);
         errdefer allocator.free(name);
 
-        const uses_zws = std.mem.indexOf(u8, src, "@import(\"zwebsocket\")") != null;
+        const uses_zws = std.mem.indexOf(u8, src, "@import(\"zws\")") != null;
         try out.append(allocator, .{
             .name = name,
             .path = path,
@@ -66,7 +66,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .sanitize_thread = sanitize_thread,
     });
-    const zws_dep = b.dependency("zwebsocket", .{
+    const zws_dep = b.dependency("zws", .{
         .target = target,
         .optimize = optimize,
     });
@@ -83,8 +83,8 @@ pub fn build(b: *std.Build) void {
 
     const zstd_mod = zstd_dep.module("libzstd");
     const brotli_mod = brotli_dep.module("libbrotli");
-    const zws_mod = zws_dep.module("zwebsocket");
-    mod.addImport("zwebsocket", zws_mod);
+    const zws_mod = zws_dep.module("zws");
+    mod.addImport("zws", zws_mod);
     mod.addImport("libzstd", zstd_mod);
     mod.addImport("libbrotli", brotli_mod);
 
@@ -96,7 +96,7 @@ pub fn build(b: *std.Build) void {
         }),
         .test_runner = .{ .path = b.path("test_runner.zig"), .mode = .simple },
     });
-    mod_tests.root_module.addImport("zwebsocket", zws_mod);
+    mod_tests.root_module.addImport("zws", zws_mod);
     mod_tests.root_module.addImport("libzstd", zstd_mod);
     mod_tests.root_module.addImport("libbrotli", brotli_mod);
     const run_mod_tests = b.addRunArtifact(mod_tests);
@@ -203,7 +203,7 @@ pub fn build(b: *std.Build) void {
         });
         exe.root_module.addImport("zhttp", mod);
         if (ex.uses_zws) {
-            exe.root_module.addImport("zwebsocket", zws_mod);
+            exe.root_module.addImport("zws", zws_mod);
         }
         examples_step.dependOn(&exe.step);
 

@@ -2,7 +2,7 @@ const std = @import("std");
 const response = @import("response.zig");
 const request = @import("request.zig");
 const parse = @import("parse.zig");
-const zws = @import("zwebsocket");
+const zws = @import("zws");
 
 /// Alias for response header entries used by upgrade helpers.
 pub const Header = response.Header;

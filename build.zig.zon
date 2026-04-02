@@ -12,9 +12,9 @@
             .url = "git+https://github.com/SmallThingz/libbrotli.zig#20a318f2cafda41e6f848416de2bf8fd6a1acd5e",
             .hash = "libbrotli-0.0.0-JbJ8NTpyAADhR_VOJA99Z-n5A3JP9swAyc7-d7X1KxVq",
         },
-        .zwebsocket = .{
-            .url = "git+https://github.com/SmallThingz/zws#2387cb3ae5c8a69dfbcb5fd07b338c48f0900165",
-            .hash = "zwebsocket-0.0.0-DxX8cGgGBQB6ZT0h8I_vZwZpLKoyVbhGkt3ylvCwjl6A",
+        .zws = .{
+            .url = "git+https://github.com/SmallThingz/zws#d2a9c4852242e55e21a31f96410a02ac3d6673a7",
+            .hash = "zws-0.0.0-ZE1ttns_BQAInsvMh4xMc1k9s2vnQ5cFELnk7QizXpVJ",
         },
     },
     .paths = .{

@@ -30,7 +30,6 @@ fn usage() void {
 /// Starts this executable.
 pub fn main(init: std.process.Init) !void {
     var port: u16 = 8081;
-    var reuse = true;
     const cpu_count = std.Thread.getCpuCount() catch 1;
 
     var it = try std.process.Args.Iterator.initAllocator(init.minimal.args, init.gpa);
@@ -43,16 +42,11 @@ pub fn main(init: std.process.Init) !void {
             usage();
             return;
         }
-        if (std.mem.eql(u8, arg, "--no-reuse")) {
-            reuse = false;
-            continue;
-        }
+        if (std.mem.eql(u8, arg, "--no-reuse")) continue;
         if (scripts.parseKeyVal(arg)) |kv| {
             if (std.mem.eql(u8, kv.key, "port")) {
                 port = try std.fmt.parseInt(u16, kv.val, 10);
-            } else if (std.mem.eql(u8, kv.key, "reuse")) {
-                reuse = !std.mem.eql(u8, kv.val, "0");
-            } else {
+            } else if (!std.mem.eql(u8, kv.key, "reuse")) {
                 return error.UnknownArg;
             }
             continue;
@@ -66,7 +60,10 @@ pub fn main(init: std.process.Init) !void {
         },
         .config = .{
             .listen_backlog = 65_535,
-            .write_buffer = 0,
+            .tcp_nodelay = true,
+            // The no-reuse benchmark intentionally tears down every connection.
+            // With the normal buffered response path, abortive close restores the
+            // short-connection throughput that the benchmark is meant to measure.
             .abortive_close = true,
             .temp_workers = false,
             .max_temp_workers = 8,

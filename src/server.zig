@@ -879,7 +879,7 @@ fn performWebSocketHandshake(sr: *Io.Reader, sw: *Io.Writer, path: []const u8) !
         const name = line[0..colon];
         const value = trimHeaderValue(line[colon + 1 ..]);
         if (std.ascii.eqlIgnoreCase(name, "sec-websocket-accept")) {
-            const expected = try zws.computeAcceptKey("dGhlIHNhbXBsZSBub25jZQ==");
+            const expected = try zws.Handshake.computeAcceptKey("dGhlIHNhbXBsZSBub25jZQ==");
             try std.testing.expectEqualStrings(expected[0..], value);
             saw_accept = true;
         }
@@ -3091,7 +3091,7 @@ test "server websocket abuse: helper handshake and hostile frame mix" {
             server.ctx.upgrades += 1;
             defer stream.close(server.io);
 
-            var conn = zws.ServerConn.init(r, w, .{
+            var conn = zws.Conn.Server.init(r, w, .{
                 .max_frame_payload_len = 64,
                 .max_message_payload_len = 128,
             });
@@ -3200,13 +3200,13 @@ test "server websocket abuse: helper handshake and hostile frame mix" {
         var sr = stream.reader(io, &rb);
         var sw = stream.writer(io, &wb);
         try performWebSocketHandshake(&sr.interface, &sw.interface, "/ws");
-        var client = zws.ClientConn.init(&sr.interface, &sw.interface, .{});
+        var client = zws.Conn.Client.init(&sr.interface, &sw.interface, .{});
         var msg_buf: [256]u8 = undefined;
 
         try client.writeText("hello");
         try sw.interface.flush();
         const msg = try client.readMessage(msg_buf[0..]);
-        try std.testing.expectEqual(zws.MessageOpcode.text, msg.opcode);
+        try std.testing.expectEqual(zws.Conn.MessageOpcode.text, msg.opcode);
         try std.testing.expectEqualStrings("hello", msg.payload);
         try client.writeClose(null, "");
         try sw.interface.flush();
@@ -3224,12 +3224,12 @@ test "server websocket abuse: helper handshake and hostile frame mix" {
         var sr = stream.reader(io, &rb);
         var sw = stream.writer(io, &wb);
         try performWebSocketHandshake(&sr.interface, &sw.interface, "/ws");
-        var client = zws.ClientConn.init(&sr.interface, &sw.interface, .{});
+        var client = zws.Conn.Client.init(&sr.interface, &sw.interface, .{});
         var msg_buf: [256]u8 = undefined;
         try client.writePing("zz");
         try sw.interface.flush();
         const pong = try client.readFrame(msg_buf[0..]);
-        try std.testing.expectEqual(zws.Opcode.pong, pong.header.opcode);
+        try std.testing.expectEqual(zws.Conn.Opcode.pong, pong.header.opcode);
         try std.testing.expectEqualStrings("zz", pong.payload);
         try client.writeClose(null, "");
         try sw.interface.flush();
@@ -3247,14 +3247,14 @@ test "server websocket abuse: helper handshake and hostile frame mix" {
         var sr = stream.reader(io, &rb);
         var sw = stream.writer(io, &wb);
         try performWebSocketHandshake(&sr.interface, &sw.interface, "/ws");
-        var client = zws.ClientConn.init(&sr.interface, &sw.interface, .{});
+        var client = zws.Conn.Client.init(&sr.interface, &sw.interface, .{});
         var frame_buf: [256]u8 = undefined;
 
         const bad_unmasked = try appendClientFrame(frame_buf[0..], 0x1, "bad", true, false, false);
         try sw.interface.writeAll(bad_unmasked);
         try sw.interface.flush();
         const close_frame = try client.readFrame(frame_buf[0..]);
-        try std.testing.expectEqual(zws.Opcode.close, close_frame.header.opcode);
+        try std.testing.expectEqual(zws.Conn.Opcode.close, close_frame.header.opcode);
         try expectClosed(&sr.interface);
         exercised += 1;
     }
@@ -3269,14 +3269,14 @@ test "server websocket abuse: helper handshake and hostile frame mix" {
         var sr = stream.reader(io, &rb);
         var sw = stream.writer(io, &wb);
         try performWebSocketHandshake(&sr.interface, &sw.interface, "/ws");
-        var client = zws.ClientConn.init(&sr.interface, &sw.interface, .{});
+        var client = zws.Conn.Client.init(&sr.interface, &sw.interface, .{});
         var frame_buf: [256]u8 = undefined;
         var payload: [80]u8 = .{'x'} ** 80;
         const too_big = try appendClientFrame(frame_buf[0..], 0x2, payload[0..], true, true, false);
         try sw.interface.writeAll(too_big);
         try sw.interface.flush();
         const close_frame = try client.readFrame(frame_buf[0..]);
-        try std.testing.expectEqual(zws.Opcode.close, close_frame.header.opcode);
+        try std.testing.expectEqual(zws.Conn.Opcode.close, close_frame.header.opcode);
         try expectClosed(&sr.interface);
         exercised += 1;
     }

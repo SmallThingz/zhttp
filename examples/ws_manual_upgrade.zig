@@ -64,7 +64,7 @@ const Handshake = struct {
     }
 };
 
-fn closeForProtocolError(conn: *zws.ServerConn, w: *Io.Writer, err: anyerror) void {
+fn closeForProtocolError(conn: *zws.Conn.Server, w: *Io.Writer, err: anyerror) void {
     const code: ?u16 = switch (err) {
         error.EndOfStream, error.ConnectionClosed, error.ReadFailed, error.WriteFailed => null,
         error.InvalidUtf8 => 1007,
@@ -88,7 +88,7 @@ fn onUpgrade(
 ) void {
     defer stream.close(server.io);
 
-    var conn = zws.ServerConn.init(r, w, .{
+    var conn = zws.Conn.Server.init(r, w, .{
         .max_frame_payload_len = 1024 * 1024,
         .max_message_payload_len = 1024 * 1024,
     });

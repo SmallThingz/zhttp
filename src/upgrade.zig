@@ -19,17 +19,54 @@ pub const WebSocketHeaders = struct {
     origin: parse.Optional(parse.String),
     host: parse.Optional(parse.String),
 };
-/// Alias for zwebsocket's server handshake request shape.
-pub const WebSocketHandshakeRequest = zws.ServerHandshakeRequest;
-/// Alias for zwebsocket's server handshake options.
-pub const WebSocketHandshakeOptions = zws.ServerHandshakeOptions;
-/// Alias for zwebsocket's server handshake response.
-pub const WebSocketHandshakeResponse = zws.ServerHandshakeResponse;
-/// Alias for zwebsocket's handshake validation errors.
-pub const WebSocketHandshakeError = zws.HandshakeError;
+/// Websocket handshake fields captured from request metadata.
+pub const WebSocketHandshakeRequest = struct {
+    /// Request method, expected to be `GET`.
+    method: []const u8,
+    /// Whether the parsed request version is HTTP/1.1.
+    is_http_11: bool,
+    /// `connection` request header.
+    connection: ?[]const u8 = null,
+    /// `upgrade` request header.
+    upgrade: ?[]const u8 = null,
+    /// `sec-websocket-key` request header.
+    sec_websocket_key: ?[]const u8 = null,
+    /// `sec-websocket-version` request header.
+    sec_websocket_version: ?[]const u8 = null,
+    /// `sec-websocket-protocol` request header.
+    sec_websocket_protocol: ?[]const u8 = null,
+    /// `sec-websocket-extensions` request header.
+    sec_websocket_extensions: ?[]const u8 = null,
+    /// `origin` request header.
+    origin: ?[]const u8 = null,
+    /// `host` request header.
+    host: ?[]const u8 = null,
+};
+/// Options controlling websocket handshake acceptance.
+pub const WebSocketHandshakeOptions = struct {
+    /// Optional chosen subprotocol. Must be present in request offer list.
+    selected_subprotocol: ?[]const u8 = null,
+    /// Enables permessage-deflate negotiation based on request offers.
+    enable_permessage_deflate: bool = false,
+    /// Additional headers to append to the `101` response.
+    extra_headers: []const Header = &.{},
+};
+/// Accepted websocket handshake output used to build a `101` response.
+pub const WebSocketHandshakeResponse = struct {
+    /// RFC 6455 computed accept value for `sec-websocket-accept`.
+    accept_key: [28]u8,
+    /// Optional selected websocket subprotocol.
+    selected_subprotocol: ?[]const u8 = null,
+    /// Optional negotiated extension response value.
+    selected_extensions: ?[]const u8 = null,
+    /// Extra headers preserved for the final `101` response.
+    extra_headers: []const Header = &.{},
+};
+/// Errors returned while validating websocket handshake input.
+pub const WebSocketHandshakeError = zws.Handshake.Error || error{
+    SubprotocolNotOffered,
+};
 pub const WebSocketRejectError = std.mem.Allocator.Error || WebSocketHandshakeError;
-
-const websocket_guid = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
 
 /// Options for generic protocol-upgrade responses.
 pub const ResponseOptions = struct {
@@ -73,6 +110,101 @@ pub fn websocketHandshakeRequest(req: anytype) WebSocketHandshakeRequest {
     };
 }
 
+fn trimSpaces(s: []const u8) []const u8 {
+    return std.mem.trim(u8, s, " \t");
+}
+
+fn containsTokenIgnoreCase(value: []const u8, wanted: []const u8) bool {
+    var it = std.mem.splitScalar(u8, value, ',');
+    while (it.next()) |part| {
+        if (std.ascii.eqlIgnoreCase(trimSpaces(part), wanted)) return true;
+    }
+    return false;
+}
+
+fn containsToken(value: []const u8, wanted: []const u8) bool {
+    var it = std.mem.splitScalar(u8, value, ',');
+    while (it.next()) |part| {
+        if (std.mem.eql(u8, trimSpaces(part), wanted)) return true;
+    }
+    return false;
+}
+
+fn negotiatedPerMessageDeflateForOffer(
+    requested: zws.Extensions.PerMessageDeflate,
+    preferred: zws.Extensions.PerMessageDeflate,
+) zws.Extensions.PerMessageDeflate {
+    return .{
+        .server_no_context_takeover = preferred.server_no_context_takeover,
+        .client_no_context_takeover = preferred.client_no_context_takeover and requested.client_no_context_takeover,
+    };
+}
+
+fn perMessageDeflateOfferScore(
+    requested: zws.Extensions.PerMessageDeflate,
+    preferred: zws.Extensions.PerMessageDeflate,
+) usize {
+    var score: usize = 0;
+    if (preferred.client_no_context_takeover and requested.client_no_context_takeover) score += 1;
+    return score;
+}
+
+fn negotiatePerMessageDeflate(header_value: ?[]const u8) WebSocketHandshakeError!?[]const u8 {
+    const offered = header_value orelse return null;
+    if (!zws.Extensions.offersPerMessageDeflate(offered)) return null;
+
+    const preferred: zws.Extensions.PerMessageDeflate = .{};
+    var offers = zws.Extensions.parsePerMessageDeflate(offered);
+    var negotiated: ?zws.Extensions.PerMessageDeflate = null;
+    var best_score: usize = 0;
+    while (offers.next() catch return error.ExtensionsNotSupported) |requested| {
+        const candidate = negotiatedPerMessageDeflateForOffer(requested, preferred);
+        const score = perMessageDeflateOfferScore(requested, preferred);
+        if (negotiated == null or score > best_score) {
+            negotiated = candidate;
+            best_score = score;
+        }
+    }
+    if (negotiated) |selected| return selected.responseHeaderValue();
+    return null;
+}
+
+fn acceptWebSocketHandshake(
+    req: WebSocketHandshakeRequest,
+    opts: WebSocketHandshakeOptions,
+) WebSocketHandshakeError!WebSocketHandshakeResponse {
+    if (!std.mem.eql(u8, req.method, "GET")) return error.MethodNotGet;
+    if (!req.is_http_11) return error.HttpVersionNotSupported;
+
+    const connection = req.connection orelse return error.MissingConnectionHeader;
+    if (!containsTokenIgnoreCase(connection, "upgrade")) return error.InvalidConnectionHeader;
+
+    const upgrade_value = trimSpaces(req.upgrade orelse return error.MissingUpgradeHeader);
+    if (!std.ascii.eqlIgnoreCase(upgrade_value, "websocket")) return error.InvalidUpgradeHeader;
+
+    const key = trimSpaces(req.sec_websocket_key orelse return error.MissingWebSocketKey);
+    const version = trimSpaces(req.sec_websocket_version orelse return error.MissingWebSocketVersion);
+    if (!std.mem.eql(u8, version, "13")) return error.UnsupportedWebSocketVersion;
+
+    if (opts.selected_subprotocol) |selected| {
+        const offered = req.sec_websocket_protocol orelse return error.SubprotocolNotOffered;
+        if (!containsToken(offered, selected)) return error.SubprotocolNotOffered;
+    }
+
+    const accept_key = try zws.Handshake.computeAcceptKey(key);
+    const selected_extensions = if (opts.enable_permessage_deflate)
+        try negotiatePerMessageDeflate(req.sec_websocket_extensions)
+    else
+        null;
+
+    return .{
+        .accept_key = accept_key,
+        .selected_subprotocol = opts.selected_subprotocol,
+        .selected_extensions = selected_extensions,
+        .extra_headers = opts.extra_headers,
+    };
+}
+
 /// Builds a generic `101 Switching Protocols` response.
 pub fn responseFor(allocator: std.mem.Allocator, opts: ResponseOptions) !Res {
     if (opts.protocol.len == 0) return error.EmptyProtocol;
@@ -94,18 +226,8 @@ pub fn responseFor(allocator: std.mem.Allocator, opts: ResponseOptions) !Res {
 /// Computes the RFC 6455 `sec-websocket-accept` value for a websocket key.
 pub fn websocketAcceptKey(allocator: std.mem.Allocator, sec_websocket_key: []const u8) ![]u8 {
     if (sec_websocket_key.len == 0) return error.EmptyWebSocketKey;
-
-    var sha1 = std.crypto.hash.Sha1.init(.{});
-    sha1.update(sec_websocket_key);
-    sha1.update(websocket_guid);
-
-    var digest: [20]u8 = undefined;
-    sha1.final(&digest);
-
-    const encoded_len = std.base64.standard.Encoder.calcSize(digest.len);
-    const encoded = try allocator.alloc(u8, encoded_len);
-    _ = std.base64.standard.Encoder.encode(encoded, &digest);
-    return encoded;
+    const accept = try zws.Handshake.computeAcceptKey(sec_websocket_key);
+    return allocator.dupe(u8, accept[0..]);
 }
 
 fn websocketResponseFromOwnedAccept(
@@ -203,7 +325,7 @@ pub fn acceptWebSocket(
     req: anytype,
     opts: WebSocketHandshakeOptions,
 ) (std.mem.Allocator.Error || WebSocketHandshakeError)!Res {
-    const accepted = try zws.acceptServerHandshake(websocketHandshakeRequest(req), opts);
+    const accepted = try acceptWebSocketHandshake(websocketHandshakeRequest(req), opts);
     return websocketResponseFromAccepted(req.allocator(), accepted);
 }
 
@@ -328,39 +450,12 @@ test "websocketResponseWithAccept: omits optional websocket headers when absent"
 }
 
 test "websocketResponseFromAccepted: copies selected handshake outputs" {
-    const FakeReq = struct {
-        const Base = struct {
-            version: request.Version = .http11,
-        };
-
-        base: Base = .{},
-        method: []const u8 = "GET",
-
-        pub fn baseConst(self: *const @This()) *const Base {
-            return &self.base;
-        }
-
-        pub fn header(_: *const @This(), comptime field: anytype) ?[]const u8 {
-            return switch (field) {
-                .connection => "Upgrade",
-                .upgrade => "websocket",
-                .sec_websocket_key => "dGhlIHNhbXBsZSBub25jZQ==",
-                .sec_websocket_version => "13",
-                .sec_websocket_protocol => "chat, superchat",
-                .sec_websocket_extensions => "permessage-deflate",
-                .origin => "https://example.com",
-                .host => "example.com",
-                else => @compileError("unexpected header field"),
-            };
-        }
-    };
-
-    const req: FakeReq = .{};
-    const accepted = try zws.acceptServerHandshake(websocketHandshakeRequest(&req), .{
+    const accepted: WebSocketHandshakeResponse = .{
+        .accept_key = try zws.Handshake.computeAcceptKey("dGhlIHNhbXBsZSBub25jZQ=="),
         .selected_subprotocol = "chat",
-        .enable_permessage_deflate = true,
+        .selected_extensions = "permessage-deflate; server_no_context_takeover; client_no_context_takeover",
         .extra_headers = &.{.{ .name = "x-up", .value = "1" }},
-    });
+    };
     const res = try websocketResponseFromAccepted(std.testing.allocator, accepted);
     defer std.testing.allocator.free(res.headers);
     defer std.testing.allocator.free(res.headers[2].value);
@@ -475,6 +570,88 @@ test "acceptWebSocket: validates request and builds upgrade response" {
     try std.testing.expectEqualStrings("chat", res.headers[3].value);
     try std.testing.expectEqualStrings("x-up", res.headers[4].name);
     try std.testing.expectEqualStrings("1", res.headers[4].value);
+}
+
+test "acceptWebSocket: rejects subprotocol selections not present in offers" {
+    const FakeReq = struct {
+        const Base = struct {
+            version: request.Version = .http11,
+        };
+
+        allocator_: std.mem.Allocator,
+        base: Base = .{},
+        method: []const u8 = "GET",
+
+        pub fn allocator(self: *const @This()) std.mem.Allocator {
+            return self.allocator_;
+        }
+
+        pub fn baseConst(self: *const @This()) *const Base {
+            return &self.base;
+        }
+
+        pub fn header(_: *const @This(), comptime field: anytype) ?[]const u8 {
+            return switch (field) {
+                .connection => "Upgrade",
+                .upgrade => "websocket",
+                .sec_websocket_key => "dGhlIHNhbXBsZSBub25jZQ==",
+                .sec_websocket_version => "13",
+                .sec_websocket_protocol => "chat, superchat",
+                .sec_websocket_extensions => null,
+                .origin => "https://example.com",
+                .host => "example.com",
+                else => @compileError("unexpected header field"),
+            };
+        }
+    };
+
+    const req: FakeReq = .{ .allocator_ = std.testing.allocator };
+    try std.testing.expectError(error.SubprotocolNotOffered, acceptWebSocket(&req, .{
+        .selected_subprotocol = "json",
+    }));
+}
+
+test "acceptWebSocket: negotiates permessage-deflate when enabled" {
+    const FakeReq = struct {
+        const Base = struct {
+            version: request.Version = .http11,
+        };
+
+        allocator_: std.mem.Allocator,
+        base: Base = .{},
+        method: []const u8 = "GET",
+
+        pub fn allocator(self: *const @This()) std.mem.Allocator {
+            return self.allocator_;
+        }
+
+        pub fn baseConst(self: *const @This()) *const Base {
+            return &self.base;
+        }
+
+        pub fn header(_: *const @This(), comptime field: anytype) ?[]const u8 {
+            return switch (field) {
+                .connection => "Upgrade",
+                .upgrade => "websocket",
+                .sec_websocket_key => "dGhlIHNhbXBsZSBub25jZQ==",
+                .sec_websocket_version => "13",
+                .sec_websocket_protocol => null,
+                .sec_websocket_extensions => "permessage-deflate; client_no_context_takeover",
+                .origin => "https://example.com",
+                .host => "example.com",
+                else => @compileError("unexpected header field"),
+            };
+        }
+    };
+
+    const req: FakeReq = .{ .allocator_ = std.testing.allocator };
+    const res = try acceptWebSocket(&req, .{ .enable_permessage_deflate = true });
+    defer std.testing.allocator.free(res.headers);
+    defer std.testing.allocator.free(res.headers[2].value);
+
+    try std.testing.expectEqual(@as(usize, 4), res.headers.len);
+    try std.testing.expectEqualStrings("sec-websocket-extensions", res.headers[3].name);
+    try std.testing.expect(std.mem.startsWith(u8, res.headers[3].value, "permessage-deflate"));
 }
 
 test "rejectWebSocket: maps websocket handshake failures to HTTP responses" {

@@ -18,7 +18,7 @@ pub const ChunkedWriter = struct {
         var len_buf: [32]u8 = undefined;
         const len_hex = std.fmt.bufPrint(&len_buf, "{x}", .{bytes.len}) catch unreachable;
 
-        var parts: HeaderLineParts = .{len_hex, "\r\n", bytes, "\r\n"};
+        var parts: HeaderLineParts = .{ len_hex, "\r\n", bytes, "\r\n" };
         try self.w.writeVecAll(&parts);
     }
 
@@ -217,7 +217,21 @@ pub fn writeAny(
         }
         try writeContentLength(w, body_len);
         if (send_body) {
-            try w.writeVecAll(res.body);
+            if (res.body.len == 1) {
+                try w.writeAll(res.body[0]);
+            } else if (res.body.len != 0) {
+                // `writeVecAll` mutates the slice list while advancing through
+                // short writes. Copy metadata to writable stack storage so
+                // callers can pass const-backed segment arrays safely.
+                var i: usize = 0;
+                while (i < res.body.len) {
+                    var vec_copy: [16][]const u8 = undefined;
+                    const n = @min(vec_copy.len, res.body.len - i);
+                    @memcpy(vec_copy[0..n], res.body[i .. i + n]);
+                    try w.writeVecAll(vec_copy[0..n]);
+                    i += n;
+                }
+            }
         }
     } else if (Body == void) {
         try writeContentLength(w, 0);
@@ -272,6 +286,33 @@ test "write: HEAD omits body but keeps content-length" {
         "content-type: text/plain; charset=utf-8\r\n" ++
         "content-length: 5\r\n" ++
         "\r\n";
+    try std.testing.expectEqualStrings(expected, out[0..w.end]);
+}
+
+test "writeAny: segmented bodies accept const-backed segment tables" {
+    const const_parts = [_][]const u8{
+        "segment",
+        "-",
+        "body",
+        "\n",
+    };
+    const res: SegmentedRes = .{
+        .status = .ok,
+        .headers = &.{.{ .name = "content-type", .value = "text/plain; charset=utf-8" }},
+        .body = @constCast(const_parts[0..]),
+    };
+
+    var out: [256]u8 = undefined;
+    var w = std.Io.Writer.fixed(out[0..]);
+    try writeAny({}, {}, &w, res, true, true);
+
+    const expected =
+        "HTTP/1.1 200 OK\r\n" ++
+        "connection: keep-alive\r\n" ++
+        "content-type: text/plain; charset=utf-8\r\n" ++
+        "content-length: 13\r\n" ++
+        "\r\n" ++
+        "segment-body\n";
     try std.testing.expectEqualStrings(expected, out[0..w.end]);
 }
 

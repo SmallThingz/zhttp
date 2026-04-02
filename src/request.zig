@@ -73,8 +73,8 @@ fn trimCR(line: []u8) []u8 {
     return line;
 }
 
-fn middlewareNameString(comptime name: anytype) []const u8 {
-    return switch (@typeInfo(@TypeOf(name))) {
+fn middlewareContextFieldName(comptime Ctx: type, comptime name: anytype) []const u8 {
+    const wanted = switch (@typeInfo(@TypeOf(name))) {
         .enum_literal => @tagName(name),
         .pointer => |p| switch (p.size) {
             .slice => blk: {
@@ -96,10 +96,6 @@ fn middlewareNameString(comptime name: anytype) []const u8 {
         },
         else => @compileError("middleware name must be enum literal or string"),
     };
-}
-
-fn middlewareContextFieldName(comptime Ctx: type, comptime name: anytype) []const u8 {
-    const wanted = middlewareNameString(name);
     if (!@hasField(Ctx, wanted)) @compileError("unknown middleware name '" ++ wanted ++ "'");
     return wanted;
 }
@@ -205,23 +201,9 @@ fn containsTokenIgnoreCase(value: []const u8, comptime token: []const u8) bool {
     return false;
 }
 
-const ParsedHeader = enum {
-    other,
-    connection,
-    content_length,
-    transfer_encoding,
-};
-
-fn classifyParsedHeader(name: []const u8) ParsedHeader {
-    return switch (name.len) {
-        10 => if (util.asciiLower(name[0]) == 'c' and util.asciiEqlLower(name, "connection")) .connection else .other,
-        14 => if (util.asciiLower(name[0]) == 'c' and util.asciiEqlLower(name, "content-length")) .content_length else .other,
-        17 => if (util.asciiLower(name[0]) == 't' and util.asciiEqlLower(name, "transfer-encoding")) .transfer_encoding else .other,
-        else => .other,
-    };
-}
-
 fn routeParamNames(comptime pattern: []const u8) []const []const u8 {
+    // Extract `{name}` and `{*name}` params from the route pattern once at
+    // comptime so runtime request parsing can index a fixed typed tuple.
     if (pattern.len == 0 or pattern[0] != '/') @compileError("route pattern must start with '/'");
     if (std.mem.eql(u8, pattern, "/")) return &.{};
 
@@ -653,11 +635,11 @@ pub fn RequestPWithPatternExt(
                 const name = line[0..col];
                 const value = std.mem.trim(u8, line[col + 1 ..], " \t");
 
-                switch (classifyParsedHeader(name)) {
-                    .connection => {
+                switch (name.len) {
+                    10 => if (util.asciiLower(name[0]) == 'c' and util.asciiEqlLower(name, "connection")) {
                         if (containsTokenIgnoreCase(value, "close")) self._base.connection_close = true;
                     },
-                    .content_length => {
+                    14 => if (util.asciiLower(name[0]) == 'c' and util.asciiEqlLower(name, "content-length")) {
                         const parsed = std.fmt.parseInt(usize, value, 10) catch return error.BadRequest;
                         if (content_length) |prev| {
                             if (prev != parsed) return error.BadRequest;
@@ -665,10 +647,10 @@ pub fn RequestPWithPatternExt(
                             content_length = parsed;
                         }
                     },
-                    .transfer_encoding => {
+                    17 => if (util.asciiLower(name[0]) == 't' and util.asciiEqlLower(name, "transfer-encoding")) {
                         if (containsTokenIgnoreCase(value, "chunked")) has_chunked = true;
                     },
-                    .other => {},
+                    else => {},
                 }
 
                 if (HeaderLookup.count != 0) {
@@ -996,15 +978,6 @@ pub fn RequestPWithPatternExt(
 
 /// Build a synthetic route pattern for standalone request test types that only
 /// know their param names and not a full `RouteDecl`.
-fn syntheticPatternFromParamNames(comptime param_names: []const []const u8) []const u8 {
-    if (param_names.len == 0) return "/";
-    comptime var out: []const u8 = "";
-    inline for (param_names) |pn| {
-        out = out ++ "/{" ++ pn ++ "}";
-    }
-    return out;
-}
-
 /// Builds a standalone request type for tests/helpers without a full server.
 ///
 /// Expected shape:
@@ -1013,7 +986,14 @@ fn syntheticPatternFromParamNames(comptime param_names: []const []const u8) []co
 /// - `param_names` is the list of path param names to synthesize as `/{name}`.
 /// - `MwCtx` is the middleware context struct returned by `middleware.contextType(...)`.
 pub fn Request(comptime Headers: type, comptime Query: type, comptime param_names: []const []const u8, comptime MwCtx: type) type {
-    const route_pattern = syntheticPatternFromParamNames(param_names);
+    const route_pattern = comptime blk: {
+        if (param_names.len == 0) break :blk "/";
+        var out: []const u8 = "";
+        for (param_names) |pn| {
+            out = out ++ "/{" ++ pn ++ "}";
+        }
+        break :blk out;
+    };
     const rd: route_decl.RouteDecl = .{
         .method = "GET",
         .pattern = route_pattern,

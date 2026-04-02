@@ -36,30 +36,6 @@ fn validateStructTypeOpt(comptime field_name: []const u8, comptime maybe_t: ?typ
     }
 }
 
-fn validateEndpointInfo(comptime endpoint: type) EndpointInfo {
-    if (!@hasDecl(endpoint, "Info")) {
-        @compileError("route endpoint type must expose `pub const Info: router.EndpointInfo = .{ ... };`");
-    }
-    if (@TypeOf(endpoint.Info) != EndpointInfo) {
-        @compileError("route endpoint Info must be of type router.EndpointInfo");
-    }
-    const info: EndpointInfo = endpoint.Info;
-    validateStructTypeOpt("headers", info.headers);
-    validateStructTypeOpt("query", info.query);
-    validateStructTypeOpt("path", info.path);
-    return info;
-}
-
-fn endpointType(comptime endpoint: type) struct { endpoint: type, info: EndpointInfo } {
-    if (!@hasDecl(endpoint, "call")) {
-        @compileError("route endpoint type must expose `pub fn call(comptime rctx: ReqCtx, req: rctx.T()) !rctx.Response(Body)`");
-    }
-    return .{
-        .endpoint = endpoint,
-        .info = validateEndpointInfo(endpoint),
-    };
-}
-
 /// Declares one route entry.
 ///
 /// Expected `endpoint` shape:
@@ -73,16 +49,28 @@ pub fn route(
     /// Route endpoint type exposing `pub fn call(comptime rctx: ReqCtx, req: rctx.T()) !rctx.Response(Body)`.
     comptime endpoint: type,
 ) RouteDecl {
-    const ep = endpointType(endpoint);
+    if (!@hasDecl(endpoint, "call")) {
+        @compileError("route endpoint type must expose `pub fn call(comptime rctx: ReqCtx, req: rctx.T()) !rctx.Response(Body)`");
+    }
+    if (!@hasDecl(endpoint, "Info")) {
+        @compileError("route endpoint type must expose `pub const Info: router.EndpointInfo = .{ ... };`");
+    }
+    if (@TypeOf(endpoint.Info) != EndpointInfo) {
+        @compileError("route endpoint Info must be of type router.EndpointInfo");
+    }
+    const info: EndpointInfo = endpoint.Info;
+    validateStructTypeOpt("headers", info.headers);
+    validateStructTypeOpt("query", info.query);
+    validateStructTypeOpt("path", info.path);
     return .{
         .method = @tagName(method_lit),
         .pattern = pattern,
-        .endpoint = ep.endpoint,
-        .headers = ep.info.headers orelse struct {},
-        .query = ep.info.query orelse struct {},
-        .params = ep.info.path orelse struct {},
-        .middlewares = ep.info.middlewares,
-        .operations = ep.info.operations,
+        .endpoint = endpoint,
+        .headers = info.headers orelse struct {},
+        .query = info.query orelse struct {},
+        .params = info.path orelse struct {},
+        .middlewares = info.middlewares,
+        .operations = info.operations,
     };
 }
 

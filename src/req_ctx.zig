@@ -10,14 +10,6 @@ pub const ST = struct {
     T: type,
 };
 
-fn assertTupleWithReq(comptime ParamsT: type) usize {
-    const info = @typeInfo(ParamsT);
-    if (info != .@"struct" or !info.@"struct".is_tuple or info.@"struct".fields.len == 0) {
-        @compileError("ReqCtx.call params must be a non-empty tuple whose first item is req");
-    }
-    return info.@"struct".fields.len;
-}
-
 pub const ReqCtx = struct {
     const Self = @This();
 
@@ -276,7 +268,11 @@ pub const ReqCtx = struct {
     /// - first element is the active request wrapper (`self.T()`)
     /// - optional second element is the forwarded method argument.
     pub fn call(comptime self: Self, comptime ReturnT: type, comptime func_name: []const u8, params: anytype) ReturnT {
-        const params_len = comptime assertTupleWithReq(@TypeOf(params));
+        const params_info = @typeInfo(@TypeOf(params));
+        if (params_info != .@"struct" or !params_info.@"struct".is_tuple or params_info.@"struct".fields.len == 0) {
+            @compileError("ReqCtx.call params must be a non-empty tuple whose first item is req");
+        }
+        const params_len = params_info.@"struct".fields.len;
 
         const BaseReq = self._base_req_type;
         if (!@hasDecl(BaseReq, func_name)) {

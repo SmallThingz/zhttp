@@ -15,6 +15,8 @@ const parse = @import("parse.zig");
 const zws = @import("zwebsocket");
 
 fn setTcpNoDelay(stream: *const std.Io.net.Stream) void {
+    // Best-effort optimization for Linux sockets only. Ignore failures so
+    // transport setup behavior stays identical across platforms.
     if (builtin.os.tag != .linux) return;
     const linux = std.os.linux;
     var one: i32 = 1;
@@ -841,14 +843,6 @@ fn trimCR(line: []const u8) []const u8 {
     return line;
 }
 
-fn trimHeaderValue(s: []const u8) []const u8 {
-    var a: usize = 0;
-    var b: usize = s.len;
-    while (a < b and (s[a] == ' ' or s[a] == '\t')) a += 1;
-    while (b > a and (s[b - 1] == ' ' or s[b - 1] == '\t')) b -= 1;
-    return s[a..b];
-}
-
 fn performWebSocketHandshake(sr: *Io.Reader, sw: *Io.Writer, path: []const u8) !void {
     var req_buf: [1024]u8 = undefined;
     const req = try std.fmt.bufPrint(
@@ -877,7 +871,7 @@ fn performWebSocketHandshake(sr: *Io.Reader, sw: *Io.Writer, path: []const u8) !
 
         const colon = std.mem.indexOfScalar(u8, line, ':') orelse return error.BadHandshake;
         const name = line[0..colon];
-        const value = trimHeaderValue(line[colon + 1 ..]);
+        const value = std.mem.trim(u8, line[colon + 1 ..], " \t");
         if (std.ascii.eqlIgnoreCase(name, "sec-websocket-accept")) {
             const expected = try zws.Handshake.computeAcceptKey("dGhlIHNhbXBsZSBub25jZQ==");
             try std.testing.expectEqualStrings(expected[0..], value);
@@ -959,24 +953,6 @@ fn randomAscii(random: std.Random, buf: []u8) void {
     for (buf) |*b| b.* = 'a' + random.uintLessThan(u8, 26);
 }
 
-fn appendChunkedBody(buf: []u8, body: []const u8, random: std.Random) ![]const u8 {
-    var w = Io.Writer.fixed(buf);
-    var start: usize = 0;
-    while (start < body.len) {
-        const remaining = body.len - start;
-        const chunk_len = 1 + random.uintLessThan(usize, remaining);
-        var len_buf: [16]u8 = undefined;
-        const len_hex = try std.fmt.bufPrint(&len_buf, "{x}", .{chunk_len});
-        try w.writeAll(len_hex);
-        try w.writeAll("\r\n");
-        try w.writeAll(body[start .. start + chunk_len]);
-        try w.writeAll("\r\n");
-        start += chunk_len;
-    }
-    try w.writeAll("0\r\n\r\n");
-    return buf[0..w.end];
-}
-
 fn runSoakVarietyCase(
     io: Io,
     port: u16,
@@ -1019,7 +995,23 @@ fn runSoakVarietyCase(
             const len = random.uintLessThan(usize, body.len + 1);
             randomAscii(random, body[0..len]);
             var chunk_buf: [512]u8 = undefined;
-            const chunks = try appendChunkedBody(chunk_buf[0..], body[0..len], random);
+            const chunks = blk: {
+                var w = Io.Writer.fixed(chunk_buf[0..]);
+                var start: usize = 0;
+                while (start < len) {
+                    const remaining = len - start;
+                    const chunk_len = 1 + random.uintLessThan(usize, remaining);
+                    var len_buf: [16]u8 = undefined;
+                    const len_hex = try std.fmt.bufPrint(&len_buf, "{x}", .{chunk_len});
+                    try w.writeAll(len_hex);
+                    try w.writeAll("\r\n");
+                    try w.writeAll(body[start .. start + chunk_len]);
+                    try w.writeAll("\r\n");
+                    start += chunk_len;
+                }
+                try w.writeAll("0\r\n\r\n");
+                break :blk chunk_buf[0..w.end];
+            };
 
             var req_buf: [768]u8 = undefined;
             const req = try std.fmt.bufPrint(

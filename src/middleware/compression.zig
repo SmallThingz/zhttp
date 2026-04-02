@@ -31,21 +31,6 @@ const NegotiatedSchemes = struct {
     len: usize = 0,
 };
 
-fn qValue(params: []const u8) f32 {
-    var it = std.mem.splitScalar(u8, params, ';');
-    while (it.next()) |raw| {
-        const part = std.mem.trim(u8, raw, " \t");
-        if (part.len < 2) continue;
-        const eq = std.mem.indexOfScalar(u8, part, '=') orelse continue;
-        const k = std.mem.trim(u8, part[0..eq], " \t");
-        if (!core_util.asciiEqlLower(k, "q")) continue;
-        const v = std.mem.trim(u8, part[eq + 1 ..], " \t");
-        const q = std.fmt.parseFloat(f32, v) catch return 0.0;
-        return std.math.clamp(q, 0.0, 1.0);
-    }
-    return 1.0;
-}
-
 fn schemeQuality(
     scheme: CompressionScheme,
     br_q: ?f32,
@@ -62,13 +47,6 @@ fn schemeQuality(
     };
 }
 
-fn containsScheme(schemes: []const CompressionScheme, scheme: CompressionScheme) bool {
-    for (schemes) |s| {
-        if (s == scheme) return true;
-    }
-    return false;
-}
-
 fn negotiateEncodings(header_value: []const u8, allowed: []const CompressionScheme) NegotiatedSchemes {
     var br_q: ?f32 = null;
     var zstd_q: ?f32 = null;
@@ -82,7 +60,22 @@ fn negotiateEncodings(header_value: []const u8, allowed: []const CompressionSche
         if (part.len == 0) continue;
         const semi = std.mem.indexOfScalar(u8, part, ';') orelse part.len;
         const token = std.mem.trim(u8, part[0..semi], " \t");
-        const q = if (semi == part.len) 1.0 else qValue(part[semi + 1 ..]);
+        const q = if (semi == part.len) 1.0 else blk: {
+            // `Accept-Encoding` parameters are tiny, so a simple split/parse
+            // loop keeps negotiation logic obvious without affecting the hot path.
+            var params = std.mem.splitScalar(u8, part[semi + 1 ..], ';');
+            while (params.next()) |raw_param| {
+                const param = std.mem.trim(u8, raw_param, " \t");
+                if (param.len < 2) continue;
+                const eq = std.mem.indexOfScalar(u8, param, '=') orelse continue;
+                const key = std.mem.trim(u8, param[0..eq], " \t");
+                if (!core_util.asciiEqlLower(key, "q")) continue;
+                const value = std.mem.trim(u8, param[eq + 1 ..], " \t");
+                const parsed = std.fmt.parseFloat(f32, value) catch break :blk 0.0;
+                break :blk std.math.clamp(parsed, 0.0, 1.0);
+            }
+            break :blk 1.0;
+        };
 
         if (core_util.asciiEqlLower(token, "br")) {
             br_q = q;
@@ -99,12 +92,21 @@ fn negotiateEncodings(header_value: []const u8, allowed: []const CompressionSche
 
     var out: NegotiatedSchemes = .{};
     for (allowed) |scheme| {
-        if (containsScheme(out.items[0..out.len], scheme)) continue;
+        var seen = false;
+        for (out.items[0..out.len]) |existing| {
+            if (existing == scheme) {
+                seen = true;
+                break;
+            }
+        }
+        if (seen) continue;
 
         const q = schemeQuality(scheme, br_q, zstd_q, gzip_q, deflate_q, star_q);
         if (q <= 0.0) continue;
 
         var i = out.len;
+        // Keep the negotiated list sorted by descending quality while
+        // preserving the caller-supplied whitelist order for equal q-values.
         while (i > 0) : (i -= 1) {
             const prev = out.items[i - 1];
             const prev_q = schemeQuality(prev, br_q, zstd_q, gzip_q, deflate_q, star_q);

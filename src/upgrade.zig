@@ -114,6 +114,8 @@ fn trimSpaces(s: []const u8) []const u8 {
     return std.mem.trim(u8, s, " \t");
 }
 
+/// Returns true when a comma-separated token list contains `wanted`
+/// using ASCII case-insensitive matching.
 fn containsTokenIgnoreCase(value: []const u8, wanted: []const u8) bool {
     var it = std.mem.splitScalar(u8, value, ',');
     while (it.next()) |part| {
@@ -122,6 +124,8 @@ fn containsTokenIgnoreCase(value: []const u8, wanted: []const u8) bool {
     return false;
 }
 
+/// Returns true when a comma-separated token list contains `wanted`
+/// with exact byte matching.
 fn containsToken(value: []const u8, wanted: []const u8) bool {
     var it = std.mem.splitScalar(u8, value, ',');
     while (it.next()) |part| {
@@ -157,6 +161,8 @@ fn negotiatePerMessageDeflate(header_value: ?[]const u8) WebSocketHandshakeError
     var offers = zws.Extensions.parsePerMessageDeflate(offered);
     var negotiated: ?zws.Extensions.PerMessageDeflate = null;
     var best_score: usize = 0;
+    // Multiple permessage-deflate offers are legal. Keep the best supported
+    // alternative instead of requiring a single canonical ordering.
     while (offers.next() catch return error.ExtensionsNotSupported) |requested| {
         const candidate = negotiatedPerMessageDeflateForOffer(requested, preferred);
         const score = perMessageDeflateOfferScore(requested, preferred);
@@ -278,42 +284,12 @@ pub fn websocketResponseFromAccepted(
     allocator: std.mem.Allocator,
     accepted: WebSocketHandshakeResponse,
 ) !Res {
-    var header_count: usize = 3 + accepted.extra_headers.len;
-    if (accepted.selected_subprotocol != null) header_count += 1;
-    if (accepted.selected_extensions != null) header_count += 1;
-
     const accept = try allocator.dupe(u8, accepted.accept_key[0..]);
-    errdefer allocator.free(accept);
-
-    const headers = try allocator.alloc(Header, header_count);
-    errdefer allocator.free(headers);
-
-    var n: usize = 0;
-    headers[n] = .{ .name = "connection", .value = "Upgrade" };
-    n += 1;
-    headers[n] = .{ .name = "upgrade", .value = "websocket" };
-    n += 1;
-    headers[n] = .{ .name = "sec-websocket-accept", .value = accept };
-    n += 1;
-
-    if (accepted.selected_subprotocol) |subprotocol| {
-        headers[n] = .{ .name = "sec-websocket-protocol", .value = subprotocol };
-        n += 1;
-    }
-    if (accepted.selected_extensions) |extensions| {
-        headers[n] = .{ .name = "sec-websocket-extensions", .value = extensions };
-        n += 1;
-    }
-    for (accepted.extra_headers) |h| {
-        headers[n] = .{ .name = h.name, .value = h.value };
-        n += 1;
-    }
-
-    return .{
-        .status = .switching_protocols,
-        .headers = headers[0..n],
-        .body = "",
-    };
+    return websocketResponseFromOwnedAccept(allocator, accept, .{
+        .subprotocol = accepted.selected_subprotocol,
+        .extensions = accepted.selected_extensions,
+        .extra_headers = accepted.extra_headers,
+    });
 }
 
 /// Validates a websocket handshake and returns the corresponding `101` response.

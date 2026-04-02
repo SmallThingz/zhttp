@@ -14,14 +14,9 @@ const util = @import("util.zig");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 
-fn normalizeMount(comptime m: []const u8) []const u8 {
-    if (m.len == 0 or m[0] != '/') @compileError("Static.mount must start with '/'");
-    if (m.len == 1) return "/";
-    if (m[m.len - 1] == '/') return m[0 .. m.len - 1];
-    return m;
-}
-
 fn isSafeRelative(path: []const u8) bool {
+    // Only serve clean relative paths so mount traversal cannot escape the
+    // configured directory root on any supported platform.
     if (path.len == 0) return false;
     if (path[0] == '/') return false;
     var it = std.mem.splitScalar(u8, path, '/');
@@ -197,7 +192,13 @@ pub fn Static(comptime opts: StaticOptions) type {
     const dir_path: []const u8 = opts.dir;
     if (dir_path.len == 0) @compileError("Static.dir must be non-empty");
 
-    const mount = normalizeMount(opts.mount);
+    const mount = comptime blk: {
+        const m = opts.mount;
+        if (m.len == 0 or m[0] != '/') @compileError("Static.mount must start with '/'");
+        if (m.len == 1) break :blk "/";
+        if (m[m.len - 1] == '/') break :blk m[0 .. m.len - 1];
+        break :blk m;
+    };
     const glob_param_name_opt = opts.glob_param_name;
     const info_name = if (opts.name) |n| n else "static";
     const cache_control: ?[]const u8 = opts.cache_control;

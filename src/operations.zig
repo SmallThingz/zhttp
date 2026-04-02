@@ -52,31 +52,25 @@ fn validateOperationType(comptime Op: type) void {
     }
 }
 
-/// Ask an operation how many routes it may inject so the temporary router can
-/// reserve enough comptime storage up front.
-fn opAddedBudget(comptime Op: type, comptime base_route_count: usize) usize {
-    if (@hasDecl(Op, "maxAddedRoutes")) {
-        const fn_t = @TypeOf(Op.maxAddedRoutes);
-        const info = @typeInfo(fn_t);
-        if (info != .@"fn" or info.@"fn".params.len != 1) {
-            @compileError("operation type " ++ @typeName(Op) ++ " maxAddedRoutes must be fn(comptime base_route_count: usize) usize");
-        }
-        const out = @call(.auto, Op.maxAddedRoutes, .{base_route_count});
-        if (@TypeOf(out) != usize) {
-            @compileError("operation type " ++ @typeName(Op) ++ " maxAddedRoutes must return usize");
-        }
-        return out;
-    }
-    if (@hasDecl(Op, "MaxAddedRoutes")) {
-        @compileError("operation type " ++ @typeName(Op) ++ " uses legacy `MaxAddedRoutes`; rename it to `maxAddedRoutes(comptime base_route_count: usize) usize`");
-    }
-    return 0;
-}
-
 fn totalAddedBudget(comptime ops: []const type, comptime base_route_count: usize) usize {
     comptime var total: usize = 0;
     inline for (ops) |Op| {
-        total += opAddedBudget(Op, base_route_count);
+        if (@hasDecl(Op, "maxAddedRoutes")) {
+            const fn_t = @TypeOf(Op.maxAddedRoutes);
+            const info = @typeInfo(fn_t);
+            if (info != .@"fn" or info.@"fn".params.len != 1) {
+                @compileError("operation type " ++ @typeName(Op) ++ " maxAddedRoutes must be fn(comptime base_route_count: usize) usize");
+            }
+            const out = @call(.auto, Op.maxAddedRoutes, .{base_route_count});
+            if (@TypeOf(out) != usize) {
+                @compileError("operation type " ++ @typeName(Op) ++ " maxAddedRoutes must return usize");
+            }
+            total += out;
+            continue;
+        }
+        if (@hasDecl(Op, "MaxAddedRoutes")) {
+            @compileError("operation type " ++ @typeName(Op) ++ " uses legacy `MaxAddedRoutes`; rename it to `maxAddedRoutes(comptime base_route_count: usize) usize`");
+        }
     }
     return total;
 }
@@ -441,12 +435,20 @@ fn finalLen(
     return router.count();
 }
 
-fn applyWithLen(
-    comptime out_len: usize,
+/// Runs registered route operations and returns the final route tuple.
+///
+/// Expected shapes:
+/// - `routes_tuple`: tuple of `zhttp.router.RouteDecl` values.
+/// - `global_middlewares_tuple`: accepted by `middleware.typeList`.
+/// - `operations_tuple`: tuple of operation types exposing:
+///   `pub fn operation(comptime opctx: zhttp.operations.OperationCtx, router: opctx.T()) void`
+///   optional `pub fn maxAddedRoutes(comptime base_route_count: usize) usize`.
+pub fn apply(
     comptime routes_tuple: anytype,
     comptime global_middlewares_tuple: anytype,
     comptime operations_tuple: anytype,
-) routeTupleType(out_len) {
+) routeTupleType(finalLen(routes_tuple, global_middlewares_tuple, operations_tuple)) {
+    const out_len = comptime finalLen(routes_tuple, global_middlewares_tuple, operations_tuple);
     const ops = validateOperationsTuple(operations_tuple);
     const global_mws = middleware.typeList(global_middlewares_tuple);
     const base_count = util.tupleLen(routes_tuple);
@@ -462,24 +464,7 @@ fn applyWithLen(
         };
         @call(.auto, Op.operation, .{ opctx, &router });
     }
-    return router.toTuple(out_len);
-}
-
-/// Runs registered route operations and returns the final route tuple.
-///
-/// Expected shapes:
-/// - `routes_tuple`: tuple of `zhttp.router.RouteDecl` values.
-/// - `global_middlewares_tuple`: accepted by `middleware.typeList`.
-/// - `operations_tuple`: tuple of operation types exposing:
-///   `pub fn operation(comptime opctx: zhttp.operations.OperationCtx, router: opctx.T()) void`
-///   optional `pub fn maxAddedRoutes(comptime base_route_count: usize) usize`.
-pub fn apply(
-    comptime routes_tuple: anytype,
-    comptime global_middlewares_tuple: anytype,
-    comptime operations_tuple: anytype,
-) routeTupleType(finalLen(routes_tuple, global_middlewares_tuple, operations_tuple)) {
-    const out_len = comptime finalLen(routes_tuple, global_middlewares_tuple, operations_tuple);
-    return comptime applyWithLen(out_len, routes_tuple, global_middlewares_tuple, operations_tuple);
+    return comptime router.toTuple(out_len);
 }
 
 /// Built-in operation that synthesizes CORS preflight `OPTIONS` routes.

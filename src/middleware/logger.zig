@@ -30,15 +30,6 @@ fn testLog(method: []const u8, path: []const u8, status: u16, _: Io.Duration) vo
 
 fn discardLog(_: []const u8, _: []const u8, _: u16, _: Io.Duration) void {}
 
-fn defaultLog(method: []const u8, path: []const u8, status: u16, elapsed: Io.Duration) void {
-    std.debug.print("{s} {s} {d} {d}ms\n", .{
-        method,
-        path,
-        status,
-        elapsed.toMilliseconds(),
-    });
-}
-
 /// Configuration for `Logger`.
 pub const LoggerOptions = struct {
     /// Optional middleware context field name used to store timing/status data.
@@ -100,7 +91,12 @@ pub fn Logger(comptime opts: LoggerOptions) type {
             if (log_fn) |f| {
                 @call(.auto, f, .{ req.method, req.path, @intFromEnum(res.status), elapsed });
             } else {
-                defaultLog(req.method, req.path, @intFromEnum(res.status), elapsed);
+                std.debug.print("{s} {s} {d} {d}ms\n", .{
+                    req.method,
+                    req.path,
+                    @intFromEnum(res.status),
+                    elapsed.toMilliseconds(),
+                });
             }
             return res;
         }

@@ -9,6 +9,8 @@ pub const CaptureError = error{
 };
 
 fn ParserValueType(comptime P: type) type {
+    // Parser field wrappers expose `get`; use its return type as the public
+    // parsed value type for typed captures.
     if (!@hasDecl(P, "get")) @compileError(@typeName(P) ++ " missing `get`");
     const fn_info = @typeInfo(@TypeOf(P.get));
     if (fn_info != .@"fn") @compileError(@typeName(P) ++ ".get is not a function");
@@ -92,15 +94,6 @@ fn fnv1a64HeaderKey(bytes: []const u8) u64 {
         h *%= 0x100000001b3;
     }
     return h;
-}
-
-fn asciiEqHeaderKeyIgnoreCase(input: []const u8, field_name: []const u8) bool {
-    if (input.len != field_name.len) return false;
-    for (input, field_name) |ic, fc0| {
-        const fc: u8 = if (fc0 == '_') '-' else fc0;
-        if (util.asciiLower(ic) != util.asciiLower(fc)) return false;
-    }
-    return true;
 }
 
 fn headerFieldNamesClash(a: []const u8, b: []const u8) bool {
@@ -200,7 +193,14 @@ pub fn Lookup(comptime T: type, comptime kind: LookupKind) type {
                 if (hash_list[idx] == h) {
                     const k = key_list[idx];
                     const ok = switch (kind) {
-                        .header => asciiEqHeaderKeyIgnoreCase(name, k),
+                        .header => blk: {
+                            if (name.len != k.len) break :blk false;
+                            for (name, k) |ic, fc0| {
+                                const fc: u8 = if (fc0 == '_') '-' else fc0;
+                                if (util.asciiLower(ic) != util.asciiLower(fc)) break :blk false;
+                            }
+                            break :blk true;
+                        },
                         .query => std.mem.eql(u8, name, k),
                     };
                     if (ok) return idx;

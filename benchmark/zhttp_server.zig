@@ -32,6 +32,7 @@ fn usage() void {
 /// Starts this executable.
 pub fn main(init: std.process.Init) !void {
     var port: u16 = 8081;
+    const permanent_workers = @max(std.Thread.getCpuCount() catch 1, 16);
 
     var it = try std.process.Args.Iterator.initAllocator(init.minimal.args, init.gpa);
     defer it.deinit();
@@ -69,5 +70,11 @@ pub fn main(init: std.process.Init) !void {
     });
 
     const addr: std.Io.net.IpAddress = .{ .ip4 = std.Io.net.Ip4Address.loopback(port) };
-    try SrvT.run(.{ .gpa = init.gpa, .io = init.io, .address = addr, .ctx = {} });
+    try SrvT.run(.{
+        .gpa = init.gpa,
+        .io = init.io,
+        .address = addr,
+        .ctx = {},
+        .permanent_workers = permanent_workers,
+    });
 }

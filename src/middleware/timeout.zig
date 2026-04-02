@@ -26,6 +26,12 @@ pub const TimeoutOptions = struct {
 /// Enforces a wall-clock request timeout around downstream middleware/handler execution.
 ///
 /// Returns `504 timeout` when execution time exceeds the configured limit.
+///
+/// This is a cooperative timeout: once the timer fires, downstream execution
+/// receives an `error.Canceled` request at its next `std.Io` cancelation
+/// point. The timeout middleware waits for downstream cleanup before
+/// returning, and closes the connection on timeout to avoid reusing a request
+/// whose downstream path was interrupted mid-flight.
 pub fn Timeout(comptime opts: TimeoutOptions) type {
     const clock: Io.Clock = opts.clock;
     const timeout: Io.Duration = if (opts.duration) |d|
@@ -66,24 +72,72 @@ pub fn Timeout(comptime opts: TimeoutOptions) type {
                 d.timeout = timeout;
             }
 
-            const res = try rctx.next(req);
-            const elapsed = start.untilNow(req.io(), clock);
+            const NextResult = @TypeOf(rctx.next(req));
+            const Outcome = union(enum) {
+                next: NextResult,
+                timeout: Io.Cancelable!void,
+            };
+            const Worker = struct {
+                fn runNext(child_req: @TypeOf(req)) @TypeOf(rctx.next(child_req)) {
+                    return rctx.next(child_req);
+                }
 
-            if (store) {
-                const d = req.middlewareData(Common.info_name);
-                d.elapsed = elapsed;
-                d.timed_out = elapsed.nanoseconds > timeout.nanoseconds;
-            }
+                fn runTimeout(io: Io) Io.Cancelable!void {
+                    try Io.sleep(io, timeout, clock);
+                }
+            };
 
-            if (elapsed.nanoseconds > timeout.nanoseconds) {
-                return Res.text(504, "timeout");
+            var outcomes: [2]Outcome = undefined;
+            var select = Io.Select(Outcome).init(req.io(), outcomes[0..]);
+            try select.concurrent(.next, Worker.runNext, .{req});
+            errdefer select.cancelDiscard();
+            try select.concurrent(.timeout, Worker.runTimeout, .{req.io()});
+
+            switch (try select.await()) {
+                .next => |next_result| {
+                    select.cancelDiscard();
+                    const res = try next_result;
+                    const elapsed = start.untilNow(req.io(), clock);
+
+                    if (store) {
+                        const d = req.middlewareData(Common.info_name);
+                        d.elapsed = elapsed;
+                        d.timed_out = false;
+                    }
+
+                    return res;
+                },
+                .timeout => |timeout_result| {
+                    try timeout_result;
+
+                    while (select.cancel()) |pending| {
+                        switch (pending) {
+                            .next => |next_result| {
+                                _ = next_result catch {};
+                            },
+                            .timeout => |other_timeout| {
+                                _ = other_timeout catch {};
+                            },
+                        }
+                    }
+
+                    const elapsed = start.untilNow(req.io(), clock);
+                    if (store) {
+                        const d = req.middlewareData(Common.info_name);
+                        d.elapsed = elapsed;
+                        d.timed_out = true;
+                    }
+
+                    var res = Res.text(504, "timeout");
+                    res.close = true;
+                    return res;
+                },
             }
-            return res;
         }
     };
 }
 
-test "timeout: immediate timeout" {
+test "timeout: immediate timeout cancels downstream" {
     const Mw = Timeout(.{ .duration = std.Io.Duration.fromNanoseconds(-1) });
     const MwCtx = struct {};
     const ReqT = @import("../request.zig").Request(struct {}, struct {}, &.{}, MwCtx);
@@ -91,8 +145,9 @@ test "timeout: immediate timeout" {
     const Next = struct {
         /// Test helper next-handler implementation.
         pub const function = call;
-        pub fn call(comptime rctx: ReqCtx, _: rctx.T()) !Res {
-            return Res.text(200, "ok");
+        pub fn call(comptime rctx: ReqCtx, req: rctx.T()) !Res {
+            try Io.sleep(req.io(), std.Io.Duration.fromMilliseconds(10), .awake);
+            return Res.text(200, "late");
         }
     };
 
@@ -152,4 +207,46 @@ test "timeout: named context stores deadline, timeout, and elapsed without timin
     try std.testing.expect(data.deadline.nanoseconds >= data.timeout.nanoseconds);
     try std.testing.expect(data.elapsed.nanoseconds >= 0);
     try std.testing.expect(!data.timed_out);
+}
+
+test "timeout: cooperatively cancels slow downstream io work" {
+    const Mw = Timeout(.{
+        .duration = std.Io.Duration.fromMilliseconds(1),
+    });
+    const MwCtx = struct {};
+    const ReqT = @import("../request.zig").Request(struct {}, struct {}, &.{}, MwCtx);
+
+    const Next = struct {
+        pub const function = call;
+        var saw_canceled: bool = false;
+
+        pub fn call(comptime rctx: ReqCtx, req: rctx.T()) !Res {
+            saw_canceled = false;
+            Io.sleep(req.io(), std.Io.Duration.fromMilliseconds(50), .awake) catch |err| switch (err) {
+                error.Canceled => {
+                    saw_canceled = true;
+                    return err;
+                },
+            };
+            return Res.text(200, "late");
+        }
+    };
+
+    const gpa = std.testing.allocator;
+    const path_buf = "/".*;
+    const query_buf: [0]u8 = .{};
+    const line: @import("../request.zig").RequestLine = .{
+        .method = "GET",
+        .version = .http11,
+        .path = @constCast(path_buf[0..]),
+        .query = @constCast(query_buf[0..]),
+    };
+    const mw_ctx: MwCtx = .{};
+    var reqv = ReqT.init(gpa, std.testing.io, line, mw_ctx);
+    defer reqv.deinit(gpa);
+
+    const res = try test_helpers.runMiddlewareTest(Mw, ReqT, Next, &reqv, line.method);
+    try std.testing.expectEqual(@as(u16, 504), @intFromEnum(res.status));
+    try std.testing.expect(res.close);
+    try std.testing.expect(Next.saw_canceled);
 }

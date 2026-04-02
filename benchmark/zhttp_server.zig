@@ -2,57 +2,18 @@ const std = @import("std");
 const zhttp = @import("zhttp");
 const scripts = @import("scripts.zig");
 
-const PlaintextResponse = struct {
-    const keep_alive_body =
-        "HTTP/1.1 200 OK\r\n" ++
-        "Server: F\r\n" ++
-        "Content-Type: text/plain\r\n" ++
-        "Content-Length: 13\r\n" ++
-        "Connection: keep-alive\r\n" ++
-        "Date: Wed, 24 Feb 2021 12:00:00 GMT\r\n" ++
-        "\r\n" ++
-        "Hello, World!";
-    const keep_alive_head =
-        "HTTP/1.1 200 OK\r\n" ++
-        "Server: F\r\n" ++
-        "Content-Type: text/plain\r\n" ++
-        "Content-Length: 13\r\n" ++
-        "Connection: keep-alive\r\n" ++
-        "Date: Wed, 24 Feb 2021 12:00:00 GMT\r\n" ++
-        "\r\n";
-    const close_body =
-        "HTTP/1.1 200 OK\r\n" ++
-        "Server: F\r\n" ++
-        "Content-Type: text/plain\r\n" ++
-        "Content-Length: 13\r\n" ++
-        "Connection: close\r\n" ++
-        "Date: Wed, 24 Feb 2021 12:00:00 GMT\r\n" ++
-        "\r\n" ++
-        "Hello, World!";
-    const close_head =
-        "HTTP/1.1 200 OK\r\n" ++
-        "Server: F\r\n" ++
-        "Content-Type: text/plain\r\n" ++
-        "Content-Length: 13\r\n" ++
-        "Connection: close\r\n" ++
-        "Date: Wed, 24 Feb 2021 12:00:00 GMT\r\n" ++
-        "\r\n";
-
-    pub fn write(_: @This(), w: *std.Io.Writer, keep_alive: bool, send_body: bool) !void {
-        try w.writeAll(if (keep_alive)
-            if (send_body) keep_alive_body else keep_alive_head
-        else if (send_body)
-            close_body
-        else
-            close_head);
-    }
-};
-
 const Plaintext = struct {
     pub const Info: zhttp.router.EndpointInfo = .{};
-    pub fn call(comptime _: zhttp.ReqCtx, req: anytype) !PlaintextResponse {
+    pub fn call(comptime _: zhttp.ReqCtx, req: anytype) !zhttp.response.Res {
         _ = req;
-        return .{};
+        return .{
+            .headers = &.{
+                .{ .name = "server", .value = "F" },
+                .{ .name = "content-type", .value = "text/plain" },
+                .{ .name = "date", .value = "Wed, 24 Feb 2021 12:00:00 GMT" },
+            },
+            .body = "Hello, World!",
+        };
     }
 };
 
@@ -71,8 +32,6 @@ pub fn main(init: std.process.Init) !void {
     var port: u16 = 8081;
     var reuse = true;
     const cpu_count = std.Thread.getCpuCount() catch 1;
-    const keep_alive_workers = @max(cpu_count, 16);
-    const reconnect_workers = cpu_count;
 
     var it = try std.process.Args.Iterator.initAllocator(init.minimal.args, init.gpa);
     defer it.deinit();
@@ -121,6 +80,6 @@ pub fn main(init: std.process.Init) !void {
         .io = init.io,
         .address = addr,
         .ctx = {},
-        .permanent_workers = if (reuse) keep_alive_workers else reconnect_workers,
+        .permanent_workers = cpu_count,
     });
 }
